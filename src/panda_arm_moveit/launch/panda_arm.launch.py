@@ -13,6 +13,10 @@ def generate_launch_description():
         pkg_share, "config", "panda.urdf.xacro"
     ])
 
+    rviz_config = PathJoinSubstitution([
+        pkg_share, "config", "panda.rviz"
+    ])
+
     robot_description = {
         "robot_description": ParameterValue(
             Command([FindExecutable(name="xacro"), " ", xacro_file]),
@@ -38,6 +42,7 @@ def generate_launch_description():
             package="rviz2",
             executable="rviz2",
             name="rviz2",
+            arguments=["-d", rviz_config],
             output="screen",
         ),
     ])
