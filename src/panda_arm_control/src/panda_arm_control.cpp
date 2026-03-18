@@ -23,6 +23,8 @@ int main(int argc, char* argv[])
 		const std::string planning_group = "panda_arm";
 		moveit::planning_interface::MoveGroupInterface move_group(node, planning_group);
 
+		std::vector<double> initial_joints = move_group.getCurrentJointValues();
+
 		move_group.setStartStateToCurrentState();
 		move_group.setPlanningTime(100.0);
 		move_group.setNumPlanningAttempts(50);
@@ -99,8 +101,24 @@ int main(int argc, char* argv[])
 				return 1;
 		}
 
-		RCLCPP_INFO(logger, "Execution finished. Holding final pose for 10 seconds...");
-		rclcpp::sleep_for(std::chrono::seconds(10));
+		RCLCPP_INFO(logger, "Execution finished. Holding final pose for 5 seconds...");
+		rclcpp::sleep_for(std::chrono::seconds(5));
+
+		RCLCPP_INFO(logger, "Goint back to initial state...");
+		move_group.setStartStateToCurrentState();
+		move_group.setJointValueTarget(initial_joints);
+		moveit::planning_interface::MoveGroupInterface::Plan return_plan;
+		bool return_ok = static_cast<bool>(move_group.plan(return_plan));
+		if(return_ok)
+		{
+				move_group.execute(return_plan);
+		}
+		else
+		{
+				RCLCPP_ERROR(logger, "Return failed");
+				return 1;
+		}
+
 
 		rclcpp::shutdown();
 		spinner.join();
