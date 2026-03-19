@@ -100,8 +100,8 @@ def generate_launch_description():
     )
     
     return LaunchDescription([
-        static_transform_publisher,
         robot_state_publisher,
+        static_transform_publisher,
         ros2_control_node,
         arm_controller_spawner,
         joint_state_broadcaster_spawner,

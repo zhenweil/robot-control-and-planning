@@ -4,11 +4,42 @@
 #include <chrono>
 
 #include <rclcpp/rclcpp.hpp>
+#include <shape_msgs/msg/mesh.hpp>
+#include <geometric_shapes/shapes.h>
+#include <geometric_shapes/shape_operations.h>
+#include <moveit_msgs/msg/collision_object.hpp>
 #include <moveit/move_group_interface/move_group_interface.h>
+#include <moveit/planning_scene_interface/planning_scene_interface.h>
 
 int main(int argc, char* argv[])
 {
 		rclcpp::init(argc, argv);
+
+		std::string object_mesh_path = "package://panda_arm_control/meshes/bunny_holding_eggs.stl";
+		Eigen::Vector3d scale(0.01, 0.01, 0.01);
+		shapes::Mesh* m = shapes::createMeshFromResource(object_mesh_path, scale);
+		std::cout << "loaded object mesh." << std::endl;
+
+		shape_msgs::msg::Mesh mesh_msg;
+		shapes::ShapeMsg mesh_tmp;
+		shapes::constructMsgFromShape(m, mesh_tmp);
+		mesh_msg = boost::get<shape_msgs::msg::Mesh>(mesh_tmp);	
+
+		geometry_msgs::msg::Pose mesh_pose;
+		mesh_pose.orientation.w = 1.0;
+		mesh_pose.position.x = 0.3;
+		mesh_pose.position.y = 0.1;
+		mesh_pose.position.z = 0.7;
+		
+		moveit_msgs::msg::CollisionObject obj;
+		obj.header.frame_id = "world";
+		obj.id = "bunny_holding_eggs";
+		obj.meshes.push_back(mesh_msg);
+		obj.mesh_poses.push_back(mesh_pose);
+		obj.operation = obj.ADD;
+
+		moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
+		planning_scene_interface.applyCollisionObject(obj);
 
 		auto node = std::make_shared<rclcpp::Node>(
 						"panda_arm_control",

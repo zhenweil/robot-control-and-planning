@@ -10,12 +10,24 @@ find_package(ament_cmake REQUIRED)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
+find_package(moveit_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(shape_msgs REQUIRED)
+find_package(geometric_shapes REQUIRED)
 
 add_executable(panda_arm_control src/panda_arm_control.cpp)
 
 ament_target_dependencies(panda_arm_control
 	rclcpp
 	moveit_ros_planning_interface
+	moveit_msgs
+	geometry_msgs
+	shape_msgs
+	geometric_shapes
+	)
+
+install (DIRECTORY meshes
+		DESTINATION share/${PROJECT_NAME}
 	)
 
 install(TARGETS panda_arm_control
