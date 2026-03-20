@@ -29,7 +29,7 @@ int main(int argc, char* argv[])
 		mesh_pose.orientation.w = 1.0;
 		mesh_pose.position.x = 0.3;
 		mesh_pose.position.y = 0.1;
-		mesh_pose.position.z = 0.7;
+		mesh_pose.position.z = 0.65;
 		
 		moveit_msgs::msg::CollisionObject obj;
 		obj.header.frame_id = "world";
@@ -61,8 +61,8 @@ int main(int argc, char* argv[])
 		move_group.setNumPlanningAttempts(50);
 
 		// Make it obviously slow
-		move_group.setMaxVelocityScalingFactor(0.05);
-		move_group.setMaxAccelerationScalingFactor(0.05);
+		move_group.setMaxVelocityScalingFactor(0.2);
+		move_group.setMaxAccelerationScalingFactor(0.1);
 
 		// Wait for state updates to settle
 		rclcpp::sleep_for(std::chrono::seconds(2));
@@ -96,17 +96,18 @@ int main(int argc, char* argv[])
 				RCLCPP_INFO(logger, "  joint[%zu] = %.3f", i, joint_values[i]);
 		}
 
-		// Pick a clearly different target
-		std::vector<double> joint_goal = joint_values;
-		joint_goal[0] = 0.0;
-		joint_goal[1] = -0.8;
-		joint_goal[2] = 0.0;
-		joint_goal[3] = -2.0;
-		joint_goal[4] = 0.0;
-		joint_goal[5] = 1.6;
-		joint_goal[6] = 0.8;
+		//move_group.setJointValueTarget(joint_goal);
+		geometry_msgs::msg::Pose target_pose;
+		target_pose.position.x = 0.4;
+		target_pose.position.y = 0.0;
+		target_pose.position.z = 0.9;
 
-		move_group.setJointValueTarget(joint_goal);
+		target_pose.orientation.x = 0.0;
+		target_pose.orientation.y = 0.0;
+		target_pose.orientation.z = 0.0;
+		target_pose.orientation.w = 1.0;
+		
+		move_group.setPoseTarget(target_pose);
 
 		moveit::planning_interface::MoveGroupInterface::Plan plan;
 		bool success = static_cast<bool>(move_group.plan(plan));
