@@ -33,15 +33,23 @@ class WaypointFollower : public rclcpp::Node
 				10,
 				std::bind(&WaypointFollower::waypointCallback, this, std::placeholders::_1));
 			
-			std::vector<double> initial_joints = this->move_group->getCurrentJointValues();
 			RCLCPP_INFO(this->get_logger(), "Subscriber created");
 		}
 	private:
-		std::vector<double> initial_joints;
+		std::vector<double> initial_joints = {0.0, 0.8862750036938374, 1.239396656735072, 0.0, 0.39818127891729277, 2.1916917216258462, 0.44473827755952144, 1.0247297228858394, 0.5068586069614855};
+
 		std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group;
 		rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr sub;
 		void waypointCallback(const geometry_msgs::msg::PoseArray::SharedPtr msg)
 		{
+			this->move_group->setStartStateToCurrentState();
+			this->move_group->setJointValueTarget(this->initial_joints);
+			moveit::planning_interface::MoveGroupInterface::Plan start_pose_plan;
+			if (static_cast<bool>(this->move_group->plan(start_pose_plan)))
+			{
+				this->move_group->execute(start_pose_plan);
+			}
+
 			RCLCPP_INFO(this->get_logger(), "callback fired");
 			if (msg->poses.empty())
 			{
@@ -61,7 +69,6 @@ class WaypointFollower : public rclcpp::Node
 
 			move_group->setStartStateToCurrentState();
 			move_group->setPoseTarget(msg->poses[0]);
-
 			moveit::planning_interface::MoveGroupInterface::Plan first_plan;
 			bool ok = static_cast<bool>(move_group->plan(first_plan));
 			
@@ -96,20 +103,20 @@ class WaypointFollower : public rclcpp::Node
 			}
 
 			this->move_group->setStartStateToCurrentState();
-			this->move_group->setJointValueTarget(initial_joints);
+			this->move_group->setJointValueTarget(this->initial_joints);
 
 			moveit::planning_interface::MoveGroupInterface::Plan return_plan;
 			ok = static_cast<bool>(this->move_group->plan(return_plan));
 
 			if (ok)
 			{
+				RCLCPP_INFO(this->get_logger(), "Returning to initial state");
 				this->move_group->execute(return_plan);
 			}
 			else
 			{
 				RCLCPP_ERROR(this->get_logger(), "Failed to plan back to initial joint state");
 			}
-			RCLCPP_INFO(this->get_logger(), "Returned to initial state");
 		}
 };
 
@@ -252,10 +259,9 @@ int main(int argc, char* argv[])
 		// 		RCLCPP_ERROR(logger, "Return failed");
 		// 		return 1;
 		// }
-
-
 		auto node = std::make_shared<WaypointFollower>();
 		node->init();
+
 		rclcpp::spin(node);
 		rclcpp::shutdown();
 		// spinner.join();

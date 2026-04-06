@@ -11,8 +11,10 @@ from three_opt_tsp import three_opt
 from nn_tsp import nearest_neighbor_tour 
 from mesh_segmentation import EZMesh
 from geometry_msgs.msg import PoseArray, Pose
-import numpy as np
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs_py import point_cloud2
 from scipy.spatial.transform import Rotation as R
+from std_msgs.msg import Header
 
 def normals_to_quaternions(normals):
     normals = np.asarray(normals, dtype=float)
@@ -45,14 +47,31 @@ def normals_to_quaternions(normals):
     return quats  # shape (N,4)
 
 class WaypointPub(Node):
-    def __init__(self, points, normals):
+    def __init__(self, points, normals, mesh_path):
         super().__init__("waypoint_pub")
         assert len(points) == len(normals)
         self.pub = self.create_publisher(PoseArray, "/cartesian_waypoints", 10)
+        self.cloud_pub = self.create_publisher(PointCloud2, "/mesh_points", 10)
         self.points = points/100 + np.array([0.3, 0.1, 0.65])
         # self.points = self.points[:2,:]
         self.normals = normals  
         print(self.points)
+        mesh = trimesh.load(mesh_path)
+        if isinstance(mesh, trimesh.Scene):
+            mesh = trimesh.util.concatenate(
+                tuple(g for g in mesh.geometry.values())
+            )
+
+        sampled_points, _ = trimesh.sample.sample_surface(mesh, 5000)
+        sampled_points /= 100
+        sampled_points += np.array([0.3, 0.1, 0.65])
+        self.sampled_points = sampled_points.astype(np.float32)
+    
+    def make_cloud_msg(self, points: np.ndarray) -> PointCloud2:
+        header = Header()
+        header.stamp = self.get_clock().now().to_msg()
+        header.frame_id = "world"
+        return point_cloud2.create_cloud_xyz32(header, points.tolist())
 
     def send(self):
         msg = PoseArray()
@@ -67,14 +86,23 @@ class WaypointPub(Node):
             pose.position.y = float(y)
             pose.position.z = float(z)
 
-            pose.orientation.x = 1.0 #float(qx)
-            pose.orientation.y = 0.0 #float(qy)
-            pose.orientation.z = 0.0 #float(qz)
-            pose.orientation.w = 0.0 #float(qw)
+            # pose.orientation.x = 1.0 
+            # pose.orientation.y = 0.0 
+            # pose.orientation.z = 0.0 
+            # pose.orientation.w = 0.0 
+
+            pose.orientation.x = float(qx)
+            pose.orientation.y = float(qy)
+            pose.orientation.z = float(qz)
+            pose.orientation.w = float(qw)
             msg.poses.append(pose)
 
         self.pub.publish(msg)
+        cloud_msg = self.make_cloud_msg(self.sampled_points)
+        self.cloud_pub.publish(cloud_msg)
         print("Published waypoints")
+
+
 def main():
     fname = "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired.stl"
     my_mesh = EZMesh(fname)
@@ -104,8 +132,9 @@ def main():
     normals_sorted = -normals[initial_tour, :]
 
     rclpy.init()
-    waypoint_pub = WaypointPub(view_points_sorted, normals_sorted)
+    waypoint_pub = WaypointPub(view_points_sorted, normals_sorted, fname)
     waypoint_pub.send()
+
     rclpy.spin_once(waypoint_pub, timeout_sec=0.5)
     print("Successfully published waypoints")
     waypoint_pub.destroy_node()
