@@ -52,7 +52,7 @@ class WaypointPub(Node):
         assert len(points) == len(normals)
         self.pub = self.create_publisher(PoseArray, "/cartesian_waypoints", 10)
         self.cloud_pub = self.create_publisher(PointCloud2, "/mesh_points", 10)
-        self.points = points/100 + np.array([0.3, 0.1, 0.65])
+        self.points = points/100 + np.array([0.2, 0.2, 0.38])
         # self.points = self.points[:2,:]
         self.normals = normals  
         print(self.points)
@@ -64,7 +64,7 @@ class WaypointPub(Node):
 
         sampled_points, _ = trimesh.sample.sample_surface(mesh, 5000)
         sampled_points /= 100
-        sampled_points += np.array([0.3, 0.1, 0.65])
+        sampled_points += np.array([0.2, 0.2, 0.38])
         self.sampled_points = sampled_points.astype(np.float32)
     
     def make_cloud_msg(self, points: np.ndarray) -> PointCloud2:
@@ -117,7 +117,7 @@ def main():
     new_mesh.visual.face_colors = face_colors
     #new_mesh.show()
     
-    clearance = 10 
+    clearance = 10
     view_points = centroids + clearance*normals
     segments = np.stack([view_points, view_points-normals], axis=1)
     path = trimesh.load_path(segments)

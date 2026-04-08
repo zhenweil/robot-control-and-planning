@@ -180,6 +180,12 @@
             </geometry>
         </collision>
     </link>
+		<link name="tool0"/>
+		<joint name="tool0_joint" type="fixed">
+			<parent link="panda_hand"/>
+			<child link="tool0"/>
+			<origin xyz="0 0 0.1034" rpy="0 0 0"/>
+		</joint>
     <link name="panda_leftfinger">
         <visual>
             <geometry>
