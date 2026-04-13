@@ -97,6 +97,10 @@ class WaypointPub(Node):
             pose.orientation.w = float(qw)
             msg.poses.append(pose)
 
+        while self.pub.get_subscription_count() == 0:
+            self.get_logger().info("waiting for subscriber...")
+            time.sleep(0.1)
+
         self.pub.publish(msg)
         cloud_msg = self.make_cloud_msg(self.sampled_points)
         self.cloud_pub.publish(cloud_msg)
@@ -107,6 +111,8 @@ def main():
     fname = "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired.stl"
     my_mesh = EZMesh(fname)
     segmentation, centroids, normals = my_mesh.segment_based_on_normal(90)
+    centroids = centroids[:10,:]
+    normals = normals[:10,:]
     num_groups = len(segmentation)
     colors = np.random.rand(num_groups, 3)
     face_colors = np.zeros((my_mesh.num_faces, 3), dtype=float)
@@ -139,8 +145,8 @@ def main():
     print("Successfully published waypoints")
     waypoint_pub.destroy_node()
     rclpy.shutdown()
-    # scene = trimesh.Scene()
-    # scene.add_geometry(new_mesh)
-    # scene.add_geometry(points)
-    # scene.add_geometry(path)
-    # scene.show()
+    scene = trimesh.Scene()
+    scene.add_geometry(new_mesh)
+    scene.add_geometry(points)
+    scene.add_geometry(path)
+    #scene.show()
