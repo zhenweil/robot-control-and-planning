@@ -16,7 +16,7 @@ class WaypointFollower : public rclcpp::Node
 {
 	public:
 		WaypointFollower(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
-			: Node("waypoint_follower", options)
+			: Node("waypoint_follower", rclcpp::NodeOptions(options).automatically_declare_parameters_from_overrides(true))
 		{}
 
 		void init()
@@ -31,8 +31,8 @@ class WaypointFollower : public rclcpp::Node
 			this->move_group->setEndEffectorLink("tool0");
 			this->sub = this->create_subscription<geometry_msgs::msg::PoseArray>(
 				"/cartesian_waypoints",
-				10,
-			std::bind(&WaypointFollower::waypointCallback, this, std::placeholders::_1));
+				1,
+				std::bind(&WaypointFollower::waypointCallback, this, std::placeholders::_1));
 			RCLCPP_INFO(this->get_logger(), "Subscriber created");
 			this->worker = std::thread(&WaypointFollower::workerLoop, this);
 		}
@@ -125,29 +125,25 @@ class WaypointFollower : public rclcpp::Node
 
 			auto current_state = this->move_group->getCurrentState();
 			if (!current_state) {
-					RCLCPP_ERROR(this->get_logger(), "Failed to get current robot state");
-					return;
+				RCLCPP_ERROR(this->get_logger(), "Failed to get current robot state");
+				return;
 			}
 
-			moveit::core::RobotState robot_state(*current_state);
+			const moveit::core::JointModelGroup* jmg =
+			this->move_group->getCurrentState()->getJointModelGroup("panda_arm");	
 
 			for (const auto& pose : waypoints)
-			{
-				const moveit::core::JointModelGroup* jmg =
-						this->move_group->getCurrentState()->getJointModelGroup(
-								this->move_group->getName()
-						);	
-						
+			{		
 				bool ok = current_state->setFromIK(
 						jmg,
 						pose,
-						this->move_group->getEndEffectorLink(),
+						"tool0",
 						0.1  // timeout in seconds
 				);
 
 				if (ok)
 				{
-						std::cout << "Waypoint reachable. Joints: ";
+						std::cout << "Waypoint reachable" << std::endl;
 				}
 				else
 				{
@@ -232,7 +228,7 @@ int main(int argc, char* argv[])
 		// rclcpp::sleep_for(std::chrono::seconds(1));
 		// auto state = move_group.getCurrentState(2.0);
 
-		auto node = std::make_shared<WaypointFollower>();
+		auto node = std::make_shared<WaypointFollower>(rclcpp::NodeOptions());
 		node->init();
 		rclcpp::spin(node);
 		
