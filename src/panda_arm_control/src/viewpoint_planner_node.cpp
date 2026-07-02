@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <geometry_msgs/msg/pose_array.hpp>
 #include <json/json.h>
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_state/robot_state.h>
@@ -118,6 +119,8 @@ public:
 		marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
 			"/viewpoint_markers", rclcpp::QoS(1).transient_local());
 
+		waypoint_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/cartesian_waypoints", 10);
+
 		runPipeline();
 
 		marker_pub_->publish(marker_array_);
@@ -140,6 +143,8 @@ private:
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
 	rclcpp::TimerBase::SharedPtr marker_timer_;
 	visualization_msgs::msg::MarkerArray marker_array_;
+
+	rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr waypoint_pub_;
 
 	// automatically_declare_parameters_from_overrides(true) (needed for robot_description*)
 	// already auto-declares any of these that the launch file passed as overrides, so guard
@@ -260,6 +265,37 @@ private:
 		exportSelectedViewpoints();
 		exportSelectedRobotPoses();
 		marker_array_ = buildMarkerArray();
+
+		publishWaypoints();
+	}
+
+	void publishWaypoints()
+	{
+		if (selected_.empty())
+		{
+			RCLCPP_WARN(get_logger(), "No reachable/selected viewpoints -- nothing to publish on /cartesian_waypoints");
+			return;
+		}
+
+		geometry_msgs::msg::PoseArray msg;
+		msg.header.frame_id = "world";
+		msg.header.stamp = now();
+		msg.poses.reserve(selected_.size());
+		for (const auto* c : selected_)
+			msg.poses.push_back(c->tcp_pose);
+
+		// WaypointFollower (panda_arm_control.cpp) subscribes with default (volatile) QoS, so a
+		// late subscriber won't receive anything published before it connects -- wait for at
+		// least one subscriber first, same fix as read_viewpoint_and_publish.py's publisher.
+		RCLCPP_INFO(get_logger(), "Waiting for a subscriber on /cartesian_waypoints...");
+		while (rclcpp::ok() && waypoint_pub_->get_subscription_count() == 0)
+			rclcpp::sleep_for(std::chrono::milliseconds(200));
+
+		if (!rclcpp::ok())
+			return;
+
+		waypoint_pub_->publish(msg);
+		RCLCPP_INFO(get_logger(), "Published %zu TCP waypoints to /cartesian_waypoints", msg.poses.size());
 	}
 
 	std::vector<ViewpointCandidate> computeReachability(std::vector<ViewpointCandidate> candidates)
