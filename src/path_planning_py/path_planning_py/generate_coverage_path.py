@@ -3,6 +3,7 @@ import sys
 sys.path.append("/home/zhenweil/mesh-processing/")
 sys.path.append("/home/zhenweil/traveling-salesman-problem/")
 
+import time
 import rclpy
 from rclpy.node import Node
 import trimesh
@@ -108,7 +109,7 @@ class WaypointPub(Node):
 
 
 def main():
-    fname = "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired.stl"
+    fname = "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm.stl"
     my_mesh = EZMesh(fname)
     segmentation, centroids, normals = my_mesh.segment_based_on_normal(90)
     centroids = centroids[:10,:]
@@ -149,4 +150,4 @@ def main():
     scene.add_geometry(new_mesh)
     scene.add_geometry(points)
     scene.add_geometry(path)
-    #scene.show()
+    scene.show()
