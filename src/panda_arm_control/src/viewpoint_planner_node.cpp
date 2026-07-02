@@ -109,6 +109,12 @@ public:
 		robot_state_->setToDefaultValues();
 		jmg_ = robot_state_->getJointModelGroup(params_.group_name);
 
+		// Capture the home tool0 position now, before computeReachability() mutates
+		// robot_state_ with IK solutions -- this is the reference point the nearest-neighbor
+		// tour starts from.
+		robot_state_->update();
+		home_tcp_position_ = robot_state_->getGlobalLinkTransform("tool0").translation();
+
 		marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
 			"/viewpoint_markers", rclcpp::QoS(1).transient_local());
 
@@ -124,6 +130,7 @@ private:
 	moveit::core::RobotModelPtr robot_model_;
 	moveit::core::RobotStatePtr robot_state_;
 	const moveit::core::JointModelGroup* jmg_ = nullptr;
+	Eigen::Vector3d home_tcp_position_ = Eigen::Vector3d::Zero();
 
 	std::vector<ViewpointCandidate> reachable_candidates_;
 	std::vector<ViewpointCandidate> unreachable_visible_;
@@ -244,6 +251,10 @@ private:
 			simplified_mesh, reachable_candidates_, params_.target_area_visibility, params_.min_new_area_ratio);
 
 		RCLCPP_INFO(get_logger(), "selected views: %zu", selected_.size());
+
+		selected_ = NearestNeighborOrder(std::move(selected_), home_tcp_position_);
+
+		RCLCPP_INFO(get_logger(), "reordered %zu selected views via nearest-neighbor from robot home position", selected_.size());
 
 		std::filesystem::create_directories(params_.output_dir);
 		exportSelectedViewpoints();
@@ -449,6 +460,30 @@ private:
 
 		for (const auto& c : unreachable_visible_)
 			addCandidateMarkers(c, "unreachable", 1.0f, 0.5f, 0.0f);
+
+		// Visiting order (nearest-neighbor tour from the robot's home position).
+		if (selected_.size() >= 2)
+		{
+			visualization_msgs::msg::Marker tour;
+			tour.header.frame_id = "world";
+			tour.header.stamp = stamp;
+			tour.ns = "selected_tour";
+			tour.id = id++;
+			tour.type = visualization_msgs::msg::Marker::LINE_STRIP;
+			tour.action = visualization_msgs::msg::Marker::ADD;
+			tour.scale.x = 0.0015; // line width
+			tour.color.r = 1.0f;
+			tour.color.g = 1.0f;
+			tour.color.b = 0.0f;
+			tour.color.a = 0.8f;
+
+			for (const auto* c : selected_)
+			{
+				Eigen::Vector3d world_pos = object_rotation_world * c->camera_pos + object_translation_world;
+				tour.points.push_back(ToPoint(world_pos));
+			}
+			markers.markers.push_back(tour);
+		}
 
 		return markers;
 	}

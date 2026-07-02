@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 
 #include <vtkCleanPolyData.h>
@@ -471,4 +472,65 @@ std::vector<const ViewpointCandidate*> GreedySelectViewpoints(
 	}
 
 	return selected;
+}
+
+namespace
+{
+Eigen::Vector3d TcpPosition(const ViewpointCandidate* c)
+{
+	return Eigen::Vector3d(c->tcp_pose.position.x, c->tcp_pose.position.y, c->tcp_pose.position.z);
+}
+} // namespace
+
+std::vector<const ViewpointCandidate*> NearestNeighborOrder(
+	std::vector<const ViewpointCandidate*> candidates,
+	const Eigen::Vector3d& start_reference_position)
+{
+	if (candidates.size() < 2)
+		return candidates;
+
+	std::vector<bool> visited(candidates.size(), false);
+	std::vector<const ViewpointCandidate*> ordered;
+	ordered.reserve(candidates.size());
+
+	// First stop: whichever candidate is closest to start_reference_position (e.g. the
+	// robot's home TCP position).
+	size_t current = 0;
+	double best_dist = std::numeric_limits<double>::max();
+	for (size_t i = 0; i < candidates.size(); ++i)
+	{
+		double d = (TcpPosition(candidates[i]) - start_reference_position).norm();
+		if (d < best_dist)
+		{
+			best_dist = d;
+			current = i;
+		}
+	}
+	visited[current] = true;
+	ordered.push_back(candidates[current]);
+
+	for (size_t step = 1; step < candidates.size(); ++step)
+	{
+		Eigen::Vector3d cur_pos = TcpPosition(candidates[current]);
+		double best = std::numeric_limits<double>::max();
+		size_t best_idx = current;
+
+		for (size_t i = 0; i < candidates.size(); ++i)
+		{
+			if (visited[i])
+				continue;
+			double d = (TcpPosition(candidates[i]) - cur_pos).norm();
+			if (d < best)
+			{
+				best = d;
+				best_idx = i;
+			}
+		}
+
+		current = best_idx;
+		visited[current] = true;
+		ordered.push_back(candidates[current]);
+	}
+
+	return ordered;
 }

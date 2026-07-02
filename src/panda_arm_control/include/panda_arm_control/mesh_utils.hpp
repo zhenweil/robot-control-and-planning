@@ -97,3 +97,11 @@ std::vector<const ViewpointCandidate*> GreedySelectViewpoints(
 	const std::vector<ViewpointCandidate>& candidates,
 	double target_area_visibility,
 	double min_new_area_ratio);
+
+// Greedy nearest-neighbor tour over candidate TCP world positions: starts at whichever
+// candidate's tcp_pose is closest to start_reference_position, then repeatedly visits the
+// closest remaining candidate. Produces a sensible robot visiting order (not an optimal TSP
+// solution), so consecutive viewpoints don't require large arbitrary jumps.
+std::vector<const ViewpointCandidate*> NearestNeighborOrder(
+	std::vector<const ViewpointCandidate*> candidates,
+	const Eigen::Vector3d& start_reference_position);

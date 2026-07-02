@@ -21,7 +21,7 @@ def generate_launch_description():
         "mesh_path": "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl",  # empty -> resolved via ament_index_cpp in code; rviz mesh markers require binary STL
         "mesh_scale": 0.01,
         "target_faces": 1000,
-        "n_surface_samples": 50,
+        "n_surface_samples": 500,
         "standoff_distances": [0.01, 0.02, 0.03],
         "tilt_angles_deg": [0.0, 15.0, -15.0],
         "min_clearance": 0.005,
