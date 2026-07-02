@@ -1,5 +1,7 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+from launch.substitutions import PathJoinSubstitution
 from moveit_configs_utils import MoveItConfigsBuilder
 
 
@@ -16,10 +18,10 @@ def generate_launch_description():
     )
 
     viewpoint_planner_params = {
-        "mesh_path": "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm.stl",  # empty -> resolved via ament_index_cpp in code
+        "mesh_path": "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl",  # empty -> resolved via ament_index_cpp in code; rviz mesh markers require binary STL
         "mesh_scale": 0.01,
         "target_faces": 1000,
-        "n_surface_samples": 500,
+        "n_surface_samples": 50,
         "standoff_distances": [0.01, 0.02, 0.03],
         "tilt_angles_deg": [0.0, 15.0, -15.0],
         "min_clearance": 0.005,
@@ -47,4 +49,16 @@ def generate_launch_description():
         parameters=[moveit_config.to_dict(), viewpoint_planner_params],
     )
 
-    return LaunchDescription([viewpoint_planner_node])
+    rviz_config = PathJoinSubstitution(
+        [FindPackageShare("panda_arm_control"), "config", "viewpoint_planner.rviz"]
+    )
+
+    rviz_node = Node(
+        package="rviz2",
+        executable="rviz2",
+        name="rviz2",
+        arguments=["-d", rviz_config],
+        output="screen",
+    )
+
+    return LaunchDescription([viewpoint_planner_node, rviz_node])

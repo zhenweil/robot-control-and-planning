@@ -128,6 +128,7 @@ private:
 	std::vector<ViewpointCandidate> reachable_candidates_;
 	std::vector<ViewpointCandidate> unreachable_visible_;
 	std::vector<const ViewpointCandidate*> selected_;
+	std::string resolved_mesh_path_;
 
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
 	rclcpp::TimerBase::SharedPtr marker_timer_;
@@ -201,6 +202,8 @@ private:
 			mesh_path =
 				ament_index_cpp::get_package_share_directory("panda_arm_control") + "/meshes/bunny_holding_eggs.stl";
 		}
+
+		resolved_mesh_path_ = mesh_path;
 
 		auto original_poly = LoadAndScaleMesh(mesh_path, params_.mesh_scale);
 		MeshData original_mesh = BuildMeshData(original_poly);
@@ -377,6 +380,30 @@ private:
 		const double arrow_length = 0.02;
 		int id = 0;
 		auto stamp = now();
+
+		// The mesh itself, so it renders alongside the viewpoints (mirrors trimesh's
+		// semi-transparent gray preview in visualize_views()).
+		Eigen::Quaterniond object_quat(object_rotation_world);
+		visualization_msgs::msg::Marker mesh_marker;
+		mesh_marker.header.frame_id = "world";
+		mesh_marker.header.stamp = stamp;
+		mesh_marker.ns = "object_mesh";
+		mesh_marker.id = id++;
+		mesh_marker.type = visualization_msgs::msg::Marker::MESH_RESOURCE;
+		mesh_marker.action = visualization_msgs::msg::Marker::ADD;
+		mesh_marker.mesh_resource = "file://" + resolved_mesh_path_;
+		mesh_marker.mesh_use_embedded_materials = false;
+		mesh_marker.pose.position = ToPoint(object_translation_world);
+		mesh_marker.pose.orientation.x = object_quat.x();
+		mesh_marker.pose.orientation.y = object_quat.y();
+		mesh_marker.pose.orientation.z = object_quat.z();
+		mesh_marker.pose.orientation.w = object_quat.w();
+		mesh_marker.scale.x = mesh_marker.scale.y = mesh_marker.scale.z = params_.mesh_scale;
+		mesh_marker.color.r = 0.7f;
+		mesh_marker.color.g = 0.7f;
+		mesh_marker.color.b = 0.7f;
+		mesh_marker.color.a = 0.5f;
+		markers.markers.push_back(mesh_marker);
 
 		auto addCandidateMarkers = [&](const ViewpointCandidate& c, const std::string& ns, float r, float g, float b) {
 			Eigen::Vector3d world_pos = object_rotation_world * c.camera_pos + object_translation_world;

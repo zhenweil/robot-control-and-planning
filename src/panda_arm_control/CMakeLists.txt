@@ -68,7 +68,7 @@ vtk_module_autoinit(
 	MODULES ${VTK_LIBRARIES}
 	)
 
-install (DIRECTORY meshes
+install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
