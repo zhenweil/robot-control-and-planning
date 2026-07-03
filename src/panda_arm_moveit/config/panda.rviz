@@ -140,7 +140,7 @@ Visualization Manager:
         object_mesh: true
         selected_camera_pos: true
         selected_view_dir: true
-        selected_tour: true
+        selected_tour: false
         unreachable_camera_pos: false
         unreachable_view_dir: false
       Topic:

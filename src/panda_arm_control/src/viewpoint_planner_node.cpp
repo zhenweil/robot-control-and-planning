@@ -491,7 +491,7 @@ private:
 		for (const auto& c : unreachable_visible_)
 			addCandidateMarkers(c, "unreachable", 1.0f, 0.5f, 0.0f);
 
-		// Visiting order (nearest-neighbor tour from the robot's home position).
+		// Visiting order (nearest-neighbor + 2-opt tour from the robot's home position).
 		if (selected_.size() >= 2)
 		{
 			visualization_msgs::msg::Marker tour;
