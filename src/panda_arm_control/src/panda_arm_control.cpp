@@ -11,6 +11,7 @@
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 class WaypointFollower : public rclcpp::Node
 {
@@ -26,13 +27,15 @@ class WaypointFollower : public rclcpp::Node
 			this->move_group->startStateMonitor();
 
 			this->move_group->setPlanningTime(20.0);
-			this->move_group->setMaxVelocityScalingFactor(0.2);
-			this->move_group->setMaxAccelerationScalingFactor(0.2);
+			this->move_group->setMaxVelocityScalingFactor(0.5);
+			this->move_group->setMaxAccelerationScalingFactor(0.5);
 			this->move_group->setEndEffectorLink("tool0");
 			this->sub = this->create_subscription<geometry_msgs::msg::PoseArray>(
 				"/cartesian_waypoints",
 				rclcpp::QoS(1).transient_local(),
 				std::bind(&WaypointFollower::waypointCallback, this, std::placeholders::_1));
+			this->marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+				"/viewpoint_markers", rclcpp::QoS(1).transient_local());
 			RCLCPP_INFO(this->get_logger(), "Subscriber created");
 			this->worker = std::thread(&WaypointFollower::workerLoop, this);
 		}
@@ -46,8 +49,46 @@ class WaypointFollower : public rclcpp::Node
 		std::vector<double> initial_joints = {0.0, -0.8745, 0.0, -2.356, 0.0, 1.571, 0.785};
 
 		rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr sub;
+		rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub;
 		std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group;
-		
+
+		void publishCurrentTargetMarker(const geometry_msgs::msg::Pose& pose)
+		{
+			visualization_msgs::msg::MarkerArray markers;
+			auto stamp = this->now();
+
+			visualization_msgs::msg::Marker sphere;
+			sphere.header.frame_id = "world";
+			sphere.header.stamp = stamp;
+			sphere.ns = "current_target_pos";
+			sphere.id = 0;
+			sphere.type = visualization_msgs::msg::Marker::SPHERE;
+			sphere.action = visualization_msgs::msg::Marker::ADD;
+			sphere.pose.position = pose.position;
+			sphere.pose.orientation.w = 1.0;
+			sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.012;
+			sphere.color.r = 1.0f;
+			sphere.color.a = 1.0f;
+			markers.markers.push_back(sphere);
+
+			visualization_msgs::msg::Marker arrow;
+			arrow.header.frame_id = "world";
+			arrow.header.stamp = stamp;
+			arrow.ns = "current_target_dir";
+			arrow.id = 0;
+			arrow.type = visualization_msgs::msg::Marker::ARROW;
+			arrow.action = visualization_msgs::msg::Marker::ADD;
+			arrow.pose = pose;
+			arrow.scale.x = 0.03;	// shaft length
+			arrow.scale.y = 0.006; // shaft diameter
+			arrow.scale.z = 0.006; // head diameter
+			arrow.color.r = 1.0f;
+			arrow.color.a = 1.0f;
+			markers.markers.push_back(arrow);
+
+			this->marker_pub->publish(markers);
+		}
+
 		void return_to_initial_pose()
 		{
 			moveit::planning_interface::MoveGroupInterface::Plan return_plan;
@@ -130,6 +171,8 @@ class WaypointFollower : public rclcpp::Node
 			// fraction too low to ever execute.
 			for (size_t i = 0; i < waypoints.size(); ++i)
 			{
+				this->publishCurrentTargetMarker(waypoints[i]);
+
 				auto current_state = move_group->getCurrentState(2.0);
 				if (!current_state)
 				{
