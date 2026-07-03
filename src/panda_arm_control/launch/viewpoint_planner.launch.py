@@ -1,4 +1,7 @@
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 from launch.substitutions import PathJoinSubstitution
@@ -6,6 +9,15 @@ from moveit_configs_utils import MoveItConfigsBuilder
 
 
 def generate_launch_description():
+    use_rviz_arg = DeclareLaunchArgument(
+        "use_rviz",
+        default_value="true",
+        description="Launch RViz. Set to false if another launch file "
+        "(e.g. panda_arm.launch.py, whose panda.rviz already shows "
+        "/viewpoint_markers) is already providing it.",
+    )
+    use_rviz = LaunchConfiguration("use_rviz")
+
     moveit_config = (
         MoveItConfigsBuilder("panda", package_name="panda_arm_moveit")
         .robot_description(file_path="config/panda.urdf.xacro")
@@ -59,6 +71,7 @@ def generate_launch_description():
         name="rviz2",
         arguments=["-d", rviz_config],
         output="screen",
+        condition=IfCondition(use_rviz),
     )
 
-    return LaunchDescription([viewpoint_planner_node, rviz_node])
+    return LaunchDescription([use_rviz_arg, viewpoint_planner_node, rviz_node])
