@@ -123,34 +123,8 @@ class WaypointFollower : public rclcpp::Node
 		{
 			this->return_to_initial_pose();
 
-			auto current_state = this->move_group->getCurrentState();
-			if (!current_state) {
-				RCLCPP_ERROR(this->get_logger(), "Failed to get current robot state");
-				return;
-			}
-
-			const moveit::core::JointModelGroup* jmg =
-			this->move_group->getCurrentState()->getJointModelGroup("panda_arm");	
-
-			for (const auto& pose : waypoints)
-			{		
-				bool ok = current_state->setFromIK(
-						jmg,
-						pose,
-						"tool0",
-						0.1  // timeout in seconds
-				);
-
-				if (ok)
-				{
-						std::cout << "Waypoint reachable" << std::endl;
-				}
-				else
-				{
-						std::cout << "Waypoint NOT reachable." << std::endl;
-				}
-			}
-
+			// Waypoints are already IK-filtered upstream by viewpoint_planner, so no need to
+			// re-check reachability here.
 			move_group->setStartStateToCurrentState();
 			move_group->setPoseTarget(waypoints[0]);
 			moveit::planning_interface::MoveGroupInterface::Plan first_plan;

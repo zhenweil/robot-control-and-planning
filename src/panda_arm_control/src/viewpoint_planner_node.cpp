@@ -123,7 +123,6 @@ public:
 
 		runPipeline();
 
-		marker_pub_->publish(marker_array_);
 		marker_timer_ = create_wall_timer(std::chrono::seconds(2), [this]() { marker_pub_->publish(marker_array_); });
 	}
 
@@ -265,6 +264,7 @@ private:
 		exportSelectedViewpoints();
 		exportSelectedRobotPoses();
 		marker_array_ = buildMarkerArray();
+		marker_pub_->publish(marker_array_);
 
 		publishWaypoints();
 	}
