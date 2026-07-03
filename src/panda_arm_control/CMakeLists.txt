@@ -37,10 +37,12 @@ add_executable(panda_arm_control src/panda_arm_control.cpp)
 ament_target_dependencies(panda_arm_control
 	rclcpp
 	moveit_ros_planning_interface
+	moveit_ros_planning
 	moveit_msgs
 	geometry_msgs
 	shape_msgs
 	geometric_shapes
+	visualization_msgs
 	)
 
 add_executable(viewpoint_planner

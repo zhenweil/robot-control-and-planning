@@ -2,6 +2,7 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#include <sstream>
 
 #include <rclcpp/rclcpp.hpp>
 #include <shape_msgs/msg/mesh.hpp>
@@ -11,6 +12,7 @@
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
+#include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 #include <visualization_msgs/msg/marker_array.hpp>
 
 class WaypointFollower : public rclcpp::Node
@@ -25,6 +27,13 @@ class WaypointFollower : public rclcpp::Node
 			this->move_group = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
 				shared_from_this(), "panda_arm");
 			this->move_group->startStateMonitor();
+
+			this->planning_scene_monitor = std::make_shared<planning_scene_monitor::PlanningSceneMonitor>(
+				shared_from_this(), "robot_description");
+			this->planning_scene_monitor->startSceneMonitor();
+			this->planning_scene_monitor->startWorldGeometryMonitor();
+			this->planning_scene_monitor->startStateMonitor();
+			this->planning_scene_monitor->requestPlanningSceneState();
 
 			this->move_group->setPlanningTime(20.0);
 			this->move_group->setMaxVelocityScalingFactor(0.5);
@@ -51,6 +60,17 @@ class WaypointFollower : public rclcpp::Node
 		rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr sub;
 		rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub;
 		std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group;
+		planning_scene_monitor::PlanningSceneMonitorPtr planning_scene_monitor;
+
+		bool isStateCollisionFree(
+			moveit::core::RobotState* state, const moveit::core::JointModelGroup* group, const double* joint_positions)
+		{
+			state->setJointGroupPositions(group, joint_positions);
+			state->update();
+
+			planning_scene_monitor::LockedPlanningSceneRO locked_scene(this->planning_scene_monitor);
+			return locked_scene->isStateValid(*state, group->getName());
+		}
 
 		void publishCurrentTargetMarker(const geometry_msgs::msg::Pose& pose)
 		{
@@ -197,8 +217,16 @@ class WaypointFollower : public rclcpp::Node
 				// sampler pick any solution) so consecutive waypoints stay in the same arm
 				// configuration -- otherwise nearby Cartesian poses can resolve to opposite
 				// elbow-up/elbow-down or wrist-flip solutions, producing large joint swings.
+				// The validity callback makes setFromIK reject/retry solutions that are in
+				// self-collision or collide with the object -- plain setFromIK only checks
+				// kinematic reachability and joint limits, so without this, plan() would silently
+				// be handed an invalid goal state and abort almost instantly.
 				const moveit::core::JointModelGroup* jmg = current_state->getJointModelGroup(move_group->getName());
-				bool ik_ok = current_state->setFromIK(jmg, waypoints[i], "tool0", 0.1);
+				bool ik_ok = current_state->setFromIK(
+					jmg, waypoints[i], "tool0", 0.3,
+					std::bind(
+						&WaypointFollower::isStateCollisionFree, this, std::placeholders::_1, std::placeholders::_2,
+						std::placeholders::_3));
 
 				if (!ik_ok)
 				{
@@ -217,7 +245,12 @@ class WaypointFollower : public rclcpp::Node
 
 				if (!ok)
 				{
-					RCLCPP_WARN(this->get_logger(), "Plan to waypoint %zu/%zu failed, skipping", i, waypoints.size());
+					std::ostringstream joints_str;
+					for (size_t j = 0; j < joint_target.size(); ++j)
+						joints_str << (j == 0 ? "" : ", ") << joint_target[j];
+					RCLCPP_WARN(
+						this->get_logger(), "Plan to waypoint %zu/%zu failed, skipping. IK-approved joint target: [%s]", i,
+						waypoints.size(), joints_str.str().c_str());
 					continue;
 				}
 
