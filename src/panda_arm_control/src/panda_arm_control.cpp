@@ -123,41 +123,29 @@ class WaypointFollower : public rclcpp::Node
 		{
 			this->return_to_initial_pose();
 
-			// Waypoints are already IK-filtered upstream by viewpoint_planner, so no need to
-			// re-check reachability here.
-			move_group->setStartStateToCurrentState();
-			move_group->setPoseTarget(waypoints[0]);
-			moveit::planning_interface::MoveGroupInterface::Plan first_plan;
-			bool ok = static_cast<bool>(move_group->plan(first_plan));
-			
-			if(!ok) return;
-			
-			RCLCPP_INFO(this->get_logger(), "first pose reachable: %s", ok ? "yes" : "no");
-			this->move_group->execute(first_plan);
-			rclcpp::sleep_for(std::chrono::seconds(1));
-			moveit_msgs::msg::RobotTrajectory trajectory;
-
-			// Tune these if needed
-			const double eef_step = 0.005;      // meters
-			const double jump_threshold = 0.0;  // disable jump check for now
-
-			const double fraction = this->move_group->computeCartesianPath(waypoints, eef_step, jump_threshold, trajectory);
-
-			RCLCPP_INFO(this->get_logger(), "Cartesian path fraction: %.3f", fraction);
-
-			if (fraction < 0.3)
+			// Waypoints are already IK-filtered upstream by viewpoint_planner. Plan each one
+			// individually via OMPL rather than stringing them into one Cartesian path --
+			// consecutive viewpoints can differ enough in position/orientation that straight-line
+			// interpolation hits collisions or joint limits, driving computeCartesianPath's
+			// fraction too low to ever execute.
+			for (size_t i = 0; i < waypoints.size(); ++i)
 			{
-				RCLCPP_WARN(this->get_logger(), "Path planning incomplete, not executing");
-				this->return_to_initial_pose();
-				return;
+				move_group->setStartStateToCurrentState();
+				move_group->setPoseTarget(waypoints[i]);
+
+				moveit::planning_interface::MoveGroupInterface::Plan plan;
+				bool ok = static_cast<bool>(move_group->plan(plan));
+
+				if (!ok)
+				{
+					RCLCPP_WARN(this->get_logger(), "Waypoint %zu/%zu not reachable, skipping", i, waypoints.size());
+					continue;
+				}
+
+				auto result = this->move_group->execute(plan);
+				if (result != moveit::core::MoveItErrorCode::SUCCESS)
+					RCLCPP_ERROR(this->get_logger(), "Execution failed for waypoint %zu/%zu", i, waypoints.size());
 			}
-
-			moveit::planning_interface::MoveGroupInterface::Plan plan;
-			plan.trajectory_ = trajectory;
-
-			auto result = this->move_group->execute(plan);
-			if (result != moveit::core::MoveItErrorCode::SUCCESS)
-				RCLCPP_ERROR(this->get_logger(), "Execution failed");
 
 			this->return_to_initial_pose();
 		}
