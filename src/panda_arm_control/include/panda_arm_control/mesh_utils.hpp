@@ -105,3 +105,12 @@ std::vector<const ViewpointCandidate*> GreedySelectViewpoints(
 std::vector<const ViewpointCandidate*> NearestNeighborOrder(
 	std::vector<const ViewpointCandidate*> candidates,
 	const Eigen::Vector3d& start_reference_position);
+
+// 2-opt local search over an existing tour (e.g. NearestNeighborOrder's output): repeatedly
+// reverses whichever segment [i, j] most shortens the total path length (start_reference_position
+// -> ordered[0] -> ... -> ordered.back(), no closing edge back to start) until no single
+// reversal improves it further. Removes the long crossing/backtracking edges nearest-neighbor
+// construction tends to leave behind.
+std::vector<const ViewpointCandidate*> TwoOptImprove(
+	std::vector<const ViewpointCandidate*> ordered,
+	const Eigen::Vector3d& start_reference_position);

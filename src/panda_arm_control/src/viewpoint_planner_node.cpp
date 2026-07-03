@@ -258,8 +258,11 @@ private:
 		RCLCPP_INFO(get_logger(), "selected views: %zu", selected_.size());
 
 		selected_ = NearestNeighborOrder(std::move(selected_), home_tcp_position_);
+		selected_ = TwoOptImprove(std::move(selected_), home_tcp_position_);
 
-		RCLCPP_INFO(get_logger(), "reordered %zu selected views via nearest-neighbor from robot home position", selected_.size());
+		RCLCPP_INFO(
+			get_logger(), "reordered %zu selected views via nearest-neighbor + 2-opt from robot home position",
+			selected_.size());
 
 		std::filesystem::create_directories(params_.output_dir);
 		exportSelectedViewpoints();

@@ -534,3 +534,45 @@ std::vector<const ViewpointCandidate*> NearestNeighborOrder(
 
 	return ordered;
 }
+
+std::vector<const ViewpointCandidate*> TwoOptImprove(
+	std::vector<const ViewpointCandidate*> ordered,
+	const Eigen::Vector3d& start_reference_position)
+{
+	if (ordered.size() < 3)
+		return ordered;
+
+	auto pos = [&](size_t idx) { return TcpPosition(ordered[idx]); };
+
+	bool improved = true;
+	while (improved)
+	{
+		improved = false;
+
+		for (size_t i = 0; i + 1 < ordered.size(); ++i)
+		{
+			Eigen::Vector3d prev = (i == 0) ? start_reference_position : pos(i - 1);
+
+			for (size_t j = i + 1; j < ordered.size(); ++j)
+			{
+				double old_cost = (prev - pos(i)).norm();
+				double new_cost = (prev - pos(j)).norm();
+
+				if (j + 1 < ordered.size())
+				{
+					old_cost += (pos(j) - pos(j + 1)).norm();
+					new_cost += (pos(i) - pos(j + 1)).norm();
+				}
+
+				if (new_cost < old_cost - 1e-9)
+				{
+					std::reverse(
+						ordered.begin() + static_cast<std::ptrdiff_t>(i), ordered.begin() + static_cast<std::ptrdiff_t>(j) + 1);
+					improved = true;
+				}
+			}
+		}
+	}
+
+	return ordered;
+}
