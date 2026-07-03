@@ -71,6 +71,15 @@ class WaypointFollower : public rclcpp::Node
 			sphere.color.a = 1.0f;
 			markers.markers.push_back(sphere);
 
+			// Marker::ARROW in pose-mode (no `points`) points along its local +X axis, but
+			// CameraRotationFromViewDir (pose_utils.hpp) makes the TCP frame's local +Z axis the
+			// approach/view direction. Compose the pose with a fixed -90deg rotation about Y,
+			// which maps local +X onto local +Z, so the rendered arrow follows the real view
+			// direction instead of the arbitrary in-plane +X axis.
+			Eigen::Quaterniond q(pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z);
+			Eigen::Quaterniond q_x_to_z(Eigen::AngleAxisd(-M_PI / 2.0, Eigen::Vector3d::UnitY()));
+			Eigen::Quaterniond q_arrow = q * q_x_to_z;
+
 			visualization_msgs::msg::Marker arrow;
 			arrow.header.frame_id = "world";
 			arrow.header.stamp = stamp;
@@ -78,8 +87,12 @@ class WaypointFollower : public rclcpp::Node
 			arrow.id = 0;
 			arrow.type = visualization_msgs::msg::Marker::ARROW;
 			arrow.action = visualization_msgs::msg::Marker::ADD;
-			arrow.pose = pose;
-			arrow.scale.x = 0.03;	// shaft length
+			arrow.pose.position = pose.position;
+			arrow.pose.orientation.x = q_arrow.x();
+			arrow.pose.orientation.y = q_arrow.y();
+			arrow.pose.orientation.z = q_arrow.z();
+			arrow.pose.orientation.w = q_arrow.w();
+			arrow.scale.x = 0.03;	// arrow length
 			arrow.scale.y = 0.006; // shaft diameter
 			arrow.scale.z = 0.006; // head diameter
 			arrow.color.r = 1.0f;
