@@ -119,7 +119,8 @@ public:
 		marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
 			"/viewpoint_markers", rclcpp::QoS(1).transient_local());
 
-		waypoint_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/cartesian_waypoints", 10);
+		waypoint_pub_ = create_publisher<geometry_msgs::msg::PoseArray>(
+			"/cartesian_waypoints", rclcpp::QoS(1).transient_local());
 
 		runPipeline();
 
@@ -283,16 +284,6 @@ private:
 		msg.poses.reserve(selected_.size());
 		for (const auto* c : selected_)
 			msg.poses.push_back(c->tcp_pose);
-
-		// WaypointFollower (panda_arm_control.cpp) subscribes with default (volatile) QoS, so a
-		// late subscriber won't receive anything published before it connects -- wait for at
-		// least one subscriber first, same fix as read_viewpoint_and_publish.py's publisher.
-		RCLCPP_INFO(get_logger(), "Waiting for a subscriber on /cartesian_waypoints...");
-		while (rclcpp::ok() && waypoint_pub_->get_subscription_count() == 0)
-			rclcpp::sleep_for(std::chrono::milliseconds(200));
-
-		if (!rclcpp::ok())
-			return;
 
 		waypoint_pub_->publish(msg);
 		RCLCPP_INFO(get_logger(), "Published %zu TCP waypoints to /cartesian_waypoints", msg.poses.size());

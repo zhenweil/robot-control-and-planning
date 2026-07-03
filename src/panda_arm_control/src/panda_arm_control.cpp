@@ -31,7 +31,7 @@ class WaypointFollower : public rclcpp::Node
 			this->move_group->setEndEffectorLink("tool0");
 			this->sub = this->create_subscription<geometry_msgs::msg::PoseArray>(
 				"/cartesian_waypoints",
-				1,
+				rclcpp::QoS(1).transient_local(),
 				std::bind(&WaypointFollower::waypointCallback, this, std::placeholders::_1));
 			RCLCPP_INFO(this->get_logger(), "Subscriber created");
 			this->worker = std::thread(&WaypointFollower::workerLoop, this);
@@ -130,15 +130,38 @@ class WaypointFollower : public rclcpp::Node
 			// fraction too low to ever execute.
 			for (size_t i = 0; i < waypoints.size(); ++i)
 			{
+				auto current_state = move_group->getCurrentState(2.0);
+				if (!current_state)
+				{
+					RCLCPP_WARN(this->get_logger(), "Failed to get current state for waypoint %zu/%zu, skipping", i, waypoints.size());
+					continue;
+				}
+
+				// Seed IK from the current joint state (rather than letting setPoseTarget's goal
+				// sampler pick any solution) so consecutive waypoints stay in the same arm
+				// configuration -- otherwise nearby Cartesian poses can resolve to opposite
+				// elbow-up/elbow-down or wrist-flip solutions, producing large joint swings.
+				const moveit::core::JointModelGroup* jmg = current_state->getJointModelGroup(move_group->getName());
+				bool ik_ok = current_state->setFromIK(jmg, waypoints[i], "tool0", 0.1);
+
+				if (!ik_ok)
+				{
+					RCLCPP_WARN(this->get_logger(), "Waypoint %zu/%zu not reachable, skipping", i, waypoints.size());
+					continue;
+				}
+
+				std::vector<double> joint_target;
+				current_state->copyJointGroupPositions(jmg, joint_target);
+
 				move_group->setStartStateToCurrentState();
-				move_group->setPoseTarget(waypoints[i]);
+				move_group->setJointValueTarget(joint_target);
 
 				moveit::planning_interface::MoveGroupInterface::Plan plan;
 				bool ok = static_cast<bool>(move_group->plan(plan));
 
 				if (!ok)
 				{
-					RCLCPP_WARN(this->get_logger(), "Waypoint %zu/%zu not reachable, skipping", i, waypoints.size());
+					RCLCPP_WARN(this->get_logger(), "Plan to waypoint %zu/%zu failed, skipping", i, waypoints.size());
 					continue;
 				}
 
