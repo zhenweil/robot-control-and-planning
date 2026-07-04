@@ -169,14 +169,19 @@
         <origin rpy="0 0 -0.785398163397" xyz="0 0 0" />
     </joint>
     <link name="panda_hand">
+        <!-- Replaces the bulky Franka gripper mesh with a compact placeholder cylinder, since
+             this arm carries a camera (via t_tcp_camera) rather than actually gripping anything.
+             Sized to roughly span panda_hand's origin to the tool0 offset below. -->
         <visual>
+            <origin xyz="0 0 0.05" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://panda_arm_moveit/meshes/visual/hand.dae" />
+                <cylinder radius="0.01" length="0.1" />
             </geometry>
         </visual>
         <collision>
+            <origin xyz="0 0 0.05" rpy="0 0 0" />
             <geometry>
-                <mesh filename="package://panda_arm_moveit/meshes/collision/hand.stl" />
+                <cylinder radius="0.01" length="0.1" />
             </geometry>
         </collision>
     </link>
@@ -186,32 +191,12 @@
 			<child link="tool0"/>
 			<origin xyz="0 0 0.1034" rpy="0 0 0"/>
 		</joint>
-    <link name="panda_leftfinger">
-        <visual>
-            <geometry>
-                <mesh filename="package://panda_arm_moveit/meshes/visual/finger.dae" />
-            </geometry>
-        </visual>
-        <collision>
-            <geometry>
-                <mesh filename="package://panda_arm_moveit/meshes/collision/finger.stl" />
-            </geometry>
-        </collision>
-    </link>
-    <link name="panda_rightfinger">
-        <visual>
-            <origin rpy="0 0 3.14159265359" xyz="0 0 0" />
-            <geometry>
-                <mesh filename="package://panda_arm_moveit/meshes/visual/finger.dae" />
-            </geometry>
-        </visual>
-        <collision>
-            <origin rpy="0 0 3.14159265359" xyz="0 0 0" />
-            <geometry>
-                <mesh filename="package://panda_arm_moveit/meshes/collision/finger.stl" />
-            </geometry>
-        </collision>
-    </link>
+    <!-- panda_leftfinger/panda_rightfinger keep their links and joints (panda_hand_controller /
+         ros2_controllers.yaml reference panda_finger_joint1 by name), but with no visual/collision
+         geometry so the (unused, since nothing here grips anything) gripper fingers don't add
+         visual or collision bulk. -->
+    <link name="panda_leftfinger" />
+    <link name="panda_rightfinger" />
     <joint name="panda_finger_joint1" type="prismatic">
         <parent link="panda_hand" />
         <child link="panda_leftfinger" />

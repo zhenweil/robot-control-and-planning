@@ -10,6 +10,7 @@
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometric_shapes/shape_operations.h>
 #include <moveit_msgs/msg/collision_object.hpp>
+#include <moveit/utils/moveit_error_code.h>
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 #include <moveit/planning_scene_monitor/planning_scene_monitor.h>
@@ -67,6 +68,16 @@ class WaypointFollower : public rclcpp::Node
 		{
 			state->setJointGroupPositions(group, joint_positions);
 			state->update();
+
+			// Solutions right at a joint limit can pass this check individually but still get
+			// rejected as INVALID_MOTION_PLAN later -- OMPL's path simplification/time
+			// parameterization can nudge an intermediate trajectory point slightly past the
+			// limit even when the endpoint itself is technically in bounds. Requiring some
+			// margin here makes setFromIK's retry mechanism keep looking for a different
+			// (redundant-DOF) solution with more clearance instead.
+			constexpr double kJointLimitMargin = 0.05; // radians
+			if (!state->satisfiesBounds(group, kJointLimitMargin))
+				return false;
 
 			planning_scene_monitor::LockedPlanningSceneRO locked_scene(this->planning_scene_monitor);
 			return locked_scene->isStateValid(*state, group->getName());
@@ -241,16 +252,17 @@ class WaypointFollower : public rclcpp::Node
 				move_group->setJointValueTarget(joint_target);
 
 				moveit::planning_interface::MoveGroupInterface::Plan plan;
-				bool ok = static_cast<bool>(move_group->plan(plan));
+				moveit::core::MoveItErrorCode plan_result = move_group->plan(plan);
 
-				if (!ok)
+				if (!static_cast<bool>(plan_result))
 				{
 					std::ostringstream joints_str;
 					for (size_t j = 0; j < joint_target.size(); ++j)
 						joints_str << (j == 0 ? "" : ", ") << joint_target[j];
 					RCLCPP_WARN(
-						this->get_logger(), "Plan to waypoint %zu/%zu failed, skipping. IK-approved joint target: [%s]", i,
-						waypoints.size(), joints_str.str().c_str());
+						this->get_logger(),
+						"Plan to waypoint %zu/%zu failed (%s), skipping. IK-approved joint target: [%s]", i,
+						waypoints.size(), moveit::core::error_code_to_string(plan_result).c_str(), joints_str.str().c_str());
 					continue;
 				}
 
