@@ -1,5 +1,7 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+from launch.substitutions import PathJoinSubstitution
 from moveit_configs_utils import MoveItConfigsBuilder
 
 def generate_launch_description():
@@ -14,12 +16,18 @@ def generate_launch_description():
         .to_moveit_configs()
     )
 
+    # Shared with viewpoint_planner.launch.py so both nodes agree on where the object actually
+    # is -- see object_pose.yaml.
+    object_pose_config = PathJoinSubstitution(
+        [FindPackageShare("panda_arm_control"), "config", "object_pose.yaml"]
+    )
+
     waypoint_follower = Node(
         package="panda_arm_control",
         executable="panda_arm_control",
         name="waypoint_follower",
         output="screen",
-        parameters=[moveit_config.to_dict()],
+        parameters=[moveit_config.to_dict(), object_pose_config],
     )
 
     return LaunchDescription([waypoint_follower])

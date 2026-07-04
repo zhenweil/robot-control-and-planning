@@ -46,19 +46,23 @@ def generate_launch_description():
         "ik_timeout": 0.1,
         "random_seed": 42,
         "group_name": "panda_arm",
-        "object_translation_world": [0.2, 0.2, 0.38],
-        "object_rotation_rpy_deg": [0.0, 0.0, 0.0],
         "t_tcp_camera_xyz": [0.0, 0.0, 0.0],
         "t_tcp_camera_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
         "output_dir": "/tmp/viewpoint_planner_output",
     }
+
+    # Shared with panda_arm_control.launch.py so both nodes agree on where the object actually
+    # is -- see object_pose.yaml.
+    object_pose_config = PathJoinSubstitution(
+        [FindPackageShare("panda_arm_control"), "config", "object_pose.yaml"]
+    )
 
     viewpoint_planner_node = Node(
         package="panda_arm_control",
         executable="viewpoint_planner",
         name="viewpoint_planner",
         output="screen",
-        parameters=[moveit_config.to_dict(), viewpoint_planner_params],
+        parameters=[moveit_config.to_dict(), viewpoint_planner_params, object_pose_config],
     )
 
     rviz_config = PathJoinSubstitution(

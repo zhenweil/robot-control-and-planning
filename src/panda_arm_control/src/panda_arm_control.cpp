@@ -25,6 +25,8 @@ class WaypointFollower : public rclcpp::Node
 
 		void init()
 		{
+			this->registerCollisionObject();
+
 			this->move_group = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
 				shared_from_this(), "panda_arm");
 			this->move_group->startStateMonitor();
@@ -62,6 +64,59 @@ class WaypointFollower : public rclcpp::Node
 		rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub;
 		std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group;
 		planning_scene_monitor::PlanningSceneMonitorPtr planning_scene_monitor;
+
+		// object_translation_world / object_rotation_rpy_deg are shared with viewpoint_planner
+		// via config/object_pose.yaml -- keep them as parameters here rather than hardcoding a
+		// second copy, since viewpoint_planner's viewpoint selection and this node's collision
+		// object must describe the exact same physical object pose.
+		void registerCollisionObject()
+		{
+			std::vector<double> object_translation_world = {0.0, 0.0, 0.3};
+			std::vector<double> object_rotation_rpy_deg = {0.0, 0.0, 0.0};
+			if (!this->has_parameter("object_translation_world"))
+				this->declare_parameter("object_translation_world", object_translation_world);
+			if (!this->has_parameter("object_rotation_rpy_deg"))
+				this->declare_parameter("object_rotation_rpy_deg", object_rotation_rpy_deg);
+			this->get_parameter("object_translation_world", object_translation_world);
+			this->get_parameter("object_rotation_rpy_deg", object_rotation_rpy_deg);
+
+			std::string object_mesh_path = "package://panda_arm_control/meshes/bunny_holding_eggs.stl";
+			Eigen::Vector3d scale(0.01, 0.01, 0.01);
+			shapes::Mesh* m = shapes::createMeshFromResource(object_mesh_path, scale);
+
+			shape_msgs::msg::Mesh mesh_msg;
+			shapes::ShapeMsg mesh_tmp;
+			shapes::constructMsgFromShape(m, mesh_tmp);
+			mesh_msg = boost::get<shape_msgs::msg::Mesh>(mesh_tmp);
+
+			// Matches scipy's R.from_euler("xyz", [roll, pitch, yaw]).as_matrix() convention used
+			// by viewpoint_planner_node's RotationFromRpyDeg, for consistency.
+			double roll = object_rotation_rpy_deg[0] * M_PI / 180.0;
+			double pitch = object_rotation_rpy_deg[1] * M_PI / 180.0;
+			double yaw = object_rotation_rpy_deg[2] * M_PI / 180.0;
+			Eigen::Quaterniond q(
+				Eigen::AngleAxisd(yaw, Eigen::Vector3d::UnitZ()) * Eigen::AngleAxisd(pitch, Eigen::Vector3d::UnitY()) *
+				Eigen::AngleAxisd(roll, Eigen::Vector3d::UnitX()));
+
+			geometry_msgs::msg::Pose mesh_pose;
+			mesh_pose.position.x = object_translation_world[0];
+			mesh_pose.position.y = object_translation_world[1];
+			mesh_pose.position.z = object_translation_world[2];
+			mesh_pose.orientation.x = q.x();
+			mesh_pose.orientation.y = q.y();
+			mesh_pose.orientation.z = q.z();
+			mesh_pose.orientation.w = q.w();
+
+			moveit_msgs::msg::CollisionObject obj;
+			obj.header.frame_id = "world";
+			obj.id = "bunny_holding_eggs";
+			obj.meshes.push_back(mesh_msg);
+			obj.mesh_poses.push_back(mesh_pose);
+			obj.operation = obj.ADD;
+
+			moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
+			planning_scene_interface.applyCollisionObject(obj);
+		}
 
 		bool isStateCollisionFree(
 			moveit::core::RobotState* state, const moveit::core::JointModelGroup* group, const double* joint_positions)
@@ -279,45 +334,10 @@ int main(int argc, char* argv[])
 {
 		rclcpp::init(argc, argv);
 
-		std::string object_mesh_path = "package://panda_arm_control/meshes/bunny_holding_eggs.stl";
-		Eigen::Vector3d scale(0.01, 0.01, 0.01);
-		shapes::Mesh* m = shapes::createMeshFromResource(object_mesh_path, scale);
-		std::cout << "loaded object mesh." << std::endl;
-
-		shape_msgs::msg::Mesh mesh_msg;
-		shapes::ShapeMsg mesh_tmp;
-		shapes::constructMsgFromShape(m, mesh_tmp);
-		mesh_msg = boost::get<shape_msgs::msg::Mesh>(mesh_tmp);	
-
-		geometry_msgs::msg::Pose mesh_pose;
-		mesh_pose.orientation.w = 1.0;
-		mesh_pose.position.x = 0.2;
-		mesh_pose.position.y = 0.2;
-		mesh_pose.position.z = 0.38;
-		
-		moveit_msgs::msg::CollisionObject obj;
-		obj.header.frame_id = "world";
-		obj.id = "bunny_holding_eggs";
-		obj.meshes.push_back(mesh_msg);
-		obj.mesh_poses.push_back(mesh_pose);
-		obj.operation = obj.ADD;
-
-		moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
-		planning_scene_interface.applyCollisionObject(obj);
-
-		// auto node = rclcpp::Node::make_shared("moveit_node");
-		// rclcpp::executors::SingleThreadedExecutor executor;
-		// executor.add_node(node);
-		// std::thread spinner([&executor]() { executor.spin(); });
-		// moveit::planning_interface::MoveGroupInterface move_group(node, "panda_arm");
-		// move_group.startStateMonitor();
-		// rclcpp::sleep_for(std::chrono::seconds(1));
-		// auto state = move_group.getCurrentState(2.0);
-
 		auto node = std::make_shared<WaypointFollower>(rclcpp::NodeOptions());
 		node->init();
 		rclcpp::spin(node);
-		
+
 		rclcpp::shutdown();
 		return 0;
 }
