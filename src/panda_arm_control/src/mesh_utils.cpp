@@ -482,9 +482,29 @@ Eigen::Vector3d TcpPosition(const ViewpointCandidate* c)
 }
 } // namespace
 
+double TourCost(
+	const Eigen::Vector3d& pos_a, const std::vector<double>& joints_a, const Eigen::Vector3d& pos_b,
+	const std::vector<double>& joints_b, double joint_distance_weight)
+{
+	double cost = (pos_a - pos_b).norm();
+
+	if (joints_a.empty() || joints_b.empty() || joints_a.size() != joints_b.size())
+		return cost;
+
+	double joint_dist_sq = 0.0;
+	for (size_t i = 0; i < joints_a.size(); ++i)
+	{
+		double d = joints_a[i] - joints_b[i];
+		joint_dist_sq += d * d;
+	}
+	return cost + joint_distance_weight * std::sqrt(joint_dist_sq);
+}
+
 std::vector<const ViewpointCandidate*> NearestNeighborOrder(
 	std::vector<const ViewpointCandidate*> candidates,
-	const Eigen::Vector3d& start_reference_position)
+	const Eigen::Vector3d& start_reference_position,
+	const std::vector<double>& start_reference_joints,
+	double joint_distance_weight)
 {
 	if (candidates.size() < 2)
 		return candidates;
@@ -493,13 +513,15 @@ std::vector<const ViewpointCandidate*> NearestNeighborOrder(
 	std::vector<const ViewpointCandidate*> ordered;
 	ordered.reserve(candidates.size());
 
-	// First stop: whichever candidate is closest to start_reference_position (e.g. the
-	// robot's home TCP position).
+	// First stop: whichever candidate is cheapest (TourCost) from start_reference_position/
+	// joints (e.g. the robot's home TCP position and joint configuration).
 	size_t current = 0;
 	double best_dist = std::numeric_limits<double>::max();
 	for (size_t i = 0; i < candidates.size(); ++i)
 	{
-		double d = (TcpPosition(candidates[i]) - start_reference_position).norm();
+		double d = TourCost(
+			TcpPosition(candidates[i]), candidates[i]->joint_solution, start_reference_position,
+			start_reference_joints, joint_distance_weight);
 		if (d < best_dist)
 		{
 			best_dist = d;
@@ -512,6 +534,7 @@ std::vector<const ViewpointCandidate*> NearestNeighborOrder(
 	for (size_t step = 1; step < candidates.size(); ++step)
 	{
 		Eigen::Vector3d cur_pos = TcpPosition(candidates[current]);
+		const std::vector<double>& cur_joints = candidates[current]->joint_solution;
 		double best = std::numeric_limits<double>::max();
 		size_t best_idx = current;
 
@@ -519,7 +542,8 @@ std::vector<const ViewpointCandidate*> NearestNeighborOrder(
 		{
 			if (visited[i])
 				continue;
-			double d = (TcpPosition(candidates[i]) - cur_pos).norm();
+			double d = TourCost(
+				TcpPosition(candidates[i]), candidates[i]->joint_solution, cur_pos, cur_joints, joint_distance_weight);
 			if (d < best)
 			{
 				best = d;
@@ -537,12 +561,15 @@ std::vector<const ViewpointCandidate*> NearestNeighborOrder(
 
 std::vector<const ViewpointCandidate*> TwoOptImprove(
 	std::vector<const ViewpointCandidate*> ordered,
-	const Eigen::Vector3d& start_reference_position)
+	const Eigen::Vector3d& start_reference_position,
+	const std::vector<double>& start_reference_joints,
+	double joint_distance_weight)
 {
 	if (ordered.size() < 3)
 		return ordered;
 
 	auto pos = [&](size_t idx) { return TcpPosition(ordered[idx]); };
+	auto joints = [&](size_t idx) -> const std::vector<double>& { return ordered[idx]->joint_solution; };
 
 	bool improved = true;
 	while (improved)
@@ -551,17 +578,18 @@ std::vector<const ViewpointCandidate*> TwoOptImprove(
 
 		for (size_t i = 0; i + 1 < ordered.size(); ++i)
 		{
-			Eigen::Vector3d prev = (i == 0) ? start_reference_position : pos(i - 1);
+			Eigen::Vector3d prev_pos = (i == 0) ? start_reference_position : pos(i - 1);
+			const std::vector<double>& prev_joints = (i == 0) ? start_reference_joints : joints(i - 1);
 
 			for (size_t j = i + 1; j < ordered.size(); ++j)
 			{
-				double old_cost = (prev - pos(i)).norm();
-				double new_cost = (prev - pos(j)).norm();
+				double old_cost = TourCost(prev_pos, prev_joints, pos(i), joints(i), joint_distance_weight);
+				double new_cost = TourCost(prev_pos, prev_joints, pos(j), joints(j), joint_distance_weight);
 
 				if (j + 1 < ordered.size())
 				{
-					old_cost += (pos(j) - pos(j + 1)).norm();
-					new_cost += (pos(i) - pos(j + 1)).norm();
+					old_cost += TourCost(pos(j), joints(j), pos(j + 1), joints(j + 1), joint_distance_weight);
+					new_cost += TourCost(pos(i), joints(i), pos(j + 1), joints(j + 1), joint_distance_weight);
 				}
 
 				if (new_cost < old_cost - 1e-9)

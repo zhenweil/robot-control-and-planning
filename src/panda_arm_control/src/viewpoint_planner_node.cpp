@@ -43,6 +43,10 @@ struct Params
 	std::vector<double> object_rotation_rpy_deg = {0.0, 0.0, 0.0};
 	std::vector<double> t_tcp_camera_xyz = {0.0, 0.0, 0.0};
 	std::vector<double> t_tcp_camera_quat_xyzw = {0.0, 0.0, 0.0, 1.0};
+	// Tour ordering cost is euclidean_distance_m + joint_distance_weight * joint_distance_rad,
+	// so this trades off "prefer short Cartesian hops" against "prefer small joint motion"
+	// (1.0 rad of joint motion counts as much as joint_distance_weight meters of TCP travel).
+	double joint_distance_weight = 0.1;
 	std::string output_dir = "/tmp/viewpoint_planner_output";
 };
 
@@ -110,11 +114,12 @@ public:
 		robot_state_->setToDefaultValues();
 		jmg_ = robot_state_->getJointModelGroup(params_.group_name);
 
-		// Capture the home tool0 position now, before computeReachability() mutates
+		// Capture the home tool0 position/joint values now, before computeReachability() mutates
 		// robot_state_ with IK solutions -- this is the reference point the nearest-neighbor
 		// tour starts from.
 		robot_state_->update();
 		home_tcp_position_ = robot_state_->getGlobalLinkTransform("tool0").translation();
+		robot_state_->copyJointGroupPositions(jmg_, home_joint_values_);
 
 		marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
 			"/viewpoint_markers", rclcpp::QoS(1).transient_local());
@@ -134,6 +139,7 @@ private:
 	moveit::core::RobotStatePtr robot_state_;
 	const moveit::core::JointModelGroup* jmg_ = nullptr;
 	Eigen::Vector3d home_tcp_position_ = Eigen::Vector3d::Zero();
+	std::vector<double> home_joint_values_;
 
 	std::vector<ViewpointCandidate> reachable_candidates_;
 	std::vector<ViewpointCandidate> unreachable_visible_;
@@ -178,6 +184,7 @@ private:
 		declareIfNeeded("object_rotation_rpy_deg", params_.object_rotation_rpy_deg);
 		declareIfNeeded("t_tcp_camera_xyz", params_.t_tcp_camera_xyz);
 		declareIfNeeded("t_tcp_camera_quat_xyzw", params_.t_tcp_camera_quat_xyzw);
+		declareIfNeeded("joint_distance_weight", params_.joint_distance_weight);
 		declareIfNeeded("output_dir", params_.output_dir);
 	}
 
@@ -203,6 +210,7 @@ private:
 		get_parameter("object_rotation_rpy_deg", params_.object_rotation_rpy_deg);
 		get_parameter("t_tcp_camera_xyz", params_.t_tcp_camera_xyz);
 		get_parameter("t_tcp_camera_quat_xyzw", params_.t_tcp_camera_quat_xyzw);
+		get_parameter("joint_distance_weight", params_.joint_distance_weight);
 		get_parameter("output_dir", params_.output_dir);
 	}
 
@@ -257,8 +265,10 @@ private:
 
 		RCLCPP_INFO(get_logger(), "selected views: %zu", selected_.size());
 
-		selected_ = NearestNeighborOrder(std::move(selected_), home_tcp_position_);
-		selected_ = TwoOptImprove(std::move(selected_), home_tcp_position_);
+		selected_ = NearestNeighborOrder(
+			std::move(selected_), home_tcp_position_, home_joint_values_, params_.joint_distance_weight);
+		selected_ = TwoOptImprove(
+			std::move(selected_), home_tcp_position_, home_joint_values_, params_.joint_distance_weight);
 
 		RCLCPP_INFO(
 			get_logger(), "reordered %zu selected views via nearest-neighbor + 2-opt from robot home position",
@@ -307,6 +317,8 @@ private:
 				c.camera_pos, c.view_dir, object_translation_world, object_rotation_world, t_tcp_camera);
 
 			c.reachable = robot_state_->setFromIK(jmg_, c.tcp_pose, "tool0", params_.ik_timeout);
+			if (c.reachable)
+				robot_state_->copyJointGroupPositions(jmg_, c.joint_solution);
 
 			if (i % 10 == 0)
 				RCLCPP_INFO(get_logger(), "IK check %zu/%zu, reachable=%s", i, candidates.size(), c.reachable ? "yes" : "no");

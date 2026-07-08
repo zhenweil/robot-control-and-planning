@@ -33,4 +33,8 @@ struct ViewpointCandidate
 
 	bool reachable = false;
 	geometry_msgs::msg::Pose tcp_pose;
+
+	// Joint values setFromIK solved tcp_pose for (empty if !reachable). Lets tour ordering
+	// account for actual joint-space motion, not just Cartesian TCP distance.
+	std::vector<double> joint_solution;
 };

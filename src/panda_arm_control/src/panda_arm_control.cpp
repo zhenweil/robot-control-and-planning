@@ -39,6 +39,11 @@ class WaypointFollower : public rclcpp::Node
 			this->planning_scene_monitor->requestPlanningSceneState();
 
 			this->move_group->setPlanningTime(20.0);
+			// RRTConnect is randomized and stops at the first valid path it finds, which can be
+			// meandering. Re-running it a few times and keeping the shortest result is much
+			// cheaper than switching to an optimizing planner (e.g. RRT*), which would use its
+			// full time budget on every single waypoint instead of just a few fast reruns.
+			this->move_group->setNumPlanningAttempts(5);
 			this->move_group->setMaxVelocityScalingFactor(0.5);
 			this->move_group->setMaxAccelerationScalingFactor(0.5);
 			this->move_group->setEndEffectorLink("tool0");

@@ -3,5 +3,5 @@
     # x/y matches tool0's position at the robot's home configuration (initial_joints in
     # panda_arm_control.cpp), computed via forward kinematics, so the object sits directly below
     # the end effector's resting position.
-    object_translation_world: [0.7, 0.0, 0.3]
+    object_translation_world: [0.5, 0.0, 0.3]
     object_rotation_rpy_deg: [0.0, 0.0, 0.0]

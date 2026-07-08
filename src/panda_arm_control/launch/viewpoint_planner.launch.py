@@ -46,6 +46,8 @@ def generate_launch_description():
         "ik_timeout": 0.1,
         "random_seed": 42,
         "group_name": "panda_arm",
+        # Tour ordering cost is euclidean_distance_m + joint_distance_weight * joint_distance_rad.
+        "joint_distance_weight": 0.05,
         "t_tcp_camera_xyz": [0.0, 0.0, 0.0],
         "t_tcp_camera_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
         "output_dir": "/tmp/viewpoint_planner_output",
