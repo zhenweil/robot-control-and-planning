@@ -47,6 +47,9 @@ struct Params
 	// so this trades off "prefer short Cartesian hops" against "prefer small joint motion"
 	// (1.0 rad of joint motion counts as much as joint_distance_weight meters of TCP travel).
 	double joint_distance_weight = 0.1;
+	// Applied only to the original mesh's comparison-marker position (not the object's actual
+	// pose), so the original and simplified meshes render side by side instead of overlapping.
+	std::vector<double> mesh_comparison_offset = {0.0, 0.3, 0.0};
 	std::string output_dir = "/tmp/viewpoint_planner_output";
 };
 
@@ -124,6 +127,9 @@ public:
 		marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
 			"/viewpoint_markers", rclcpp::QoS(1).transient_local());
 
+		mesh_comparison_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+			"/mesh_comparison_markers", rclcpp::QoS(1).transient_local());
+
 		waypoint_pub_ = create_publisher<geometry_msgs::msg::PoseArray>(
 			"/cartesian_waypoints", rclcpp::QoS(1).transient_local());
 
@@ -145,8 +151,10 @@ private:
 	std::vector<ViewpointCandidate> unreachable_visible_;
 	std::vector<const ViewpointCandidate*> selected_;
 	std::string resolved_mesh_path_;
+	std::string resolved_simplified_mesh_path_;
 
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
+	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr mesh_comparison_pub_;
 	rclcpp::TimerBase::SharedPtr marker_timer_;
 	visualization_msgs::msg::MarkerArray marker_array_;
 
@@ -185,6 +193,7 @@ private:
 		declareIfNeeded("t_tcp_camera_xyz", params_.t_tcp_camera_xyz);
 		declareIfNeeded("t_tcp_camera_quat_xyzw", params_.t_tcp_camera_quat_xyzw);
 		declareIfNeeded("joint_distance_weight", params_.joint_distance_weight);
+		declareIfNeeded("mesh_comparison_offset", params_.mesh_comparison_offset);
 		declareIfNeeded("output_dir", params_.output_dir);
 	}
 
@@ -211,6 +220,7 @@ private:
 		get_parameter("t_tcp_camera_xyz", params_.t_tcp_camera_xyz);
 		get_parameter("t_tcp_camera_quat_xyzw", params_.t_tcp_camera_quat_xyzw);
 		get_parameter("joint_distance_weight", params_.joint_distance_weight);
+		get_parameter("mesh_comparison_offset", params_.mesh_comparison_offset);
 		get_parameter("output_dir", params_.output_dir);
 	}
 
@@ -224,12 +234,16 @@ private:
 		}
 
 		resolved_mesh_path_ = mesh_path;
+		std::filesystem::create_directories(params_.output_dir);
 
 		auto original_poly = LoadAndScaleMesh(mesh_path, params_.mesh_scale);
 		MeshData original_mesh = BuildMeshData(original_poly);
 
 		auto simplified_poly = SimplifyMesh(original_poly, params_.target_faces);
 		MeshData simplified_mesh = BuildMeshData(simplified_poly);
+
+		resolved_simplified_mesh_path_ = params_.output_dir + "/simplified_mesh.stl";
+		ExportMeshToStl(simplified_poly, resolved_simplified_mesh_path_);
 
 		std::mt19937 rng(params_.random_seed);
 		auto candidates = GenerateViewCandidates(
@@ -274,11 +288,12 @@ private:
 			get_logger(), "reordered %zu selected views via nearest-neighbor + 2-opt from robot home position",
 			selected_.size());
 
-		std::filesystem::create_directories(params_.output_dir);
 		exportSelectedViewpoints();
 		exportSelectedRobotPoses();
 		marker_array_ = buildMarkerArray();
 		marker_pub_->publish(marker_array_);
+
+		mesh_comparison_pub_->publish(buildMeshComparisonMarkers());
 
 		publishWaypoints();
 	}
@@ -526,6 +541,72 @@ private:
 			}
 			markers.markers.push_back(tour);
 		}
+
+		return markers;
+	}
+
+	// Original mesh (offset by mesh_comparison_offset) and simplified/decimated mesh (at the
+	// object's actual pose) side by side, on their own topic separate from /viewpoint_markers.
+	visualization_msgs::msg::MarkerArray buildMeshComparisonMarkers() const
+	{
+		visualization_msgs::msg::MarkerArray markers;
+
+		Eigen::Vector3d object_translation_world =
+			ToVector3(params_.object_translation_world, Eigen::Vector3d(0.2, 0.2, 0.38));
+		Eigen::Matrix3d object_rotation_world = RotationFromRpyDeg(params_.object_rotation_rpy_deg);
+		Eigen::Vector3d comparison_offset =
+			ToVector3(params_.mesh_comparison_offset, Eigen::Vector3d(0.0, 0.3, 0.0));
+
+		Eigen::Quaterniond object_quat(object_rotation_world);
+		auto stamp = now();
+		int id = 0;
+
+		// Original mesh, at the object's real pose (unshifted). resolved_mesh_path_ points at the
+		// raw, unscaled STL, so mesh_scale still needs to be applied here.
+		visualization_msgs::msg::Marker original_marker;
+		original_marker.header.frame_id = "world";
+		original_marker.header.stamp = stamp;
+		original_marker.ns = "original_mesh";
+		original_marker.id = id++;
+		original_marker.type = visualization_msgs::msg::Marker::MESH_RESOURCE;
+		original_marker.action = visualization_msgs::msg::Marker::ADD;
+		original_marker.mesh_resource = "file://" + resolved_mesh_path_;
+		original_marker.mesh_use_embedded_materials = false;
+		original_marker.pose.position = ToPoint(object_translation_world);
+		original_marker.pose.orientation.x = object_quat.x();
+		original_marker.pose.orientation.y = object_quat.y();
+		original_marker.pose.orientation.z = object_quat.z();
+		original_marker.pose.orientation.w = object_quat.w();
+		original_marker.scale.x = original_marker.scale.y = original_marker.scale.z = params_.mesh_scale;
+		original_marker.color.r = 0.7f;
+		original_marker.color.g = 0.7f;
+		original_marker.color.b = 0.7f;
+		original_marker.color.a = 0.8f;
+		markers.markers.push_back(original_marker);
+
+		// Simplified (decimated) mesh, shifted by mesh_comparison_offset so it doesn't overlap
+		// the original. resolved_simplified_mesh_path_ was exported from the already-scaled
+		// in-memory mesh, so no marker-level scale needed.
+		visualization_msgs::msg::Marker simplified_marker;
+		simplified_marker.header.frame_id = "world";
+		simplified_marker.header.stamp = stamp;
+		simplified_marker.ns = "simplified_mesh";
+		simplified_marker.id = id++;
+		simplified_marker.type = visualization_msgs::msg::Marker::MESH_RESOURCE;
+		simplified_marker.action = visualization_msgs::msg::Marker::ADD;
+		simplified_marker.mesh_resource = "file://" + resolved_simplified_mesh_path_;
+		simplified_marker.mesh_use_embedded_materials = false;
+		simplified_marker.pose.position = ToPoint(object_translation_world + comparison_offset);
+		simplified_marker.pose.orientation.x = object_quat.x();
+		simplified_marker.pose.orientation.y = object_quat.y();
+		simplified_marker.pose.orientation.z = object_quat.z();
+		simplified_marker.pose.orientation.w = object_quat.w();
+		simplified_marker.scale.x = simplified_marker.scale.y = simplified_marker.scale.z = 1.0;
+		simplified_marker.color.r = 0.2f;
+		simplified_marker.color.g = 0.8f;
+		simplified_marker.color.b = 0.2f;
+		simplified_marker.color.a = 0.8f;
+		markers.markers.push_back(simplified_marker);
 
 		return markers;
 	}

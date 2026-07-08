@@ -13,6 +13,9 @@
 // Mirrors trimesh.load(mesh_path).apply_scale(scale).
 vtkSmartPointer<vtkPolyData> LoadAndScaleMesh(const std::string& stl_path, double scale);
 
+// Writes poly_data to a binary STL file (RViz's MESH_RESOURCE marker requires binary, not ASCII).
+void ExportMeshToStl(vtkSmartPointer<vtkPolyData> poly_data, const std::string& path);
+
 // Decimate a mesh down to approximately target_faces triangles, then clean up
 // unreferenced points and fix normal orientation.
 // Mirrors simplify_mesh() in sample_viewpoints.py.

@@ -12,6 +12,7 @@
 #include <vtkPolyDataNormals.h>
 #include <vtkQuadricDecimation.h>
 #include <vtkSTLReader.h>
+#include <vtkSTLWriter.h>
 #include <vtkSelectEnclosedPoints.h>
 #include <vtkStaticCellLocator.h>
 #include <vtkTransform.h>
@@ -65,6 +66,15 @@ vtkSmartPointer<vtkPolyData> LoadAndScaleMesh(const std::string& stl_path, doubl
 	vtkSmartPointer<vtkPolyData> out = vtkSmartPointer<vtkPolyData>::New();
 	out->DeepCopy(transform_filter->GetOutput());
 	return out;
+}
+
+void ExportMeshToStl(vtkSmartPointer<vtkPolyData> poly_data, const std::string& path)
+{
+	vtkNew<vtkSTLWriter> writer;
+	writer->SetFileName(path.c_str());
+	writer->SetInputData(poly_data);
+	writer->SetFileTypeToBinary(); // RViz's MESH_RESOURCE marker requires binary STL.
+	writer->Write();
 }
 
 vtkSmartPointer<vtkPolyData> SimplifyMesh(vtkSmartPointer<vtkPolyData> input, int target_faces)
