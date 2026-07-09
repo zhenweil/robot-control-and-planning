@@ -47,6 +47,8 @@ ament_target_dependencies(panda_arm_control
 
 add_executable(viewpoint_planner
 	src/mesh_utils.cpp
+	src/potential_field_sampler.cpp
+	src/rkga_scp.cpp
 	src/viewpoint_planner_node.cpp
 	)
 
@@ -60,6 +62,8 @@ ament_target_dependencies(viewpoint_planner
 	moveit_ros_planning
 	moveit_msgs
 	geometry_msgs
+	shape_msgs
+	geometric_shapes
 	visualization_msgs
 	ament_index_cpp
 	)

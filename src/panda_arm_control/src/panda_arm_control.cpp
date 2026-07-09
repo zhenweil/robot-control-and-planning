@@ -44,8 +44,8 @@ class WaypointFollower : public rclcpp::Node
 			// cheaper than switching to an optimizing planner (e.g. RRT*), which would use its
 			// full time budget on every single waypoint instead of just a few fast reruns.
 			this->move_group->setNumPlanningAttempts(5);
-			this->move_group->setMaxVelocityScalingFactor(0.5);
-			this->move_group->setMaxAccelerationScalingFactor(0.5);
+			this->move_group->setMaxVelocityScalingFactor(1.0);
+			this->move_group->setMaxAccelerationScalingFactor(1.0);
 			this->move_group->setEndEffectorLink("tool0");
 			this->sub = this->create_subscription<geometry_msgs::msg::PoseArray>(
 				"/cartesian_waypoints",

@@ -3,6 +3,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from launch.substitutions import PathJoinSubstitution
 from moveit_configs_utils import MoveItConfigsBuilder
@@ -17,6 +18,15 @@ def generate_launch_description():
         "/viewpoint_markers) is already providing it.",
     )
     use_rviz = LaunchConfiguration("use_rviz")
+
+    use_rkga_arg = DeclareLaunchArgument(
+        "use_rkga",
+        default_value="false",
+        description="Use the potential-field sampler + collision-aware IK + RKGA-SCP genetic "
+        "algorithm pipeline instead of the standoff/tilt grid + greedy set-cover + NN/2-opt "
+        "pipeline.",
+    )
+    use_rkga = ParameterValue(LaunchConfiguration("use_rkga"), value_type=bool)
 
     moveit_config = (
         MoveItConfigsBuilder("panda", package_name="panda_arm_moveit")
@@ -33,15 +43,15 @@ def generate_launch_description():
         "mesh_path": "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl",  # empty -> resolved via ament_index_cpp in code; rviz mesh markers require binary STL
         "mesh_scale": 0.01,
         "target_faces": 1000,
-        "n_surface_samples": 50,
+        "n_surface_samples": 500,
         "standoff_distances": [0.01, 0.02, 0.03],
         "tilt_angles_deg": [0.0, 15.0, -15.0],
         "min_clearance": 0.005,
-        "fov_deg": 30.0,
+        "fov_deg": 50.0,
         "max_distance": 20.0,
         "angle_threshold_deg": 70.0,
         "max_rays_per_view": 2000,
-        "target_area_visibility": 0.95,
+        "target_area_visibility": 0.9,
         "min_new_area_ratio": 0.001,
         "ik_timeout": 0.1,
         "random_seed": 42,
@@ -50,6 +60,7 @@ def generate_launch_description():
         "joint_distance_weight": 0.05,
         "t_tcp_camera_xyz": [0.0, 0.0, 0.0],
         "t_tcp_camera_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
+        "use_rkga": use_rkga,
         "output_dir": "/tmp/viewpoint_planner_output",
     }
 
@@ -80,4 +91,4 @@ def generate_launch_description():
         condition=IfCondition(use_rviz),
     )
 
-    return LaunchDescription([use_rviz_arg, viewpoint_planner_node, rviz_node])
+    return LaunchDescription([use_rviz_arg, use_rkga_arg, viewpoint_planner_node, rviz_node])

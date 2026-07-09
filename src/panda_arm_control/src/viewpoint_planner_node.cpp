@@ -16,6 +16,8 @@
 
 #include "panda_arm_control/mesh_utils.hpp"
 #include "panda_arm_control/pose_utils.hpp"
+#include "panda_arm_control/potential_field_sampler.hpp"
+#include "panda_arm_control/rkga_scp.hpp"
 #include "panda_arm_control/viewpoint_types.hpp"
 
 namespace
@@ -50,6 +52,10 @@ struct Params
 	// Applied only to the original mesh's comparison-marker position (not the object's actual
 	// pose), so the original and simplified meshes render side by side instead of overlapping.
 	std::vector<double> mesh_comparison_offset = {0.0, 0.3, 0.0};
+	// Swaps candidate generation/reachability/selection for the potential-field sampler +
+	// collision-aware IK + RKGA-SCP genetic algorithm (rkga_scp.hpp) instead of the standoff/tilt
+	// grid + plain IK + greedy set-cover + NN/2-opt pipeline.
+	bool use_rkga = false;
 	std::string output_dir = "/tmp/viewpoint_planner_output";
 };
 
@@ -194,6 +200,7 @@ private:
 		declareIfNeeded("t_tcp_camera_quat_xyzw", params_.t_tcp_camera_quat_xyzw);
 		declareIfNeeded("joint_distance_weight", params_.joint_distance_weight);
 		declareIfNeeded("mesh_comparison_offset", params_.mesh_comparison_offset);
+		declareIfNeeded("use_rkga", params_.use_rkga);
 		declareIfNeeded("output_dir", params_.output_dir);
 	}
 
@@ -221,6 +228,7 @@ private:
 		get_parameter("t_tcp_camera_quat_xyzw", params_.t_tcp_camera_quat_xyzw);
 		get_parameter("joint_distance_weight", params_.joint_distance_weight);
 		get_parameter("mesh_comparison_offset", params_.mesh_comparison_offset);
+		get_parameter("use_rkga", params_.use_rkga);
 		get_parameter("output_dir", params_.output_dir);
 	}
 
@@ -246,8 +254,17 @@ private:
 		ExportMeshToStl(simplified_poly, resolved_simplified_mesh_path_);
 
 		std::mt19937 rng(params_.random_seed);
-		auto candidates = GenerateViewCandidates(
-			simplified_mesh, params_.n_surface_samples, params_.standoff_distances, params_.tilt_angles_deg, rng);
+		std::vector<ViewpointCandidate> candidates;
+		if (params_.use_rkga)
+		{
+			candidates = GeneratePotentialFieldViewCandidates(
+				simplified_mesh, params_.n_surface_samples, params_.standoff_distances, rng);
+		}
+		else
+		{
+			candidates = GenerateViewCandidates(
+				simplified_mesh, params_.n_surface_samples, params_.standoff_distances, params_.tilt_angles_deg, rng);
+		}
 
 		RCLCPP_INFO(get_logger(), "candidate views: %zu", candidates.size());
 
@@ -260,7 +277,26 @@ private:
 
 		RCLCPP_INFO(get_logger(), "visible candidate views: %zu", candidates.size());
 
-		candidates = computeReachability(std::move(candidates));
+		if (params_.use_rkga)
+		{
+			Eigen::Vector3d object_translation_world =
+				ToVector3(params_.object_translation_world, Eigen::Vector3d(0.2, 0.2, 0.38));
+			Eigen::Matrix3d object_rotation_world = RotationFromRpyDeg(params_.object_rotation_rpy_deg);
+			Eigen::Isometry3d t_tcp_camera =
+				IsometryFromXyzQuat(params_.t_tcp_camera_xyz, params_.t_tcp_camera_quat_xyzw);
+
+			auto local_scene = BuildLocalCollisionScene(
+				shared_from_this(), resolved_mesh_path_, params_.mesh_scale, object_translation_world,
+				object_rotation_world);
+
+			candidates = ComputeReachabilityWithCollisionCheck(
+				std::move(candidates), robot_state_, jmg_, local_scene, object_translation_world,
+				object_rotation_world, t_tcp_camera, params_.ik_timeout);
+		}
+		else
+		{
+			candidates = computeReachability(std::move(candidates));
+		}
 
 		for (auto& c : candidates)
 		{
@@ -274,19 +310,46 @@ private:
 			get_logger(), "reachable candidate views: %zu / %zu", reachable_candidates_.size(),
 			reachable_candidates_.size() + unreachable_visible_.size());
 
-		selected_ = GreedySelectViewpoints(
-			simplified_mesh, reachable_candidates_, params_.target_area_visibility, params_.min_new_area_ratio);
+		if (params_.use_rkga)
+		{
+			RkgaScpParams rkga_params;
+			rkga_params.target_area_visibility = params_.target_area_visibility;
+			rkga_params.min_new_area_ratio = params_.min_new_area_ratio;
+			rkga_params.random_seed = static_cast<unsigned int>(params_.random_seed);
 
-		RCLCPP_INFO(get_logger(), "selected views: %zu", selected_.size());
+			selected_ = SolveRkgaScp(
+				simplified_mesh, reachable_candidates_, home_tcp_position_, home_joint_values_,
+				params_.joint_distance_weight, rkga_params);
 
-		selected_ = NearestNeighborOrder(
-			std::move(selected_), home_tcp_position_, home_joint_values_, params_.joint_distance_weight);
-		selected_ = TwoOptImprove(
-			std::move(selected_), home_tcp_position_, home_joint_values_, params_.joint_distance_weight);
+			double achieved_visibility = ComputeAreaVisibility(simplified_mesh, selected_);
+			RCLCPP_INFO(
+				get_logger(), "RKGA-SCP selected %zu views (jointly selected + ordered), %.2f%% area visibility",
+				selected_.size(), achieved_visibility * 100.0);
 
-		RCLCPP_INFO(
-			get_logger(), "reordered %zu selected views via nearest-neighbor + 2-opt from robot home position",
-			selected_.size());
+			TravelCostBreakdown breakdown =
+				ComputeTravelCostBreakdown(selected_, home_tcp_position_, home_joint_values_);
+			RCLCPP_INFO(
+				get_logger(),
+				"Travel cost breakdown: %.4f m cartesian, %.4f rad joint-space (weighted: %.4f m-equivalent)",
+				breakdown.cartesian_distance_m, breakdown.joint_distance_rad,
+				breakdown.joint_distance_rad * params_.joint_distance_weight);
+		}
+		else
+		{
+			selected_ = GreedySelectViewpoints(
+				simplified_mesh, reachable_candidates_, params_.target_area_visibility, params_.min_new_area_ratio);
+
+			RCLCPP_INFO(get_logger(), "selected views: %zu", selected_.size());
+
+			selected_ = NearestNeighborOrder(
+				std::move(selected_), home_tcp_position_, home_joint_values_, params_.joint_distance_weight);
+			selected_ = TwoOptImprove(
+				std::move(selected_), home_tcp_position_, home_joint_values_, params_.joint_distance_weight);
+
+			RCLCPP_INFO(
+				get_logger(), "reordered %zu selected views via nearest-neighbor + 2-opt from robot home position",
+				selected_.size());
+		}
 
 		exportSelectedViewpoints();
 		exportSelectedRobotPoses();
