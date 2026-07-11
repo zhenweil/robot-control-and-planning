@@ -314,7 +314,6 @@ private:
 		{
 			RkgaScpParams rkga_params;
 			rkga_params.target_area_visibility = params_.target_area_visibility;
-			rkga_params.min_new_area_ratio = params_.min_new_area_ratio;
 			rkga_params.random_seed = static_cast<unsigned int>(params_.random_seed);
 
 			selected_ = SolveRkgaScp(

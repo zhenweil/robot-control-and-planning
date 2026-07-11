@@ -64,21 +64,18 @@ struct RkgaScpParams
 	double mutant_fraction = 0.15;	 // fraction replaced with brand-new random chromosomes each gen
 	double elite_bias = 0.7;  // probability an offspring gene is inherited from its elite parent
 	double target_area_visibility = 0.95;
-	double min_new_area_ratio = 0.001;
-	// meters-equivalent cost charged per selected viewpoint, trading off against TourCost --
-	// same role as joint_distance_weight plays for combining Cartesian and joint-space distance.
-	double viewpoint_count_weight = 0.02;
 	unsigned int random_seed = 42;
 };
 
 // Random-key genetic algorithm (BRKGA) jointly solving viewpoint selection and visiting order:
 // a chromosome is one random key in [0,1] per candidate; decoding sorts candidates by key and
-// greedily adds each (in that order) if it still covers previously-uncovered area, stopping once
-// target_area_visibility is reached (same feasibility semantics as GreedySelectViewpoints, but
-// order comes from the chromosome instead of greedy gain). Fitness = TourCost of the decoded
-// selection in that same order (starting from start_reference_position/joints) +
-// viewpoint_count_weight * number selected -- so evolution jointly pressures toward both fewer
-// viewpoints and a cheaper visiting order, rather than optimizing them as separate stages.
+// greedily adds each (in that order) as long as it contributes any new coverage, stopping once
+// target_area_visibility is reached (order comes from the chromosome instead of greedy gain, and
+// there's no minimum-gain threshold -- any positive contribution is accepted). Fitness is travel
+// cost alone (TourCost of the decoded selection in that order, starting from
+// start_reference_position/joints, via ComputeReachabilityWithCollisionCheck-style multi-solution
+// dynamic programming) -- no per-viewpoint penalty, so evolution optimizes purely for cheaper
+// travel, independent of how many viewpoints that ends up using.
 std::vector<const ViewpointCandidate*> SolveRkgaScp(
 	const MeshData& mesh,
 	const std::vector<ViewpointCandidate>& candidates,

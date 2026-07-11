@@ -84,6 +84,21 @@ bool IsStateCollisionFree(
 	planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
 	return locked_scene->isStateValid(*state, group->getName());
 }
+
+bool AreJointSolutionsSimilar(const std::vector<double>& a, const std::vector<double>& b, double threshold_rad)
+{
+	double dist_sq = 0.0;
+	for (size_t i = 0; i < a.size(); ++i)
+	{
+		double d = a[i] - b[i];
+		dist_sq += d * d;
+	}
+	return std::sqrt(dist_sq) < threshold_rad;
+}
+
+constexpr int kMaxJointSolutionsPerCandidate = 5;
+constexpr double kJointSolutionDedupThresholdRad = 0.1; // ~5.7 degrees of combined joint distance
+
 } // namespace
 
 std::vector<ViewpointCandidate> ComputeReachabilityWithCollisionCheck(
@@ -96,22 +111,56 @@ std::vector<ViewpointCandidate> ComputeReachabilityWithCollisionCheck(
 	const Eigen::Isometry3d& t_tcp_camera,
 	double ik_timeout)
 {
+	auto validity_callback = [&planning_scene_monitor](
+								  moveit::core::RobotState* state, const moveit::core::JointModelGroup* group,
+								  const double* joint_positions) {
+		return IsStateCollisionFree(planning_scene_monitor, state, group, joint_positions);
+	};
+
 	for (size_t i = 0; i < candidates.size(); ++i)
 	{
 		auto& c = candidates[i];
 		c.tcp_pose = ConvertViewpointToTcpPose(
 			c.camera_pos, c.view_dir, object_translation_world, object_rotation_world, t_tcp_camera);
 
-		c.reachable = robot_state->setFromIK(
-			jmg, c.tcp_pose, "tool0", ik_timeout,
-			[&planning_scene_monitor](
-				moveit::core::RobotState* state, const moveit::core::JointModelGroup* group,
-				const double* joint_positions) {
-				return IsStateCollisionFree(planning_scene_monitor, state, group, joint_positions);
-			});
+		c.reachable = robot_state->setFromIK(jmg, c.tcp_pose, "tool0", ik_timeout, validity_callback);
 
-		if (c.reachable)
-			robot_state->copyJointGroupPositions(jmg, c.joint_solution);
+		if (!c.reachable)
+			continue;
+
+		robot_state->copyJointGroupPositions(jmg, c.joint_solution);
+		c.joint_solutions.push_back(c.joint_solution);
+
+		// Exploit the arm's redundancy: retry from several randomized seeds to find other
+		// distinct valid (collision-free) configurations reaching the same tcp_pose, so the
+		// RKGA-SCP cost model has real alternatives to choose from instead of being stuck with
+		// whichever elbow/wrist configuration this first, arbitrarily-seeded solve happened to
+		// find.
+		for (int attempt = 0;
+			 attempt < kMaxJointSolutionsPerCandidate * 3 &&
+			 static_cast<int>(c.joint_solutions.size()) < kMaxJointSolutionsPerCandidate;
+			 ++attempt)
+		{
+			robot_state->setToRandomPositions(jmg);
+			if (!robot_state->setFromIK(jmg, c.tcp_pose, "tool0", ik_timeout, validity_callback))
+				continue;
+
+			std::vector<double> alt_solution;
+			robot_state->copyJointGroupPositions(jmg, alt_solution);
+
+			bool is_duplicate = false;
+			for (const auto& existing : c.joint_solutions)
+			{
+				if (AreJointSolutionsSimilar(existing, alt_solution, kJointSolutionDedupThresholdRad))
+				{
+					is_duplicate = true;
+					break;
+				}
+			}
+
+			if (!is_duplicate)
+				c.joint_solutions.push_back(std::move(alt_solution));
+		}
 	}
 
 	return candidates;
@@ -191,10 +240,11 @@ Eigen::Vector3d TcpPositionOf(const ViewpointCandidate& c)
 // Sorts candidate indices by chromosome key ascending, then walks that order greedily adding
 // each candidate if it still covers previously-uncovered area -- same feasibility/stopping
 // semantics as GreedySelectViewpoints, but the visiting order comes from the chromosome instead
-// of "biggest gain first."
+// of "biggest gain first." No minimum-gain threshold: any candidate contributing new coverage
+// (gain > 0) is accepted, however small.
 std::vector<size_t> DecodeChromosome(
 	const std::vector<double>& keys, const MeshData& mesh, const std::vector<ViewpointCandidate>& candidates,
-	double target_area_visibility, double min_new_area_ratio)
+	double target_area_visibility)
 {
 	std::vector<size_t> order(candidates.size());
 	std::iota(order.begin(), order.end(), 0);
@@ -217,8 +267,8 @@ std::vector<size_t> DecodeChromosome(
 			if (uncovered[f] && mask[f])
 				gain += mesh.face_areas[f];
 
-		if (gain / mesh.total_area < min_new_area_ratio)
-			continue; // doesn't help enough -- skip, keep walking the sorted order
+		if (gain <= 0.0)
+			continue; // contributes nothing new -- skip, keep walking the sorted order
 
 		selected.push_back(idx);
 		for (size_t f = 0; f < n_faces; ++f)
@@ -243,30 +293,51 @@ double ComputeAreaVisibilityByIndex(
 	return ComputeAreaVisibility(mesh, pointers);
 }
 
-// TourCost of the decoded selection in decode order (starting from the robot's home
-// position/joints), plus a per-viewpoint cost -- lower is better.
+// Minimum-cost way to traverse `selected` in order, via dynamic programming over each
+// candidate's joint_solutions options: since the same TCP pose can be reached via different
+// elbow/wrist configurations, a single fixed joint solution per candidate doesn't necessarily
+// reflect the true achievable reconfiguration cost between two viewpoints. dp[j] tracks the
+// minimum cumulative cost to reach option j of the current step, considering every option of the
+// previous step -- so the result is the best possible joint-solution assignment for this
+// particular visiting order, not just whatever solution happened to be recorded first. Fitness is
+// travel cost alone -- no per-viewpoint penalty, so evolution only pressures toward cheaper travel,
+// not toward using fewer viewpoints.
 double EvaluateFitness(
 	const std::vector<size_t>& selected, const std::vector<ViewpointCandidate>& candidates,
 	const Eigen::Vector3d& start_reference_position, const std::vector<double>& start_reference_joints,
-	double joint_distance_weight, double viewpoint_count_weight)
+	double joint_distance_weight)
 {
 	if (selected.empty())
 		return std::numeric_limits<double>::max();
 
-	double travel = 0.0;
-	Eigen::Vector3d prev_pos = start_reference_position;
-	const std::vector<double>* prev_joints = &start_reference_joints;
+	std::vector<double> dp = {0.0};
+	std::vector<Eigen::Vector3d> prev_positions = {start_reference_position};
+	std::vector<std::vector<double>> prev_joint_options = {start_reference_joints};
 
 	for (size_t idx : selected)
 	{
 		const ViewpointCandidate& c = candidates[idx];
 		Eigen::Vector3d pos = TcpPositionOf(c);
-		travel += TourCost(prev_pos, *prev_joints, pos, c.joint_solution, joint_distance_weight);
-		prev_pos = pos;
-		prev_joints = &c.joint_solution;
+
+		// Copy (not reference) to sidestep any ambiguity about temporary lifetime extension when
+		// the ternary's branches have different value categories -- these vectors are tiny
+		// (<= a handful of 7-element joint vectors), so the copy cost is negligible.
+		std::vector<std::vector<double>> options =
+			c.joint_solutions.empty() ? std::vector<std::vector<double>>{c.joint_solution} : c.joint_solutions;
+
+		std::vector<double> new_dp(options.size(), std::numeric_limits<double>::max());
+		for (size_t j = 0; j < options.size(); ++j)
+			for (size_t jp = 0; jp < dp.size(); ++jp)
+				new_dp[j] = std::min(
+					new_dp[j],
+					dp[jp] + TourCost(prev_positions[jp], prev_joint_options[jp], pos, options[j], joint_distance_weight));
+
+		dp = std::move(new_dp);
+		prev_positions.assign(options.size(), pos);
+		prev_joint_options = options;
 	}
 
-	return travel + viewpoint_count_weight * static_cast<double>(selected.size());
+	return *std::min_element(dp.begin(), dp.end());
 }
 
 } // namespace
@@ -302,11 +373,9 @@ std::vector<const ViewpointCandidate*> SolveRkgaScp(
 		std::vector<std::vector<size_t>> decoded(population.size());
 		for (size_t i = 0; i < population.size(); ++i)
 		{
-			decoded[i] = DecodeChromosome(
-				population[i], mesh, candidates, params.target_area_visibility, params.min_new_area_ratio);
+			decoded[i] = DecodeChromosome(population[i], mesh, candidates, params.target_area_visibility);
 			fitness[i] = EvaluateFitness(
-				decoded[i], candidates, start_reference_position, start_reference_joints, joint_distance_weight,
-				params.viewpoint_count_weight);
+				decoded[i], candidates, start_reference_position, start_reference_joints, joint_distance_weight);
 		}
 
 		std::vector<size_t> rank(population.size());

@@ -37,4 +37,13 @@ struct ViewpointCandidate
 	// Joint values setFromIK solved tcp_pose for (empty if !reachable). Lets tour ordering
 	// account for actual joint-space motion, not just Cartesian TCP distance.
 	std::vector<double> joint_solution;
+
+	// Several distinct valid (collision-free) IK solutions for tcp_pose, found via randomized
+	// re-seeding (see ComputeReachabilityWithCollisionCheck in rkga_scp.cpp) -- since the arm is
+	// redundant, the same TCP pose can be reached via different elbow/wrist configurations. Having
+	// several options lets the RKGA-SCP cost model pick whichever pairing between two candidates
+	// is actually cheapest, instead of being stuck with one arbitrarily-seeded solution per
+	// candidate that may not reflect the true achievable reconfiguration cost. Includes
+	// joint_solution as one of its entries when reachable.
+	std::vector<std::vector<double>> joint_solutions;
 };
