@@ -428,8 +428,7 @@ std::vector<ViewpointCandidate> GenerateViewCandidates(
 std::vector<const ViewpointCandidate*> GreedySelectViewpoints(
 	const MeshData& mesh,
 	const std::vector<ViewpointCandidate>& candidates,
-	double target_area_visibility,
-	double min_new_area_ratio)
+	double target_area_visibility)
 {
 	const size_t n_faces = mesh.NumFaces();
 	std::vector<uint8_t> uncovered(n_faces, 1);
@@ -464,12 +463,6 @@ std::vector<const ViewpointCandidate*> GreedySelectViewpoints(
 
 		if (current_visibility >= target_area_visibility)
 			break;
-
-		if (new_area_ratio < min_new_area_ratio)
-		{
-			printf("stopping: best new area only %.3f%%\n", new_area_ratio * 100.0);
-			break;
-		}
 
 		selected.push_back(best);
 		for (size_t f = 0; f < n_faces; ++f)

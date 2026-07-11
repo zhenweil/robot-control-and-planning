@@ -63,7 +63,7 @@ def generate_launch_description():
         "mesh_path": "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl",  # empty -> resolved via ament_index_cpp in code; rviz mesh markers require binary STL
         "mesh_scale": 0.01,
         "target_faces": 1000,
-        "n_surface_samples": 50,
+        "n_surface_samples": 100,
         "standoff_distances": [0.01, 0.02, 0.03],
         "tilt_angles_deg": [0.0, 15.0, -15.0],
         "min_clearance": 0.005,
@@ -72,7 +72,6 @@ def generate_launch_description():
         "angle_threshold_deg": 70.0,
         "max_rays_per_view": 2000,
         "target_area_visibility": 0.9,
-        "min_new_area_ratio": 0.001,
         "ik_timeout": 0.1,
         "random_seed": 42,
         "group_name": "panda_arm",

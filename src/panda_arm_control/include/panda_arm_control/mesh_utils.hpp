@@ -93,13 +93,14 @@ std::vector<ViewpointCandidate> GenerateViewCandidates(
 	const std::vector<double>& tilt_angles_deg,
 	std::mt19937& rng);
 
-// Greedy weighted set-cover over candidate visible faces.
-// Mirrors greedy_select_viewpoints_target_visibility().
+// Greedy weighted set-cover over candidate visible faces: repeatedly picks whichever remaining
+// candidate covers the most previously-uncovered area, stopping once target_area_visibility is
+// reached or no candidate contributes any new coverage (gain <= 0). No minimum-gain threshold, so
+// it keeps accepting small marginal contributions rather than stopping early.
 std::vector<const ViewpointCandidate*> GreedySelectViewpoints(
 	const MeshData& mesh,
 	const std::vector<ViewpointCandidate>& candidates,
-	double target_area_visibility,
-	double min_new_area_ratio);
+	double target_area_visibility);
 
 // Cost between two waypoints (or a start reference and a waypoint) used for tour ordering:
 // euclidean_distance_m + joint_distance_weight * joint_distance_rad, where joint_distance_rad

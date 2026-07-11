@@ -40,7 +40,6 @@ struct Params
 	double angle_threshold_deg = 70.0;
 	int max_rays_per_view = 2000;
 	double target_area_visibility = 0.95;
-	double min_new_area_ratio = 0.001;
 	double ik_timeout = 0.1;
 	int random_seed = 42;
 	std::string group_name = "panda_arm";
@@ -73,7 +72,7 @@ struct Params
 	// Per-pair timeout for ComputeEndEffectorTravelDistanceMatrix's real motion-planning calls
 	// (used only when use_rkga is true). Runs once, up front, for every pair of reachable
 	// candidates -- keep this well under panda_arm_control's 20s execution-time budget, since the
-	// total cost is this value times roughly N^2/2 pairs.
+	// total cost is roughly this value times (n^2/2) pairs, divided across threads.
 	double rkga_planning_time = 2.0;
 	// Only used when use_rkga is true. When true, after the final tour is selected/ordered, this
 	// node re-plans just that tour's legs at higher fidelity (PlanFinalTourTrajectories) and drives
@@ -246,7 +245,6 @@ private:
 		this->declareIfNeeded("angle_threshold_deg", this->params.angle_threshold_deg);
 		this->declareIfNeeded("max_rays_per_view", this->params.max_rays_per_view);
 		this->declareIfNeeded("target_area_visibility", this->params.target_area_visibility);
-		this->declareIfNeeded("min_new_area_ratio", this->params.min_new_area_ratio);
 		this->declareIfNeeded("ik_timeout", this->params.ik_timeout);
 		this->declareIfNeeded("random_seed", this->params.random_seed);
 		this->declareIfNeeded("group_name", this->params.group_name);
@@ -280,7 +278,6 @@ private:
 		this->get_parameter("angle_threshold_deg", this->params.angle_threshold_deg);
 		this->get_parameter("max_rays_per_view", this->params.max_rays_per_view);
 		this->get_parameter("target_area_visibility", this->params.target_area_visibility);
-		this->get_parameter("min_new_area_ratio", this->params.min_new_area_ratio);
 		this->get_parameter("ik_timeout", this->params.ik_timeout);
 		this->get_parameter("random_seed", this->params.random_seed);
 		this->get_parameter("group_name", this->params.group_name);
@@ -394,8 +391,7 @@ private:
 			if (this->params.use_matrix_2opt)
 			{
 				this->selected = GreedySelectViewpoints(
-					simplified_mesh, this->reachable_candidates, this->params.target_area_visibility,
-					this->params.min_new_area_ratio);
+					simplified_mesh, this->reachable_candidates, this->params.target_area_visibility);
 
 				RCLCPP_INFO(this->get_logger(), "selected views: %zu", this->selected.size());
 
@@ -436,8 +432,7 @@ private:
 		else
 		{
 			this->selected = GreedySelectViewpoints(
-				simplified_mesh, this->reachable_candidates, this->params.target_area_visibility,
-				this->params.min_new_area_ratio);
+				simplified_mesh, this->reachable_candidates, this->params.target_area_visibility);
 
 			RCLCPP_INFO(this->get_logger(), "selected views: %zu", this->selected.size());
 
@@ -468,6 +463,59 @@ private:
 		// execution -- which blocks for the whole tour -- has already finished.
 		if (this->params.use_rkga && this->params.execute_on_robot)
 			this->executeTourOnRobot(rkga_local_scene);
+	}
+
+	// Highlights (in red) the viewpoint the robot is currently driving to during real execution --
+	// mirrors WaypointFollower::publishCurrentTargetMarker (panda_arm_control.cpp) exactly, so both
+	// nodes render this the same way on /viewpoint_markers.
+	void publishCurrentTargetMarker(const geometry_msgs::msg::Pose& pose)
+	{
+		visualization_msgs::msg::MarkerArray markers;
+		auto stamp = this->now();
+
+		visualization_msgs::msg::Marker sphere;
+		sphere.header.frame_id = "world";
+		sphere.header.stamp = stamp;
+		sphere.ns = "current_target_pos";
+		sphere.id = 0;
+		sphere.type = visualization_msgs::msg::Marker::SPHERE;
+		sphere.action = visualization_msgs::msg::Marker::ADD;
+		sphere.pose.position = pose.position;
+		sphere.pose.orientation.w = 1.0;
+		sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.012;
+		sphere.color.r = 1.0f;
+		sphere.color.a = 1.0f;
+		markers.markers.push_back(sphere);
+
+		// Marker::ARROW in pose-mode (no `points`) points along its local +X axis, but
+		// CameraRotationFromViewDir (pose_utils.hpp) makes the TCP frame's local +Z axis the
+		// approach/view direction. Compose the pose with a fixed -90deg rotation about Y, which
+		// maps local +X onto local +Z, so the rendered arrow follows the real view direction
+		// instead of the arbitrary in-plane +X axis.
+		Eigen::Quaterniond q(pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z);
+		Eigen::Quaterniond q_x_to_z(Eigen::AngleAxisd(-M_PI / 2.0, Eigen::Vector3d::UnitY()));
+		Eigen::Quaterniond q_arrow = q * q_x_to_z;
+
+		visualization_msgs::msg::Marker arrow;
+		arrow.header.frame_id = "world";
+		arrow.header.stamp = stamp;
+		arrow.ns = "current_target_dir";
+		arrow.id = 0;
+		arrow.type = visualization_msgs::msg::Marker::ARROW;
+		arrow.action = visualization_msgs::msg::Marker::ADD;
+		arrow.pose.position = pose.position;
+		arrow.pose.orientation.x = q_arrow.x();
+		arrow.pose.orientation.y = q_arrow.y();
+		arrow.pose.orientation.z = q_arrow.z();
+		arrow.pose.orientation.w = q_arrow.w();
+		arrow.scale.x = 0.03;	// arrow length
+		arrow.scale.y = 0.006; // shaft diameter
+		arrow.scale.z = 0.006; // head diameter
+		arrow.color.r = 1.0f;
+		arrow.color.a = 1.0f;
+		markers.markers.push_back(arrow);
+
+		this->marker_pub->publish(markers);
 	}
 
 	// Plans+executes a move from the robot's current state to home_joint_values. Used both before
@@ -527,6 +575,7 @@ private:
 		for (size_t i = 0; i < legs.size(); ++i)
 		{
 			RCLCPP_INFO(this->get_logger(), "Executing tour leg %zu/%zu", i + 1, legs.size());
+			this->publishCurrentTargetMarker(this->selected[i]->tcp_pose);
 			moveit::core::MoveItErrorCode result = this->move_group->execute(legs[i].trajectory);
 			if (result != moveit::core::MoveItErrorCode::SUCCESS)
 			{

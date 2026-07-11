@@ -65,6 +65,13 @@ struct TravelCostMatrix
 // L2 deltas between consecutive waypoints) -- both from the same planned trajectory, instead of
 // assuming a straight line for either. Meant to be computed once, up front, then reused as cheap
 // lookups during the GA's many fitness evaluations, not recomputed per generation.
+//
+// The full O(n^2) pair set is computed (no distance-based pruning -- every pair gets a real
+// motion-planning call, so the GA/2-opt always have the option of a long-hop transition if it's
+// actually cheap). The pairs are independent, so they're run concurrently across
+// std::thread::hardware_concurrency() worker threads, each with its own PlanningPipeline against
+// the same read-only scene, built sequentially up front (see .cpp) since pluginlib's class loader
+// isn't safe to construct from multiple threads at once.
 TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
 	const rclcpp::Node::SharedPtr& node,
 	const moveit::core::RobotModelConstPtr& robot_model,

@@ -1,10 +1,14 @@
 #include "panda_arm_control/rkga_scp.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <numeric>
 #include <random>
+#include <thread>
 
 #include <geometric_shapes/shape_operations.h>
 #include <geometric_shapes/shapes.h>
@@ -262,45 +266,75 @@ TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
 	double planning_time)
 {
 	// generatePlan() logs an INFO line every single call ("Planner configuration ... will use
-	// planner ..."), and this function calls it O(n^2) times -- silence just this one noisy
-	// logger (not the whole node) so the terminal doesn't get flooded.
+	// planner ..."), and this function calls it many times -- silence just this one noisy logger
+	// (not the whole node) so the terminal doesn't get flooded.
 	if (rcutils_logging_set_logger_level(
 			"moveit.ompl_planning.model_based_planning_context", RCUTILS_LOG_SEVERITY_WARN) != RCUTILS_RET_OK)
 		RCLCPP_WARN(node->get_logger(), "Failed to quiet moveit.ompl_planning.model_based_planning_context logger");
-
-	planning_pipeline::PlanningPipeline pipeline(robot_model, node, "ompl");
-	pipeline.displayComputedMotionPlans(false);
-	pipeline.checkSolutionPaths(false);
 
 	planning_scene::PlanningSceneConstPtr scene = planning_scene_monitor->getPlanningScene();
 
 	const size_t n = candidates.size();
 	TravelCostMatrix matrix;
-	matrix.cartesian_distance.assign(n + 1, std::vector<double>(n + 1, 0.0));
-	matrix.joint_distance.assign(n + 1, std::vector<double>(n + 1, 0.0));
+	matrix.cartesian_distance.assign(n + 1, std::vector<double>(n + 1, -1.0));
+	matrix.joint_distance.assign(n + 1, std::vector<double>(n + 1, -1.0));
 
 	std::vector<const std::vector<double>*> joints(n + 1);
 	joints[0] = &start_reference_joints;
 	for (size_t i = 0; i < n; ++i)
 		joints[i + 1] = &candidates[i].joint_solution;
 
-	int total_pairs = static_cast<int>((n + 1) * n / 2);
-	int done = 0;
-
+	std::vector<std::pair<size_t, size_t>> pair_list;
+	pair_list.reserve((n + 1) * n / 2);
 	for (size_t i = 0; i <= n; ++i)
-	{
 		for (size_t j = i + 1; j <= n; ++j)
+			pair_list.emplace_back(i, j);
+	const int total_pairs = static_cast<int>(pair_list.size());
+	RCLCPP_INFO(node->get_logger(), "ComputeEndEffectorTravelDistanceMatrix: %d pairs", total_pairs);
+
+	std::atomic<size_t> next_pair{0};
+	std::atomic<int> done{0};
+	std::atomic<bool> interrupted{false};
+	std::mutex log_mutex;
+
+	unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+
+	// One PlanningPipeline per thread, but built sequentially, here, before any worker thread
+	// starts -- pluginlib::ClassLoader (used internally to load the OMPL planner plugin) is not
+	// safe for concurrent construction from multiple threads. Racing that construction previously
+	// corrupted the loader's global state, making every generatePlan() call fail with "No planning
+	// plugin loaded" (not just in this function, but in any later PlanningPipeline construction in
+	// the same process). Only the actual generatePlan() calls run concurrently below, each against
+	// its own already-built pipeline instance.
+	std::vector<std::unique_ptr<planning_pipeline::PlanningPipeline>> pipelines;
+	pipelines.reserve(num_threads);
+	for (unsigned int t = 0; t < num_threads; ++t)
+	{
+		pipelines.push_back(std::make_unique<planning_pipeline::PlanningPipeline>(robot_model, node, "ompl"));
+		pipelines.back()->displayComputedMotionPlans(false);
+		pipelines.back()->checkSolutionPaths(false);
+	}
+
+	auto worker = [&](unsigned int thread_idx) {
+		planning_pipeline::PlanningPipeline& pipeline = *pipelines[thread_idx];
+
+		while (true)
 		{
 			// Without this, Ctrl+C during this loop just queues up -- generatePlan() is a long
 			// blocking synchronous call and nothing here was checking for shutdown, so the whole
-			// O(n^2) precomputation had to run to completion before the process could exit.
+			// precomputation had to run to completion before the process could exit.
 			if (!rclcpp::ok())
 			{
-				RCLCPP_WARN(
-					node->get_logger(), "ComputeEndEffectorTravelDistanceMatrix: interrupted at %d/%d pairs", done,
-					total_pairs);
-				return matrix;
+				interrupted = true;
+				return;
 			}
+
+			size_t idx = next_pair.fetch_add(1);
+			if (idx >= pair_list.size())
+				return;
+
+			size_t i = pair_list[idx].first;
+			size_t j = pair_list[idx].second;
 
 			moveit::core::RobotState start_state(robot_model);
 			start_state.setToDefaultValues();
@@ -327,18 +361,35 @@ TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
 				(ok && res.trajectory_) ? MeasureTrajectoryEndEffectorDistance(res.trajectory_) : -1.0;
 			double joint_distance = (ok && res.trajectory_) ? MeasureTrajectoryJointDistance(res.trajectory_) : -1.0;
 
+			// Each (i, j) pair appears exactly once in pair_list, so distinct threads never write
+			// the same matrix cells -- no lock needed here.
 			matrix.cartesian_distance[i][j] = cartesian_distance;
 			matrix.cartesian_distance[j][i] = cartesian_distance;
 			matrix.joint_distance[i][j] = joint_distance;
 			matrix.joint_distance[j][i] = joint_distance;
 
-			++done;
-			if (done % 25 == 0 || done == total_pairs)
+			int d = ++done;
+			if (d % 25 == 0 || d == total_pairs)
+			{
+				std::lock_guard<std::mutex> lock(log_mutex);
 				RCLCPP_INFO(
-					node->get_logger(), "ComputeEndEffectorTravelDistanceMatrix: %d/%d pairs planned", done,
+					node->get_logger(), "ComputeEndEffectorTravelDistanceMatrix: %d/%d pairs planned", d,
 					total_pairs);
+			}
 		}
-	}
+	};
+
+	std::vector<std::thread> workers;
+	workers.reserve(num_threads);
+	for (unsigned int t = 0; t < num_threads; ++t)
+		workers.emplace_back(worker, t);
+	for (auto& w : workers)
+		w.join();
+
+	if (interrupted)
+		RCLCPP_WARN(
+			node->get_logger(), "ComputeEndEffectorTravelDistanceMatrix: interrupted at %d/%d pairs", done.load(),
+			total_pairs);
 
 	return matrix;
 }
