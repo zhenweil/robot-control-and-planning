@@ -56,6 +56,17 @@ struct Params
 	// collision-aware IK + RKGA-SCP genetic algorithm (rkga_scp.hpp) instead of the standoff/tilt
 	// grid + plain IK + greedy set-cover + NN/2-opt pipeline.
 	bool use_rkga = false;
+	// Only used when use_rkga is true. Instead of SolveRkgaScp's GA jointly picking selection +
+	// order, select via the same GreedySelectViewpoints used by the non-RKGA pipeline, then order
+	// via NearestNeighborOrderMatrix + TwoOptImproveMatrix -- using the real travel_cost_matrix
+	// costs, not TourCost's straight-line estimate. Lets GA-ordering vs NN/2-opt-ordering be
+	// compared under the exact same real-cost model.
+	bool use_matrix_2opt = false;
+	// Per-pair timeout for ComputeEndEffectorTravelDistanceMatrix's real motion-planning calls
+	// (used only when use_rkga is true). Runs once, up front, for every pair of reachable
+	// candidates -- keep this well under panda_arm_control's 20s execution-time budget, since the
+	// total cost is this value times roughly N^2/2 pairs.
+	double rkga_planning_time = 2.0;
 	std::string output_dir = "/tmp/viewpoint_planner_output";
 };
 
@@ -201,6 +212,8 @@ private:
 		declareIfNeeded("joint_distance_weight", params_.joint_distance_weight);
 		declareIfNeeded("mesh_comparison_offset", params_.mesh_comparison_offset);
 		declareIfNeeded("use_rkga", params_.use_rkga);
+		declareIfNeeded("use_matrix_2opt", params_.use_matrix_2opt);
+		declareIfNeeded("rkga_planning_time", params_.rkga_planning_time);
 		declareIfNeeded("output_dir", params_.output_dir);
 	}
 
@@ -229,6 +242,8 @@ private:
 		get_parameter("joint_distance_weight", params_.joint_distance_weight);
 		get_parameter("mesh_comparison_offset", params_.mesh_comparison_offset);
 		get_parameter("use_rkga", params_.use_rkga);
+		get_parameter("use_matrix_2opt", params_.use_matrix_2opt);
+		get_parameter("rkga_planning_time", params_.rkga_planning_time);
 		get_parameter("output_dir", params_.output_dir);
 	}
 
@@ -277,6 +292,7 @@ private:
 
 		RCLCPP_INFO(get_logger(), "visible candidate views: %zu", candidates.size());
 
+		planning_scene_monitor::PlanningSceneMonitorPtr rkga_local_scene;
 		if (params_.use_rkga)
 		{
 			Eigen::Vector3d object_translation_world =
@@ -285,12 +301,12 @@ private:
 			Eigen::Isometry3d t_tcp_camera =
 				IsometryFromXyzQuat(params_.t_tcp_camera_xyz, params_.t_tcp_camera_quat_xyzw);
 
-			auto local_scene = BuildLocalCollisionScene(
+			rkga_local_scene = BuildLocalCollisionScene(
 				shared_from_this(), resolved_mesh_path_, params_.mesh_scale, object_translation_world,
 				object_rotation_world);
 
 			candidates = ComputeReachabilityWithCollisionCheck(
-				std::move(candidates), robot_state_, jmg_, local_scene, object_translation_world,
+				std::move(candidates), robot_state_, jmg_, rkga_local_scene, object_translation_world,
 				object_rotation_world, t_tcp_camera, params_.ik_timeout);
 		}
 		else
@@ -312,26 +328,50 @@ private:
 
 		if (params_.use_rkga)
 		{
-			RkgaScpParams rkga_params;
-			rkga_params.target_area_visibility = params_.target_area_visibility;
-			rkga_params.random_seed = static_cast<unsigned int>(params_.random_seed);
-
-			selected_ = SolveRkgaScp(
-				simplified_mesh, reachable_candidates_, home_tcp_position_, home_joint_values_,
-				params_.joint_distance_weight, rkga_params);
-
-			double achieved_visibility = ComputeAreaVisibility(simplified_mesh, selected_);
 			RCLCPP_INFO(
-				get_logger(), "RKGA-SCP selected %zu views (jointly selected + ordered), %.2f%% area visibility",
-				selected_.size(), achieved_visibility * 100.0);
+				get_logger(), "Computing real end-effector travel distance matrix for %zu candidates (this runs "
+							  "real motion planning for every pair -- can take a while)...",
+				reachable_candidates_.size());
 
-			TravelCostBreakdown breakdown =
-				ComputeTravelCostBreakdown(selected_, home_tcp_position_, home_joint_values_);
-			RCLCPP_INFO(
-				get_logger(),
-				"Travel cost breakdown: %.4f m cartesian, %.4f rad joint-space (weighted: %.4f m-equivalent)",
-				breakdown.cartesian_distance_m, breakdown.joint_distance_rad,
-				breakdown.joint_distance_rad * params_.joint_distance_weight);
+			TravelCostMatrix travel_cost_matrix = ComputeEndEffectorTravelDistanceMatrix(
+				shared_from_this(), robot_model_, rkga_local_scene, reachable_candidates_, home_joint_values_,
+				params_.group_name, params_.rkga_planning_time);
+
+			if (params_.use_matrix_2opt)
+			{
+				selected_ = GreedySelectViewpoints(
+					simplified_mesh, reachable_candidates_, params_.target_area_visibility,
+					params_.min_new_area_ratio);
+
+				RCLCPP_INFO(get_logger(), "selected views: %zu", selected_.size());
+
+				selected_ = NearestNeighborOrderMatrix(
+					reachable_candidates_, std::move(selected_), travel_cost_matrix, params_.joint_distance_weight);
+				selected_ = TwoOptImproveMatrix(
+					reachable_candidates_, std::move(selected_), travel_cost_matrix, params_.joint_distance_weight);
+
+				PrintTourCostBreakdown(reachable_candidates_, selected_, travel_cost_matrix, params_.joint_distance_weight);
+
+				double achieved_visibility = ComputeAreaVisibility(simplified_mesh, selected_);
+				RCLCPP_INFO(
+					get_logger(),
+					"NN+2-opt (real travel_cost_matrix) reordered %zu selected views, %.2f%% area visibility",
+					selected_.size(), achieved_visibility * 100.0);
+			}
+			else
+			{
+				RkgaScpParams rkga_params;
+				rkga_params.target_area_visibility = params_.target_area_visibility;
+				rkga_params.random_seed = static_cast<unsigned int>(params_.random_seed);
+				rkga_params.joint_distance_weight = params_.joint_distance_weight;
+
+				selected_ = SolveRkgaScp(simplified_mesh, reachable_candidates_, travel_cost_matrix, rkga_params);
+
+				double achieved_visibility = ComputeAreaVisibility(simplified_mesh, selected_);
+				RCLCPP_INFO(
+					get_logger(), "RKGA-SCP selected %zu views (jointly selected + ordered), %.2f%% area visibility",
+					selected_.size(), achieved_visibility * 100.0);
+			}
 		}
 		else
 		{

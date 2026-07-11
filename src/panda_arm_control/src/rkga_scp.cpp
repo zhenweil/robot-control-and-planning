@@ -8,10 +8,14 @@
 
 #include <geometric_shapes/shape_operations.h>
 #include <geometric_shapes/shapes.h>
+#include <moveit/kinematic_constraints/utils.h>
+#include <moveit/planning_pipeline/planning_pipeline.h>
+#include <moveit/robot_state/conversions.h>
+#include <moveit/robot_trajectory/robot_trajectory.h>
 #include <moveit_msgs/msg/collision_object.hpp>
+#include <rcutils/logging.h>
 #include <shape_msgs/msg/mesh.hpp>
 
-#include "panda_arm_control/mesh_utils.hpp"
 #include "panda_arm_control/pose_utils.hpp"
 
 planning_scene_monitor::PlanningSceneMonitorPtr BuildLocalCollisionScene(
@@ -197,45 +201,150 @@ double ComputeAreaVisibility(const MeshData& mesh, const std::vector<const Viewp
 	return area / mesh.total_area;
 }
 
-TravelCostBreakdown ComputeTravelCostBreakdown(
-	const std::vector<const ViewpointCandidate*>& selected, const Eigen::Vector3d& start_reference_position,
-	const std::vector<double>& start_reference_joints)
+namespace
 {
-	TravelCostBreakdown breakdown;
 
-	Eigen::Vector3d prev_pos = start_reference_position;
-	const std::vector<double>* prev_joints = &start_reference_joints;
+// Sums tool0 position deltas between consecutive trajectory waypoints (forward kinematics), i.e.
+// the actual Cartesian path length the end effector traveled -- not a straight-line estimate.
+double MeasureTrajectoryEndEffectorDistance(const robot_trajectory::RobotTrajectoryPtr& trajectory)
+{
+	if (!trajectory || trajectory->getWayPointCount() < 2)
+		return 0.0;
 
-	for (const ViewpointCandidate* c : selected)
+	double dist = 0.0;
+	Eigen::Vector3d prev = trajectory->getWayPoint(0).getGlobalLinkTransform("tool0").translation();
+	for (size_t i = 1; i < trajectory->getWayPointCount(); ++i)
 	{
-		Eigen::Vector3d pos(c->tcp_pose.position.x, c->tcp_pose.position.y, c->tcp_pose.position.z);
-		breakdown.cartesian_distance_m += (pos - prev_pos).norm();
+		Eigen::Vector3d cur = trajectory->getWayPoint(i).getGlobalLinkTransform("tool0").translation();
+		dist += (cur - prev).norm();
+		prev = cur;
+	}
+	return dist;
+}
 
-		if (!prev_joints->empty() && !c->joint_solution.empty() && prev_joints->size() == c->joint_solution.size())
+// Sums per-joint L2 deltas between consecutive trajectory waypoints, i.e. the actual joint-space
+// path length the arm traveled -- from the same planned trajectory as
+// MeasureTrajectoryEndEffectorDistance, not a separate straight-line joint estimate.
+double MeasureTrajectoryJointDistance(const robot_trajectory::RobotTrajectoryPtr& trajectory)
+{
+	if (!trajectory || trajectory->getWayPointCount() < 2)
+		return 0.0;
+
+	const moveit::core::JointModelGroup* jmg = trajectory->getGroup();
+
+	double dist = 0.0;
+	std::vector<double> prev;
+	trajectory->getWayPoint(0).copyJointGroupPositions(jmg, prev);
+	for (size_t i = 1; i < trajectory->getWayPointCount(); ++i)
+	{
+		std::vector<double> cur;
+		trajectory->getWayPoint(i).copyJointGroupPositions(jmg, cur);
+
+		double step = 0.0;
+		for (size_t j = 0; j < cur.size(); ++j)
+			step += (cur[j] - prev[j]) * (cur[j] - prev[j]);
+		dist += std::sqrt(step);
+
+		prev = std::move(cur);
+	}
+	return dist;
+}
+
+} // namespace
+
+TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
+	const rclcpp::Node::SharedPtr& node,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::vector<ViewpointCandidate>& candidates,
+	const std::vector<double>& start_reference_joints,
+	const std::string& group_name,
+	double planning_time)
+{
+	// generatePlan() logs an INFO line every single call ("Planner configuration ... will use
+	// planner ..."), and this function calls it O(n^2) times -- silence just this one noisy
+	// logger (not the whole node) so the terminal doesn't get flooded.
+	if (rcutils_logging_set_logger_level(
+			"moveit.ompl_planning.model_based_planning_context", RCUTILS_LOG_SEVERITY_WARN) != RCUTILS_RET_OK)
+		RCLCPP_WARN(node->get_logger(), "Failed to quiet moveit.ompl_planning.model_based_planning_context logger");
+
+	planning_pipeline::PlanningPipeline pipeline(robot_model, node, "ompl");
+	pipeline.displayComputedMotionPlans(false);
+	pipeline.checkSolutionPaths(false);
+
+	planning_scene::PlanningSceneConstPtr scene = planning_scene_monitor->getPlanningScene();
+
+	const size_t n = candidates.size();
+	TravelCostMatrix matrix;
+	matrix.cartesian_distance.assign(n + 1, std::vector<double>(n + 1, 0.0));
+	matrix.joint_distance.assign(n + 1, std::vector<double>(n + 1, 0.0));
+
+	std::vector<const std::vector<double>*> joints(n + 1);
+	joints[0] = &start_reference_joints;
+	for (size_t i = 0; i < n; ++i)
+		joints[i + 1] = &candidates[i].joint_solution;
+
+	int total_pairs = static_cast<int>((n + 1) * n / 2);
+	int done = 0;
+
+	for (size_t i = 0; i <= n; ++i)
+	{
+		for (size_t j = i + 1; j <= n; ++j)
 		{
-			double joint_dist_sq = 0.0;
-			for (size_t i = 0; i < prev_joints->size(); ++i)
+			// Without this, Ctrl+C during this loop just queues up -- generatePlan() is a long
+			// blocking synchronous call and nothing here was checking for shutdown, so the whole
+			// O(n^2) precomputation had to run to completion before the process could exit.
+			if (!rclcpp::ok())
 			{
-				double d = (*prev_joints)[i] - c->joint_solution[i];
-				joint_dist_sq += d * d;
+				RCLCPP_WARN(
+					node->get_logger(), "ComputeEndEffectorTravelDistanceMatrix: interrupted at %d/%d pairs", done,
+					total_pairs);
+				return matrix;
 			}
-			breakdown.joint_distance_rad += std::sqrt(joint_dist_sq);
-		}
 
-		prev_pos = pos;
-		prev_joints = &c->joint_solution;
+			moveit::core::RobotState start_state(robot_model);
+			start_state.setToDefaultValues();
+			const moveit::core::JointModelGroup* jmg = start_state.getJointModelGroup(group_name);
+			start_state.setJointGroupPositions(jmg, *joints[i]);
+			start_state.update();
+
+			moveit::core::RobotState goal_state(robot_model);
+			goal_state.setToDefaultValues();
+			goal_state.setJointGroupPositions(jmg, *joints[j]);
+			goal_state.update();
+
+			planning_interface::MotionPlanRequest req;
+			req.group_name = group_name;
+			req.allowed_planning_time = planning_time;
+			req.num_planning_attempts = 1;
+			moveit::core::robotStateToRobotStateMsg(start_state, req.start_state);
+			req.goal_constraints.push_back(kinematic_constraints::constructGoalConstraints(goal_state, jmg));
+
+			planning_interface::MotionPlanResponse res;
+			bool ok = pipeline.generatePlan(scene, req, res);
+
+			double cartesian_distance =
+				(ok && res.trajectory_) ? MeasureTrajectoryEndEffectorDistance(res.trajectory_) : -1.0;
+			double joint_distance = (ok && res.trajectory_) ? MeasureTrajectoryJointDistance(res.trajectory_) : -1.0;
+
+			matrix.cartesian_distance[i][j] = cartesian_distance;
+			matrix.cartesian_distance[j][i] = cartesian_distance;
+			matrix.joint_distance[i][j] = joint_distance;
+			matrix.joint_distance[j][i] = joint_distance;
+
+			++done;
+			if (done % 25 == 0 || done == total_pairs)
+				RCLCPP_INFO(
+					node->get_logger(), "ComputeEndEffectorTravelDistanceMatrix: %d/%d pairs planned", done,
+					total_pairs);
+		}
 	}
 
-	return breakdown;
+	return matrix;
 }
 
 namespace
 {
-
-Eigen::Vector3d TcpPositionOf(const ViewpointCandidate& c)
-{
-	return Eigen::Vector3d(c.tcp_pose.position.x, c.tcp_pose.position.y, c.tcp_pose.position.z);
-}
 
 // Sorts candidate indices by chromosome key ascending, then walks that order greedily adding
 // each candidate if it still covers previously-uncovered area -- same feasibility/stopping
@@ -293,59 +402,42 @@ double ComputeAreaVisibilityByIndex(
 	return ComputeAreaVisibility(mesh, pointers);
 }
 
-// Minimum-cost way to traverse `selected` in order, via dynamic programming over each
-// candidate's joint_solutions options: since the same TCP pose can be reached via different
-// elbow/wrist configurations, a single fixed joint solution per candidate doesn't necessarily
-// reflect the true achievable reconfiguration cost between two viewpoints. dp[j] tracks the
-// minimum cumulative cost to reach option j of the current step, considering every option of the
-// previous step -- so the result is the best possible joint-solution assignment for this
-// particular visiting order, not just whatever solution happened to be recorded first. Fitness is
-// travel cost alone -- no per-viewpoint penalty, so evolution only pressures toward cheaper travel,
-// not toward using fewer viewpoints.
+// Real travel cost of traversing `selected` in order, via lookups into travel_cost_matrix (index 0
+// = start reference, index idx+1 = candidates[idx]) instead of any straight-line estimate. Combines
+// real Cartesian end-effector distance with real joint-space distance (weighted by
+// joint_distance_weight), both measured from the same planned trajectory per transition. A -1.0
+// cartesian_distance entry means no valid plan was found for that transition -- reject the whole
+// sequence outright by returning the worst possible fitness, rather than silently treating an
+// infeasible transition as free or ignoring it.
 double EvaluateFitness(
-	const std::vector<size_t>& selected, const std::vector<ViewpointCandidate>& candidates,
-	const Eigen::Vector3d& start_reference_position, const std::vector<double>& start_reference_joints,
-	double joint_distance_weight)
+	const std::vector<size_t>& selected, const TravelCostMatrix& travel_cost_matrix, double joint_distance_weight)
 {
 	if (selected.empty())
 		return std::numeric_limits<double>::max();
 
-	std::vector<double> dp = {0.0};
-	std::vector<Eigen::Vector3d> prev_positions = {start_reference_position};
-	std::vector<std::vector<double>> prev_joint_options = {start_reference_joints};
+	double total = 0.0;
+	size_t prev_matrix_idx = 0; // start reference
 
 	for (size_t idx : selected)
 	{
-		const ViewpointCandidate& c = candidates[idx];
-		Eigen::Vector3d pos = TcpPositionOf(c);
+		size_t cur_matrix_idx = idx + 1;
+		double cartesian_distance = travel_cost_matrix.cartesian_distance[prev_matrix_idx][cur_matrix_idx];
+		if (cartesian_distance < 0.0)
+			return std::numeric_limits<double>::max(); // infeasible transition
 
-		// Copy (not reference) to sidestep any ambiguity about temporary lifetime extension when
-		// the ternary's branches have different value categories -- these vectors are tiny
-		// (<= a handful of 7-element joint vectors), so the copy cost is negligible.
-		std::vector<std::vector<double>> options =
-			c.joint_solutions.empty() ? std::vector<std::vector<double>>{c.joint_solution} : c.joint_solutions;
-
-		std::vector<double> new_dp(options.size(), std::numeric_limits<double>::max());
-		for (size_t j = 0; j < options.size(); ++j)
-			for (size_t jp = 0; jp < dp.size(); ++jp)
-				new_dp[j] = std::min(
-					new_dp[j],
-					dp[jp] + TourCost(prev_positions[jp], prev_joint_options[jp], pos, options[j], joint_distance_weight));
-
-		dp = std::move(new_dp);
-		prev_positions.assign(options.size(), pos);
-		prev_joint_options = options;
+		double joint_distance = travel_cost_matrix.joint_distance[prev_matrix_idx][cur_matrix_idx];
+		total += cartesian_distance + joint_distance_weight * joint_distance;
+		prev_matrix_idx = cur_matrix_idx;
 	}
 
-	return *std::min_element(dp.begin(), dp.end());
+	return total;
 }
 
 } // namespace
 
 std::vector<const ViewpointCandidate*> SolveRkgaScp(
 	const MeshData& mesh, const std::vector<ViewpointCandidate>& candidates,
-	const Eigen::Vector3d& start_reference_position, const std::vector<double>& start_reference_joints,
-	double joint_distance_weight, const RkgaScpParams& params)
+	const TravelCostMatrix& travel_cost_matrix, const RkgaScpParams& params)
 {
 	if (candidates.empty())
 		return {};
@@ -374,8 +466,7 @@ std::vector<const ViewpointCandidate*> SolveRkgaScp(
 		for (size_t i = 0; i < population.size(); ++i)
 		{
 			decoded[i] = DecodeChromosome(population[i], mesh, candidates, params.target_area_visibility);
-			fitness[i] = EvaluateFitness(
-				decoded[i], candidates, start_reference_position, start_reference_joints, joint_distance_weight);
+			fitness[i] = EvaluateFitness(decoded[i], travel_cost_matrix, params.joint_distance_weight);
 		}
 
 		std::vector<size_t> rank(population.size());
@@ -434,5 +525,139 @@ std::vector<const ViewpointCandidate*> SolveRkgaScp(
 	for (size_t idx : best_selected)
 		result.push_back(&candidates[idx]);
 
+	PrintTourCostBreakdown(candidates, result, travel_cost_matrix, params.joint_distance_weight);
+
 	return result;
+}
+
+namespace
+{
+
+// candidates[idx] <-> travel_cost_matrix index idx+1 (index 0 is the start reference) -- see
+// ComputeEndEffectorTravelDistanceMatrix. Relies on `ptr` pointing into `candidates` itself (not a
+// copy), so pointer arithmetic recovers its index.
+size_t MatrixIndexOf(const std::vector<ViewpointCandidate>& candidates, const ViewpointCandidate* ptr)
+{
+	return static_cast<size_t>(ptr - candidates.data()) + 1;
+}
+
+// cartesian_distance[a][b] == -1.0 means infeasible (see TravelCostMatrix) -- surface that as
+// "infinitely expensive" so NN/2-opt naturally avoid it, matching EvaluateFitness's handling of the
+// same sentinel.
+double WeightedCost(const TravelCostMatrix& matrix, size_t a, size_t b, double joint_distance_weight)
+{
+	double cartesian = matrix.cartesian_distance[a][b];
+	if (cartesian < 0.0)
+		return std::numeric_limits<double>::max();
+	return cartesian + joint_distance_weight * matrix.joint_distance[a][b];
+}
+
+} // namespace
+
+std::vector<const ViewpointCandidate*> NearestNeighborOrderMatrix(
+	const std::vector<ViewpointCandidate>& candidates, std::vector<const ViewpointCandidate*> selected,
+	const TravelCostMatrix& travel_cost_matrix, double joint_distance_weight)
+{
+	if (selected.size() < 2)
+		return selected;
+
+	std::vector<bool> visited(selected.size(), false);
+	std::vector<const ViewpointCandidate*> ordered;
+	ordered.reserve(selected.size());
+
+	size_t current_matrix_idx = 0; // start reference (home)
+	for (size_t step = 0; step < selected.size(); ++step)
+	{
+		double best = std::numeric_limits<double>::max();
+		size_t best_i = selected.size(); // sentinel: none picked yet
+
+		for (size_t i = 0; i < selected.size(); ++i)
+		{
+			if (visited[i])
+				continue;
+
+			size_t idx = MatrixIndexOf(candidates, selected[i]);
+			double cost = WeightedCost(travel_cost_matrix, current_matrix_idx, idx, joint_distance_weight);
+			if (best_i == selected.size() || cost < best)
+			{
+				best = cost;
+				best_i = i;
+			}
+		}
+
+		visited[best_i] = true;
+		ordered.push_back(selected[best_i]);
+		current_matrix_idx = MatrixIndexOf(candidates, selected[best_i]);
+	}
+
+	return ordered;
+}
+
+std::vector<const ViewpointCandidate*> TwoOptImproveMatrix(
+	const std::vector<ViewpointCandidate>& candidates, std::vector<const ViewpointCandidate*> ordered,
+	const TravelCostMatrix& travel_cost_matrix, double joint_distance_weight)
+{
+	if (ordered.size() < 3)
+		return ordered;
+
+	auto matrix_idx = [&](size_t idx) { return MatrixIndexOf(candidates, ordered[idx]); };
+
+	bool improved = true;
+	while (improved)
+	{
+		improved = false;
+
+		for (size_t i = 0; i + 1 < ordered.size(); ++i)
+		{
+			size_t prev_idx = (i == 0) ? 0 : matrix_idx(i - 1);
+
+			for (size_t j = i + 1; j < ordered.size(); ++j)
+			{
+				double old_cost = WeightedCost(travel_cost_matrix, prev_idx, matrix_idx(i), joint_distance_weight);
+				double new_cost = WeightedCost(travel_cost_matrix, prev_idx, matrix_idx(j), joint_distance_weight);
+
+				if (j + 1 < ordered.size())
+				{
+					old_cost +=
+						WeightedCost(travel_cost_matrix, matrix_idx(j), matrix_idx(j + 1), joint_distance_weight);
+					new_cost +=
+						WeightedCost(travel_cost_matrix, matrix_idx(i), matrix_idx(j + 1), joint_distance_weight);
+				}
+
+				if (new_cost < old_cost - 1e-9)
+				{
+					std::reverse(
+						ordered.begin() + static_cast<std::ptrdiff_t>(i), ordered.begin() + static_cast<std::ptrdiff_t>(j) + 1);
+					improved = true;
+				}
+			}
+		}
+	}
+
+	return ordered;
+}
+
+void PrintTourCostBreakdown(
+	const std::vector<ViewpointCandidate>& candidates, const std::vector<const ViewpointCandidate*>& selected,
+	const TravelCostMatrix& travel_cost_matrix, double joint_distance_weight)
+{
+	double total_cartesian = 0.0;
+	double total_joint = 0.0;
+	size_t prev_matrix_idx = 0; // start reference
+	printf("-- final tour cost breakdown (joint_distance_weight=%.4f) --\n", joint_distance_weight);
+	for (const ViewpointCandidate* ptr : selected)
+	{
+		size_t cur_matrix_idx = MatrixIndexOf(candidates, ptr);
+		double cartesian = travel_cost_matrix.cartesian_distance[prev_matrix_idx][cur_matrix_idx];
+		double joint = travel_cost_matrix.joint_distance[prev_matrix_idx][cur_matrix_idx];
+		printf(
+			"  leg %zu -> %zu: cartesian=%.4f m, joint=%.4f rad\n", prev_matrix_idx, cur_matrix_idx, cartesian,
+			joint);
+		total_cartesian += cartesian;
+		total_joint += joint;
+		prev_matrix_idx = cur_matrix_idx;
+	}
+	printf(
+		"-- totals: cartesian=%.4f m, joint=%.4f rad, weighted_total=%.4f --\n", total_cartesian, total_joint,
+		total_cartesian + joint_distance_weight * total_joint);
 }
