@@ -37,6 +37,17 @@ def generate_launch_description():
     )
     use_matrix_2opt = ParameterValue(LaunchConfiguration("use_matrix_2opt"), value_type=bool)
 
+    execute_on_robot_arg = DeclareLaunchArgument(
+        "execute_on_robot",
+        default_value="false",
+        description="Only used when use_rkga is true. After the final tour is selected/ordered, "
+        "re-plan its legs at higher fidelity and drive the real robot through them directly via "
+        "MoveGroupInterface, instead of just publishing poses on /cartesian_waypoints for a "
+        "separate node to re-plan. Requires move_group (e.g. panda_arm.launch.py) to already be "
+        "running. Defaults to false so nothing physically moves unless explicitly requested.",
+    )
+    execute_on_robot = ParameterValue(LaunchConfiguration("execute_on_robot"), value_type=bool)
+
     moveit_config = (
         MoveItConfigsBuilder("panda", package_name="panda_arm_moveit")
         .robot_description(file_path="config/panda.urdf.xacro")
@@ -71,6 +82,9 @@ def generate_launch_description():
         "t_tcp_camera_quat_xyzw": [0.0, 0.0, 0.0, 1.0],
         "use_rkga": use_rkga,
         "use_matrix_2opt": use_matrix_2opt,
+        "execute_on_robot": execute_on_robot,
+        "execution_planning_time": 5.0,
+        "execution_planning_attempts": 5,
         "output_dir": "/tmp/viewpoint_planner_output",
     }
 
@@ -102,5 +116,12 @@ def generate_launch_description():
     )
 
     return LaunchDescription(
-        [use_rviz_arg, use_rkga_arg, use_matrix_2opt_arg, viewpoint_planner_node, rviz_node]
+        [
+            use_rviz_arg,
+            use_rkga_arg,
+            use_matrix_2opt_arg,
+            execute_on_robot_arg,
+            viewpoint_planner_node,
+            rviz_node,
+        ]
     )

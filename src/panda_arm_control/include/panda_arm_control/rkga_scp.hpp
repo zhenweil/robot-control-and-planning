@@ -7,6 +7,7 @@
 #include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 #include <moveit/robot_model/robot_model.h>
 #include <moveit/robot_state/robot_state.h>
+#include <moveit_msgs/msg/robot_trajectory.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 #include "panda_arm_control/viewpoint_types.hpp"
@@ -140,3 +141,33 @@ void PrintTourCostBreakdown(
 	const std::vector<const ViewpointCandidate*>& selected,
 	const TravelCostMatrix& travel_cost_matrix,
 	double joint_distance_weight);
+
+// A single planned, ready-to-execute leg of the final tour. travel_cost_matrix only ever kept a
+// scalar cost per pair (the trajectories used to measure it were discarded) and its pairs don't
+// correspond to the final tour's consecutive legs anyway -- this is a focused re-plan of just the
+// n-1 (or n, including the trailing return-to-home leg) legs actually used, so what gets executed
+// is an exact trajectory that was actually planned, not re-derived from cost alone. ok is false if
+// this particular re-plan failed (RRTConnect is randomized, so a re-plan isn't guaranteed to
+// succeed even though the original cost-matrix pass found this transition feasible).
+struct TourTrajectory
+{
+	bool ok = false;
+	moveit_msgs::msg::RobotTrajectory trajectory;
+};
+
+// Plans the exact consecutive legs of `selected`, in order, starting from start_reference_joints
+// (e.g. robot home): leg 0 is start_reference_joints -> selected[0]->joint_solution, leg i is
+// selected[i-1]->joint_solution -> selected[i]->joint_solution. Since this is only
+// selected.size() calls (not the O(n^2) of ComputeEndEffectorTravelDistanceMatrix), each leg can
+// afford num_planning_attempts tries, keeping whichever attempt has the shortest measured
+// end-effector travel distance -- mirrors WaypointFollower's rationale for re-running RRTConnect a
+// few times (panda_arm_control.cpp).
+std::vector<TourTrajectory> PlanFinalTourTrajectories(
+	const rclcpp::Node::SharedPtr& node,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::vector<const ViewpointCandidate*>& selected,
+	const std::vector<double>& start_reference_joints,
+	const std::string& group_name,
+	double planning_time,
+	int num_planning_attempts);

@@ -343,6 +343,96 @@ TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
 	return matrix;
 }
 
+std::vector<TourTrajectory> PlanFinalTourTrajectories(
+	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::vector<const ViewpointCandidate*>& selected, const std::vector<double>& start_reference_joints,
+	const std::string& group_name, double planning_time, int num_planning_attempts)
+{
+	if (rcutils_logging_set_logger_level(
+			"moveit.ompl_planning.model_based_planning_context", RCUTILS_LOG_SEVERITY_WARN) != RCUTILS_RET_OK)
+		RCLCPP_WARN(node->get_logger(), "Failed to quiet moveit.ompl_planning.model_based_planning_context logger");
+
+	planning_pipeline::PlanningPipeline pipeline(robot_model, node, "ompl");
+	pipeline.displayComputedMotionPlans(false);
+	pipeline.checkSolutionPaths(false);
+
+	planning_scene::PlanningSceneConstPtr scene = planning_scene_monitor->getPlanningScene();
+
+	std::vector<TourTrajectory> legs;
+	legs.reserve(selected.size());
+
+	const std::vector<double>* start_joints = &start_reference_joints;
+
+	for (size_t leg = 0; leg < selected.size(); ++leg)
+	{
+		if (!rclcpp::ok())
+		{
+			RCLCPP_WARN(
+				node->get_logger(), "PlanFinalTourTrajectories: interrupted at leg %zu/%zu", leg, selected.size());
+			return legs;
+		}
+
+		const std::vector<double>& goal_joints = selected[leg]->joint_solution;
+
+		moveit::core::RobotState start_state(robot_model);
+		start_state.setToDefaultValues();
+		const moveit::core::JointModelGroup* jmg = start_state.getJointModelGroup(group_name);
+		start_state.setJointGroupPositions(jmg, *start_joints);
+		start_state.update();
+
+		moveit::core::RobotState goal_state(robot_model);
+		goal_state.setToDefaultValues();
+		goal_state.setJointGroupPositions(jmg, goal_joints);
+		goal_state.update();
+
+		planning_interface::MotionPlanRequest req;
+		req.group_name = group_name;
+		req.allowed_planning_time = planning_time;
+		req.num_planning_attempts = 1;
+		moveit::core::robotStateToRobotStateMsg(start_state, req.start_state);
+		req.goal_constraints.push_back(kinematic_constraints::constructGoalConstraints(goal_state, jmg));
+
+		// Re-run RRTConnect (randomized) a few times and keep the shortest result -- mirrors
+		// WaypointFollower::execute_waypoints' setNumPlanningAttempts(5) rationale, affordable here
+		// since this is only selected.size() calls, not O(n^2).
+		robot_trajectory::RobotTrajectoryPtr best_trajectory;
+		double best_distance = std::numeric_limits<double>::max();
+		for (int attempt = 0; attempt < num_planning_attempts; ++attempt)
+		{
+			planning_interface::MotionPlanResponse res;
+			bool ok = pipeline.generatePlan(scene, req, res);
+			if (!ok || !res.trajectory_)
+				continue;
+
+			double distance = MeasureTrajectoryEndEffectorDistance(res.trajectory_);
+			if (distance < best_distance)
+			{
+				best_distance = distance;
+				best_trajectory = res.trajectory_;
+			}
+		}
+
+		TourTrajectory leg_result;
+		if (best_trajectory)
+		{
+			leg_result.ok = true;
+			best_trajectory->getRobotTrajectoryMsg(leg_result.trajectory);
+		}
+		else
+		{
+			RCLCPP_ERROR(
+				node->get_logger(), "PlanFinalTourTrajectories: failed to plan leg %zu/%zu after %d attempts", leg,
+				selected.size(), num_planning_attempts);
+		}
+		legs.push_back(leg_result);
+
+		start_joints = &goal_joints;
+	}
+
+	return legs;
+}
+
 namespace
 {
 

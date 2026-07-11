@@ -52,8 +52,8 @@ public:
 		int max_rays_per_view) const;
 
 private:
-	const MeshData* mesh_;
-	vtkSmartPointer<class vtkOBBTree> ray_tree_;
+	const MeshData* mesh;
+	vtkSmartPointer<class vtkOBBTree> ray_tree;
 };
 
 // Runs VisibilityChecker over every candidate and drops those with zero visible faces.
@@ -80,8 +80,8 @@ public:
 		std::vector<int>& face_ids) const;
 
 private:
-	const MeshData* mesh_;
-	std::vector<double> cumulative_area_;
+	const MeshData* mesh;
+	std::vector<double> cumulative_area;
 };
 
 // Generates the standoff/tilt candidate grid around sampled surface points.

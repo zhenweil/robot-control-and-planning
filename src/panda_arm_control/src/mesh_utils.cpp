@@ -209,12 +209,12 @@ std::vector<ViewpointCandidate> FilterByClearance(
 	return filtered;
 }
 
-VisibilityChecker::VisibilityChecker(const MeshData& simplified_mesh) : mesh_(&simplified_mesh)
+VisibilityChecker::VisibilityChecker(const MeshData& simplified_mesh) : mesh(&simplified_mesh)
 {
 	vtkNew<vtkOBBTree> ray_tree;
 	ray_tree->SetDataSet(simplified_mesh.poly_data);
 	ray_tree->BuildLocator();
-	ray_tree_ = ray_tree;
+	this->ray_tree = ray_tree;
 }
 
 void VisibilityChecker::ComputeVisibleFaces(
@@ -224,7 +224,7 @@ void VisibilityChecker::ComputeVisibleFaces(
 	double angle_threshold_deg,
 	int max_rays_per_view) const
 {
-	const size_t n = mesh_->NumFaces();
+	const size_t n = this->mesh->NumFaces();
 	candidate.visible_mask.assign(n, 0);
 	candidate.num_visible_faces = 0;
 
@@ -238,13 +238,13 @@ void VisibilityChecker::ComputeVisibleFaces(
 
 	for (size_t f = 0; f < n; ++f)
 	{
-		Eigen::Vector3d to_face = mesh_->face_centers[f] - candidate.camera_pos;
+		Eigen::Vector3d to_face = this->mesh->face_centers[f] - candidate.camera_pos;
 		double dist = to_face.norm();
 		Eigen::Vector3d dir = to_face / (dist + 1e-9);
 
 		bool in_fov = dir.dot(candidate.view_dir) > cos_fov;
 		bool in_range = dist < max_distance;
-		bool good_angle = (-dir).dot(mesh_->face_normals[f]) > cos_angle_threshold;
+		bool good_angle = (-dir).dot(this->mesh->face_normals[f]) > cos_angle_threshold;
 
 		if (in_fov && in_range && good_angle)
 		{
@@ -276,7 +276,7 @@ void VisibilityChecker::ComputeVisibleFaces(
 	int visible_count = 0;
 	for (int expected_face : valid_faces)
 	{
-		Eigen::Vector3d to_face = mesh_->face_centers[expected_face] - candidate.camera_pos;
+		Eigen::Vector3d to_face = this->mesh->face_centers[expected_face] - candidate.camera_pos;
 		double target_dist = to_face.norm();
 		Eigen::Vector3d dir = to_face / (target_dist + 1e-9);
 		// Extend slightly past the target face center so the finite-segment query
@@ -289,7 +289,7 @@ void VisibilityChecker::ComputeVisibleFaces(
 		int sub_id;
 		vtkIdType hit_cell_id = -1;
 
-		int hit = ray_tree_->IntersectWithLine(p1_arr, p2_arr, 1e-6, t, x, pcoords, sub_id, hit_cell_id);
+		int hit = this->ray_tree->IntersectWithLine(p1_arr, p2_arr, 1e-6, t, x, pcoords, sub_id, hit_cell_id);
 
 		if (hit && hit_cell_id == static_cast<vtkIdType>(expected_face))
 		{
@@ -329,14 +329,14 @@ std::vector<ViewpointCandidate> ComputeVisibility(
 	return valid_candidates;
 }
 
-SurfaceSampler::SurfaceSampler(const MeshData& mesh) : mesh_(&mesh)
+SurfaceSampler::SurfaceSampler(const MeshData& mesh_data) : mesh(&mesh_data)
 {
-	cumulative_area_.resize(mesh.NumFaces());
+	this->cumulative_area.resize(mesh_data.NumFaces());
 	double running = 0.0;
-	for (size_t i = 0; i < mesh.NumFaces(); ++i)
+	for (size_t i = 0; i < mesh_data.NumFaces(); ++i)
 	{
-		running += mesh.face_areas[i];
-		cumulative_area_[i] = running;
+		running += mesh_data.face_areas[i];
+		this->cumulative_area[i] = running;
 	}
 }
 
@@ -347,7 +347,7 @@ void SurfaceSampler::Sample(
 	std::vector<Eigen::Vector3d>& normals,
 	std::vector<int>& face_ids) const
 {
-	std::uniform_real_distribution<double> area_dist(0.0, cumulative_area_.back());
+	std::uniform_real_distribution<double> area_dist(0.0, this->cumulative_area.back());
 	std::uniform_real_distribution<double> unit_dist(0.0, 1.0);
 
 	points.resize(n_samples);
@@ -358,11 +358,12 @@ void SurfaceSampler::Sample(
 	{
 		double r = area_dist(rng);
 		int f = static_cast<int>(
-			std::upper_bound(cumulative_area_.begin(), cumulative_area_.end(), r) - cumulative_area_.begin());
-		f = std::min(f, static_cast<int>(mesh_->NumFaces()) - 1);
+			std::upper_bound(this->cumulative_area.begin(), this->cumulative_area.end(), r) -
+			this->cumulative_area.begin());
+		f = std::min(f, static_cast<int>(this->mesh->NumFaces()) - 1);
 
 		Eigen::Vector3d v0, v1, v2;
-		GetTriangleVertices(mesh_->poly_data, f, v0, v1, v2);
+		GetTriangleVertices(this->mesh->poly_data, f, v0, v1, v2);
 
 		double r1 = unit_dist(rng);
 		double r2 = unit_dist(rng);
@@ -371,7 +372,7 @@ void SurfaceSampler::Sample(
 		Eigen::Vector3d point = (1.0 - sqrt_r1) * v0 + sqrt_r1 * (1.0 - r2) * v1 + sqrt_r1 * r2 * v2;
 
 		points[s] = point;
-		normals[s] = mesh_->face_normals[f];
+		normals[s] = this->mesh->face_normals[f];
 		face_ids[s] = f;
 	}
 }

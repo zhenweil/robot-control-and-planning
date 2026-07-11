@@ -25,6 +25,13 @@ class WaypointFollower : public rclcpp::Node
 
 		void init()
 		{
+			// Shared with viewpoint_planner via config/object_pose.yaml, so both nodes agree on the
+			// robot's actual home configuration -- see registerCollisionObject() below for the same
+			// pattern applied to object_translation_world/object_rotation_rpy_deg.
+			if (!this->has_parameter("initial_joints"))
+				this->declare_parameter("initial_joints", this->initial_joints);
+			this->get_parameter("initial_joints", this->initial_joints);
+
 			this->registerCollisionObject();
 
 			this->move_group = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
@@ -63,6 +70,8 @@ class WaypointFollower : public rclcpp::Node
 		bool has_new_waypoints = false;
 		std::condition_variable waypoint_cv;	
 		geometry_msgs::msg::PoseArray latest_waypoints;
+		// Fallback default if the initial_joints parameter isn't set (see init()) -- normally
+		// overridden by config/object_pose.yaml, shared with viewpoint_planner.
 		std::vector<double> initial_joints = {0.0, -0.8745, 0.0, -2.356, 0.0, 1.571, 0.785};
 
 		rclcpp::Subscription<geometry_msgs::msg::PoseArray>::SharedPtr sub;
@@ -277,7 +286,7 @@ class WaypointFollower : public rclcpp::Node
 			{
 				this->publishCurrentTargetMarker(waypoints[i]);
 
-				auto current_state = move_group->getCurrentState(2.0);
+				auto current_state = this->move_group->getCurrentState(2.0);
 				if (!current_state)
 				{
 					RCLCPP_WARN(this->get_logger(), "Failed to get current state for waypoint %zu/%zu, skipping", i, waypoints.size());
@@ -292,7 +301,7 @@ class WaypointFollower : public rclcpp::Node
 				// self-collision or collide with the object -- plain setFromIK only checks
 				// kinematic reachability and joint limits, so without this, plan() would silently
 				// be handed an invalid goal state and abort almost instantly.
-				const moveit::core::JointModelGroup* jmg = current_state->getJointModelGroup(move_group->getName());
+				const moveit::core::JointModelGroup* jmg = current_state->getJointModelGroup(this->move_group->getName());
 				bool ik_ok = current_state->setFromIK(
 					jmg, waypoints[i], "tool0", 0.3,
 					std::bind(
@@ -308,11 +317,11 @@ class WaypointFollower : public rclcpp::Node
 				std::vector<double> joint_target;
 				current_state->copyJointGroupPositions(jmg, joint_target);
 
-				move_group->setStartStateToCurrentState();
-				move_group->setJointValueTarget(joint_target);
+				this->move_group->setStartStateToCurrentState();
+				this->move_group->setJointValueTarget(joint_target);
 
 				moveit::planning_interface::MoveGroupInterface::Plan plan;
-				moveit::core::MoveItErrorCode plan_result = move_group->plan(plan);
+				moveit::core::MoveItErrorCode plan_result = this->move_group->plan(plan);
 
 				if (!static_cast<bool>(plan_result))
 				{

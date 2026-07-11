@@ -1,7 +1,11 @@
 /**:
   ros__parameters:
-    # x/y matches tool0's position at the robot's home configuration (initial_joints in
-    # panda_arm_control.cpp), computed via forward kinematics, so the object sits directly below
-    # the end effector's resting position.
+    # The robot's "ready" home configuration -- shared so panda_arm_control (WaypointFollower) and
+    # viewpoint_planner agree on where the robot actually returns to/starts from. Must stay
+    # collision-free: viewpoint_planner's executeTourOnRobot() drives the real robot here before
+    # executing the planned tour, not just using it as an abstract cost-reference point.
+    initial_joints: [0.0, -0.8745, 0.0, -2.356, 0.0, 1.571, 0.785]
+    # x/y matches tool0's position at initial_joints, computed via forward kinematics, so the
+    # object sits directly below the end effector's resting position.
     object_translation_world: [0.5, 0.0, 0.3]
     object_rotation_rpy_deg: [0.0, 0.0, 0.0]
