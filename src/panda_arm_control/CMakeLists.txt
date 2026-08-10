@@ -45,44 +45,56 @@ ament_target_dependencies(panda_arm_control
 	visualization_msgs
 	)
 
-add_executable(viewpoint_planner
+add_executable(viewpoint_planner_rkga
 	src/mesh_utils.cpp
 	src/potential_field_sampler.cpp
+	src/real_cost_planning.cpp
 	src/rkga_scp.cpp
-	src/viewpoint_planner_node.cpp
+	src/viewpoint_io.cpp
+	src/viewpoint_planner_rkga_node.cpp
 	)
 
-target_include_directories(viewpoint_planner PRIVATE
-	${CMAKE_CURRENT_SOURCE_DIR}/include
+add_executable(viewpoint_planner_nn2opt
+	src/mesh_utils.cpp
+	src/potential_field_sampler.cpp
+	src/real_cost_planning.cpp
+	src/viewpoint_io.cpp
+	src/viewpoint_planner_nn2opt_node.cpp
 	)
 
-ament_target_dependencies(viewpoint_planner
-	rclcpp
-	moveit_ros_planning_interface
-	moveit_ros_planning
-	moveit_msgs
-	geometry_msgs
-	shape_msgs
-	geometric_shapes
-	visualization_msgs
-	ament_index_cpp
-	)
+foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt)
+	target_include_directories(${viewpoint_planner_target} PRIVATE
+		${CMAKE_CURRENT_SOURCE_DIR}/include
+		)
 
-target_link_libraries(viewpoint_planner
-	${VTK_LIBRARIES}
-	jsoncpp_lib
-	)
+	ament_target_dependencies(${viewpoint_planner_target}
+		rclcpp
+		moveit_ros_planning_interface
+		moveit_ros_planning
+		moveit_msgs
+		geometry_msgs
+		shape_msgs
+		geometric_shapes
+		visualization_msgs
+		ament_index_cpp
+		)
 
-vtk_module_autoinit(
-	TARGETS viewpoint_planner
-	MODULES ${VTK_LIBRARIES}
-	)
+	target_link_libraries(${viewpoint_planner_target}
+		${VTK_LIBRARIES}
+		jsoncpp_lib
+		)
+
+	vtk_module_autoinit(
+		TARGETS ${viewpoint_planner_target}
+		MODULES ${VTK_LIBRARIES}
+		)
+endforeach()
 
 install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS panda_arm_control viewpoint_planner
+install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt
 	DESTINATION lib/${PROJECT_NAME}
 	)
 
