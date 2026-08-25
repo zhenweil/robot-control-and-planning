@@ -381,7 +381,8 @@ std::vector<ViewpointCandidate> GenerateViewCandidates(
 	int n_surface_samples,
 	const std::vector<double>& standoff_distances,
 	const std::vector<double>& tilt_angles_deg,
-	std::mt19937& rng)
+	std::mt19937& rng,
+	const std::vector<double>& tip_angles_deg)
 {
 	SurfaceSampler sampler(mesh);
 
@@ -390,11 +391,20 @@ std::vector<ViewpointCandidate> GenerateViewCandidates(
 	sampler.Sample(n_surface_samples, rng, points, normals, face_ids);
 
 	std::vector<ViewpointCandidate> candidates;
-	candidates.reserve(points.size() * standoff_distances.size() * tilt_angles_deg.size());
+	candidates.reserve(
+		points.size() * standoff_distances.size() * tilt_angles_deg.size() * tip_angles_deg.size());
 
 	for (size_t k = 0; k < points.size(); ++k)
 	{
 		Eigen::Vector3d n = normals[k].normalized();
+
+		// tangent1/tangent2 span the plane perpendicular to n -- tilt swings view_dir toward
+		// tangent1, tip swings it toward tangent2, so together they reach any direction around n.
+		Eigen::Vector3d tangent1 = n.cross(Eigen::Vector3d(0.0, 0.0, 1.0));
+		if (tangent1.norm() < 1e-6)
+			tangent1 = n.cross(Eigen::Vector3d(0.0, 1.0, 0.0));
+		tangent1.normalize();
+		Eigen::Vector3d tangent2 = n.cross(tangent1); // already unit: n and tangent1 are orthonormal
 
 		for (double d : standoff_distances)
 		{
@@ -402,21 +412,25 @@ std::vector<ViewpointCandidate> GenerateViewCandidates(
 			{
 				double tilt = tilt_deg * M_PI / 180.0;
 
-				Eigen::Vector3d tangent = n.cross(Eigen::Vector3d(0.0, 0.0, 1.0));
-				if (tangent.norm() < 1e-6)
-					tangent = n.cross(Eigen::Vector3d(0.0, 1.0, 0.0));
-				tangent.normalize();
+				for (double tip_deg : tip_angles_deg)
+				{
+					double tip = tip_deg * M_PI / 180.0;
 
-				Eigen::Vector3d view_dir = (std::cos(tilt) * (-n) + std::sin(tilt) * tangent).normalized();
-				Eigen::Vector3d camera_pos = points[k] - d * view_dir;
+					// Spherical offset from -n: reduces to the original tilt-only formula when
+					// tip=0, and stays unit-length without renormalizing (n, tangent1, tangent2
+					// orthonormal).
+					Eigen::Vector3d view_dir = std::cos(tilt) * std::cos(tip) * (-n) +
+						std::sin(tilt) * std::cos(tip) * tangent1 + std::sin(tip) * tangent2;
+					Eigen::Vector3d camera_pos = points[k] - d * view_dir;
 
-				ViewpointCandidate c;
-				c.camera_pos = camera_pos;
-				c.view_dir = view_dir;
-				c.target_point = points[k];
-				c.seed_face = face_ids[k];
-				c.distance = d;
-				candidates.push_back(std::move(c));
+					ViewpointCandidate c;
+					c.camera_pos = camera_pos;
+					c.view_dir = view_dir;
+					c.target_point = points[k];
+					c.seed_face = face_ids[k];
+					c.distance = d;
+					candidates.push_back(std::move(c));
+				}
 			}
 		}
 	}

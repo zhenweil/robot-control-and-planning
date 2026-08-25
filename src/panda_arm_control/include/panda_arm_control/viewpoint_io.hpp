@@ -36,6 +36,15 @@ visualization_msgs::msg::MarkerArray BuildViewpointMarkerArray(
 	const std::vector<const ViewpointCandidate*>& selected,
 	const std::vector<ViewpointCandidate>& unreachable_visible);
 
+// Colors each mesh face green if `selected` covers it, red otherwise -- diagnostic for why
+// achieved visibility falls short of target, since selection silently stops early on no gain.
+visualization_msgs::msg::MarkerArray BuildCoverageGapMarkerArray(
+	const rclcpp::Time& stamp,
+	const MeshData& mesh,
+	const Eigen::Vector3d& object_translation_world,
+	const Eigen::Matrix3d& object_rotation_world,
+	const std::vector<const ViewpointCandidate*>& selected);
+
 // Original mesh (at the object's real pose) and simplified/decimated mesh (offset by
 // mesh_comparison_offset), side by side, for /mesh_comparison_markers.
 visualization_msgs::msg::MarkerArray BuildMeshComparisonMarkerArray(

@@ -15,10 +15,10 @@
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include "panda_arm_control/hierarchical_tour.hpp"
 #include "panda_arm_control/mesh_utils.hpp"
 #include "panda_arm_control/potential_field_sampler.hpp"
 #include "panda_arm_control/real_cost_planning.hpp"
-#include "panda_arm_control/rkga_scp.hpp"
 #include "panda_arm_control/viewpoint_io.hpp"
 #include "panda_arm_control/viewpoint_types.hpp"
 
@@ -32,8 +32,10 @@ struct Params
 	int target_faces = 1000;
 	int n_surface_samples = 500;
 	std::vector<double> standoff_distances = {0.01, 0.02, 0.03};
-	// Only used when candidate_generation_method is "grid".
+	// Only used when candidate_generation_method is "grid". tilt/tip are two orthogonal swing
+	// angles away from straight-on the surface normal -- see GenerateViewCandidates.
 	std::vector<double> tilt_angles_deg = {0.0, 15.0, -15.0};
+	std::vector<double> tip_angles_deg = {0.0, 15.0, -15.0};
 	// "grid" (GenerateViewCandidates: standoff/tilt grid per surface point) or "potential_field"
 	// (GeneratePotentialFieldViewCandidates: view direction from a mesh-attraction field).
 	std::string candidate_generation_method = "grid";
@@ -59,15 +61,28 @@ struct Params
 	// Applied only to the original mesh's comparison-marker position (not the object's actual
 	// pose), so the original and simplified meshes render side by side instead of overlapping.
 	std::vector<double> mesh_comparison_offset = {0.0, 0.3, 0.0};
-	// Per-pair timeout for ComputeEndEffectorTravelDistanceMatrix's real planning calls. Total
-	// cost is roughly this times (n^2/2) pairs, divided across threads.
-	double rkga_planning_time = 2.0;
+	// Below this many selected viewpoints, SolveHierarchicalTour skips clustering and runs flat
+	// NN+2-opt over all of them (matches viewpoint_planner_nn2opt).
+	int hgtsp_min_size_for_hierarchy = 8;
+	// "alpha" in the cheap clustering-only proxy metric used to pick exemplars/cluster membership.
+	double hgtsp_exemplar_metric_rotation_weight = 0.1;
+	// Affinity propagation hyperparameters -- see hierarchical_tour.hpp for what each controls.
+	// See hierarchical_tour.hpp: 0.9-0.95 (not the sklearn-typical median) is needed for
+	// tightly-clustered viewpoints to avoid affinity propagation collapsing to one exemplar.
+	double hgtsp_ap_preference_quantile = 0.95;
+	double hgtsp_ap_damping = 0.9;
+	int hgtsp_ap_max_iterations = 200;
+	int hgtsp_ap_convergence_iterations = 15;
+	// Per-pair timeout for the small exemplar-only real cost matrix (upper-level guide path).
+	double hgtsp_guide_path_planning_time = 2.0;
+	// Per-pair timeout for each small per-cluster real cost matrix (lower-level local refinement).
+	double hgtsp_cluster_planning_time = 2.0;
 	// When true, re-plans the tour's legs and drives the robot directly via move_group, instead
 	// of publishing waypoints. Don't also run waypoint_follower -- uncoordinated with this.
 	bool execute_on_robot = true;
 	// Planning time/attempts for PlanFinalTourTrajectories -- affordable to be more generous than
-	// rkga_planning_time since this only runs once per tour leg (selected.size() calls), not
-	// O(n^2).
+	// hgtsp_cluster_planning_time since this only runs once per tour leg (selected.size() calls),
+	// not O(n^2).
 	double execution_planning_time = 5.0;
 	int execution_planning_attempts = 5;
 	std::string output_dir = "/tmp/viewpoint_planner_output";
@@ -75,12 +90,13 @@ struct Params
 
 } // namespace
 
-class ViewpointPlannerRkgaNode : public rclcpp::Node
+class ViewpointPlannerHgtspNode : public rclcpp::Node
 {
 public:
-	explicit ViewpointPlannerRkgaNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
+	explicit ViewpointPlannerHgtspNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
 		: Node(
-			  "viewpoint_planner_rkga", rclcpp::NodeOptions(options).automatically_declare_parameters_from_overrides(true))
+			  "viewpoint_planner_hgtsp",
+			  rclcpp::NodeOptions(options).automatically_declare_parameters_from_overrides(true))
 	{
 	}
 
@@ -110,6 +126,9 @@ public:
 
 		this->mesh_comparison_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>(
 			"/mesh_comparison_markers", rclcpp::QoS(1).transient_local());
+
+		this->coverage_gap_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+			"/coverage_gap_markers", rclcpp::QoS(1).transient_local());
 
 		this->waypoint_pub = this->create_publisher<geometry_msgs::msg::PoseArray>(
 			"/cartesian_waypoints", rclcpp::QoS(1).transient_local());
@@ -148,6 +167,7 @@ private:
 
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub;
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr mesh_comparison_pub;
+	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr coverage_gap_pub;
 	rclcpp::TimerBase::SharedPtr marker_timer;
 	visualization_msgs::msg::MarkerArray marker_array;
 
@@ -176,6 +196,7 @@ private:
 		this->declareIfNeeded("n_surface_samples", this->params.n_surface_samples);
 		this->declareIfNeeded("standoff_distances", this->params.standoff_distances);
 		this->declareIfNeeded("tilt_angles_deg", this->params.tilt_angles_deg);
+		this->declareIfNeeded("tip_angles_deg", this->params.tip_angles_deg);
 		this->declareIfNeeded("candidate_generation_method", this->params.candidate_generation_method);
 		this->declareIfNeeded("min_clearance", this->params.min_clearance);
 		this->declareIfNeeded("fov_deg", this->params.fov_deg);
@@ -193,7 +214,15 @@ private:
 		this->declareIfNeeded("t_tcp_camera_quat_xyzw", this->params.t_tcp_camera_quat_xyzw);
 		this->declareIfNeeded("joint_distance_weight", this->params.joint_distance_weight);
 		this->declareIfNeeded("mesh_comparison_offset", this->params.mesh_comparison_offset);
-		this->declareIfNeeded("rkga_planning_time", this->params.rkga_planning_time);
+		this->declareIfNeeded("hgtsp_min_size_for_hierarchy", this->params.hgtsp_min_size_for_hierarchy);
+		this->declareIfNeeded(
+			"hgtsp_exemplar_metric_rotation_weight", this->params.hgtsp_exemplar_metric_rotation_weight);
+		this->declareIfNeeded("hgtsp_ap_preference_quantile", this->params.hgtsp_ap_preference_quantile);
+		this->declareIfNeeded("hgtsp_ap_damping", this->params.hgtsp_ap_damping);
+		this->declareIfNeeded("hgtsp_ap_max_iterations", this->params.hgtsp_ap_max_iterations);
+		this->declareIfNeeded("hgtsp_ap_convergence_iterations", this->params.hgtsp_ap_convergence_iterations);
+		this->declareIfNeeded("hgtsp_guide_path_planning_time", this->params.hgtsp_guide_path_planning_time);
+		this->declareIfNeeded("hgtsp_cluster_planning_time", this->params.hgtsp_cluster_planning_time);
 		this->declareIfNeeded("execute_on_robot", this->params.execute_on_robot);
 		this->declareIfNeeded("execution_planning_time", this->params.execution_planning_time);
 		this->declareIfNeeded("execution_planning_attempts", this->params.execution_planning_attempts);
@@ -208,6 +237,7 @@ private:
 		this->get_parameter("n_surface_samples", this->params.n_surface_samples);
 		this->get_parameter("standoff_distances", this->params.standoff_distances);
 		this->get_parameter("tilt_angles_deg", this->params.tilt_angles_deg);
+		this->get_parameter("tip_angles_deg", this->params.tip_angles_deg);
 		this->get_parameter("candidate_generation_method", this->params.candidate_generation_method);
 		this->get_parameter("min_clearance", this->params.min_clearance);
 		this->get_parameter("fov_deg", this->params.fov_deg);
@@ -225,7 +255,15 @@ private:
 		this->get_parameter("t_tcp_camera_quat_xyzw", this->params.t_tcp_camera_quat_xyzw);
 		this->get_parameter("joint_distance_weight", this->params.joint_distance_weight);
 		this->get_parameter("mesh_comparison_offset", this->params.mesh_comparison_offset);
-		this->get_parameter("rkga_planning_time", this->params.rkga_planning_time);
+		this->get_parameter("hgtsp_min_size_for_hierarchy", this->params.hgtsp_min_size_for_hierarchy);
+		this->get_parameter(
+			"hgtsp_exemplar_metric_rotation_weight", this->params.hgtsp_exemplar_metric_rotation_weight);
+		this->get_parameter("hgtsp_ap_preference_quantile", this->params.hgtsp_ap_preference_quantile);
+		this->get_parameter("hgtsp_ap_damping", this->params.hgtsp_ap_damping);
+		this->get_parameter("hgtsp_ap_max_iterations", this->params.hgtsp_ap_max_iterations);
+		this->get_parameter("hgtsp_ap_convergence_iterations", this->params.hgtsp_ap_convergence_iterations);
+		this->get_parameter("hgtsp_guide_path_planning_time", this->params.hgtsp_guide_path_planning_time);
+		this->get_parameter("hgtsp_cluster_planning_time", this->params.hgtsp_cluster_planning_time);
 		this->get_parameter("execute_on_robot", this->params.execute_on_robot);
 		this->get_parameter("execution_planning_time", this->params.execution_planning_time);
 		this->get_parameter("execution_planning_attempts", this->params.execution_planning_attempts);
@@ -273,7 +311,7 @@ private:
 		{
 			candidates = GenerateViewCandidates(
 				simplified_mesh, this->params.n_surface_samples, this->params.standoff_distances,
-				this->params.tilt_angles_deg, rng);
+				this->params.tilt_angles_deg, rng, this->params.tip_angles_deg);
 		}
 
 		RCLCPP_INFO(this->get_logger(), "candidate views: %zu", candidates.size());
@@ -313,25 +351,35 @@ private:
 			this->get_logger(), "reachable candidate views: %zu / %zu", this->reachable_candidates.size(),
 			this->reachable_candidates.size() + this->unreachable_visible.size());
 
+		this->selected = GreedySelectViewpoints(
+			simplified_mesh, this->reachable_candidates, this->params.target_area_visibility);
+
+		RCLCPP_INFO(this->get_logger(), "selected views: %zu", this->selected.size());
+
+		HierarchicalTourParams hgtsp_params;
+		hgtsp_params.min_size_for_hierarchy = this->params.hgtsp_min_size_for_hierarchy;
+		hgtsp_params.exemplar_metric_rotation_weight = this->params.hgtsp_exemplar_metric_rotation_weight;
+		hgtsp_params.ap_preference_quantile = this->params.hgtsp_ap_preference_quantile;
+		hgtsp_params.ap_damping = this->params.hgtsp_ap_damping;
+		hgtsp_params.ap_max_iterations = this->params.hgtsp_ap_max_iterations;
+		hgtsp_params.ap_convergence_iterations = this->params.hgtsp_ap_convergence_iterations;
+		hgtsp_params.joint_distance_weight = this->params.joint_distance_weight;
+		hgtsp_params.guide_path_planning_time = this->params.hgtsp_guide_path_planning_time;
+		hgtsp_params.cluster_planning_time = this->params.hgtsp_cluster_planning_time;
+
 		RCLCPP_INFO(
-			this->get_logger(), "Computing real end-effector travel distance matrix for %zu candidates (this "
-								 "runs real motion planning for every pair -- can take a while)...",
-			this->reachable_candidates.size());
+			this->get_logger(), "Ordering %zu selected views via hierarchical guide-path tour (affinity "
+								 "propagation + real per-cluster cost matrices, inspired by H-Joint-GTSP, "
+								 "arXiv:2502.19591)...",
+			this->selected.size());
 
-		TravelCostMatrix travel_cost_matrix = ComputeEndEffectorTravelDistanceMatrix(
-			this->shared_from_this(), this->robot_model, local_scene, this->reachable_candidates,
-			this->home_joint_values, this->params.group_name, this->params.rkga_planning_time);
-
-		RkgaScpParams rkga_params;
-		rkga_params.target_area_visibility = this->params.target_area_visibility;
-		rkga_params.random_seed = static_cast<unsigned int>(this->params.random_seed);
-		rkga_params.joint_distance_weight = this->params.joint_distance_weight;
-
-		this->selected = SolveRkgaScp(simplified_mesh, this->reachable_candidates, travel_cost_matrix, rkga_params);
+		this->selected = SolveHierarchicalTour(
+			this->shared_from_this(), this->robot_model, local_scene, std::move(this->selected),
+			this->home_joint_values, this->params.group_name, hgtsp_params);
 
 		double achieved_visibility = ComputeAreaVisibility(simplified_mesh, this->selected);
 		RCLCPP_INFO(
-			this->get_logger(), "RKGA-SCP selected %zu views (jointly selected + ordered), %.2f%% area visibility",
+			this->get_logger(), "hierarchical guide-path tour ordered %zu selected views, %.2f%% area visibility",
 			this->selected.size(), achieved_visibility * 100.0);
 
 		ExportSelectedViewpoints(this->params.output_dir, this->selected);
@@ -346,6 +394,11 @@ private:
 			this->now(), this->resolved_mesh_path, this->resolved_simplified_mesh_path, this->params.mesh_scale,
 			object_translation_world, object_rotation_world,
 			ToVector3(this->params.mesh_comparison_offset, Eigen::Vector3d(0.0, 0.3, 0.0))));
+
+		// Red/green mesh overlay showing exactly which faces GreedySelectViewpoints did/didn't
+		// cover -- diagnostic for why achieved_visibility falls short of target_area_visibility.
+		this->coverage_gap_pub->publish(BuildCoverageGapMarkerArray(
+			this->now(), simplified_mesh, object_translation_world, object_rotation_world, this->selected));
 
 		if (this->selected.empty())
 		{
@@ -376,7 +429,7 @@ private:
 int main(int argc, char* argv[])
 {
 	rclcpp::init(argc, argv);
-	auto node = std::make_shared<ViewpointPlannerRkgaNode>();
+	auto node = std::make_shared<ViewpointPlannerHgtspNode>();
 
 	// ExecuteTourOnRobot's blocking MoveGroupInterface calls need this node's own callbacks
 	// serviced concurrently or they hang. Spin on a background thread from the start.

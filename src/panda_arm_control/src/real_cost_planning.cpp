@@ -87,80 +87,73 @@ bool IsStateCollisionFree(
 	return locked_scene->isStateValid(*state, group->getName());
 }
 
-bool AreJointSolutionsSimilar(const std::vector<double>& a, const std::vector<double>& b, double threshold_rad)
-{
-	double dist_sq = 0.0;
-	for (size_t i = 0; i < a.size(); ++i)
-	{
-		double d = a[i] - b[i];
-		dist_sq += d * d;
-	}
-	return std::sqrt(dist_sq) < threshold_rad;
-}
-
-constexpr int kMaxJointSolutionsPerCandidate = 5;
-constexpr double kJointSolutionDedupThresholdRad = 0.1; // ~5.7 degrees of combined joint distance
-
 } // namespace
 
 std::vector<ViewpointCandidate> ComputeReachabilityWithCollisionCheck(
 	std::vector<ViewpointCandidate> candidates,
-	const moveit::core::RobotStatePtr& robot_state,
-	const moveit::core::JointModelGroup* jmg,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const std::string& group_name,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Vector3d& object_translation_world,
 	const Eigen::Matrix3d& object_rotation_world,
 	const Eigen::Isometry3d& t_tcp_camera,
 	double ik_timeout)
 {
-	auto validity_callback = [&planning_scene_monitor](
-								  moveit::core::RobotState* state, const moveit::core::JointModelGroup* group,
-								  const double* joint_positions) {
-		return IsStateCollisionFree(planning_scene_monitor, state, group, joint_positions);
-	};
+	const size_t n = candidates.size();
+	std::atomic<size_t> next_index{0};
+	std::atomic<int> done{0};
+	const int total = static_cast<int>(n);
 
-	for (size_t i = 0; i < candidates.size(); ++i)
-	{
-		auto& c = candidates[i];
-		c.tcp_pose = ConvertViewpointToTcpPose(
-			c.camera_pos, c.view_dir, object_translation_world, object_rotation_world, t_tcp_camera);
+	unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+	num_threads = std::min(num_threads, static_cast<unsigned int>(std::max<size_t>(n, 1)));
 
-		c.reachable = robot_state->setFromIK(jmg, c.tcp_pose, "tool0", ik_timeout, validity_callback);
+	auto worker = [&]() {
+		// Each thread owns its own RobotState -- setFromIK mutates it in place, so sharing one
+		// across threads (as the old single-threaded version did) would race.
+		moveit::core::RobotState local_state(robot_model);
+		local_state.setToDefaultValues();
+		const moveit::core::JointModelGroup* local_jmg = local_state.getJointModelGroup(group_name);
 
-		if (!c.reachable)
-			continue;
+		auto validity_callback = [&planning_scene_monitor](
+									  moveit::core::RobotState* state, const moveit::core::JointModelGroup* group,
+									  const double* joint_positions) {
+			return IsStateCollisionFree(planning_scene_monitor, state, group, joint_positions);
+		};
 
-		robot_state->copyJointGroupPositions(jmg, c.joint_solution);
-		c.joint_solutions.push_back(c.joint_solution);
-
-		// Retry from randomized seeds to find other valid configurations for the same pose,
-		// giving the cost model real elbow/wrist alternatives instead of one arbitrary solution.
-		for (int attempt = 0;
-			 attempt < kMaxJointSolutionsPerCandidate * 3 &&
-			 static_cast<int>(c.joint_solutions.size()) < kMaxJointSolutionsPerCandidate;
-			 ++attempt)
+		while (true)
 		{
-			robot_state->setToRandomPositions(jmg);
-			if (!robot_state->setFromIK(jmg, c.tcp_pose, "tool0", ik_timeout, validity_callback))
-				continue;
+			if (!rclcpp::ok())
+				return;
 
-			std::vector<double> alt_solution;
-			robot_state->copyJointGroupPositions(jmg, alt_solution);
+			size_t i = next_index.fetch_add(1);
+			if (i >= n)
+				return;
 
-			bool is_duplicate = false;
-			for (const auto& existing : c.joint_solutions)
+			ViewpointCandidate& c = candidates[i];
+			c.tcp_pose = ConvertViewpointToTcpPose(
+				c.camera_pos, c.view_dir, object_translation_world, object_rotation_world, t_tcp_camera);
+
+			c.reachable = local_state.setFromIK(local_jmg, c.tcp_pose, "tool0", ik_timeout, validity_callback);
+			if (c.reachable)
 			{
-				if (AreJointSolutionsSimilar(existing, alt_solution, kJointSolutionDedupThresholdRad))
-				{
-					is_duplicate = true;
-					break;
-				}
+				local_state.copyJointGroupPositions(local_jmg, c.joint_solution);
+				// No longer retries for alternate IK solutions -- nothing reads that plural
+				// field, only joint_solution. Kept single-element for the type to stay useful.
+				c.joint_solutions.push_back(c.joint_solution);
 			}
 
-			if (!is_duplicate)
-				c.joint_solutions.push_back(std::move(alt_solution));
+			int d = ++done;
+			if (d % 100 == 0 || d == total)
+				printf("reachability: %d/%d candidates checked\n", d, total);
 		}
-	}
+	};
+
+	std::vector<std::thread> workers;
+	workers.reserve(num_threads);
+	for (unsigned int t = 0; t < num_threads; ++t)
+		workers.emplace_back(worker);
+	for (auto& w : workers)
+		w.join();
 
 	return candidates;
 }
@@ -244,6 +237,22 @@ double MeasureTrajectoryJointDistance(const robot_trajectory::RobotTrajectoryPtr
 	return dist;
 }
 
+// Building/using a PlanningPipeline logs adapter chatter that floods the terminal when many
+// pipelines are built (esp. the hierarchical tour node). Parent prefixes cover all child loggers.
+void QuietPlanningLoggers(const rclcpp::Node::SharedPtr& node)
+{
+	static const char* kLoggerPrefixesToQuiet[] = {
+		"moveit.ompl_planning",
+		"moveit.ros_planning",
+		"moveit_ros",
+	};
+	for (const char* logger_name : kLoggerPrefixesToQuiet)
+	{
+		if (rcutils_logging_set_logger_level(logger_name, RCUTILS_LOG_SEVERITY_WARN) != RCUTILS_RET_OK)
+			RCLCPP_WARN(node->get_logger(), "Failed to quiet %s logger", logger_name);
+	}
+}
+
 } // namespace
 
 TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
@@ -255,11 +264,7 @@ TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
 	const std::string& group_name,
 	double planning_time)
 {
-	// generatePlan() logs a line per call -- silence just this logger so many calls don't
-	// flood the terminal.
-	if (rcutils_logging_set_logger_level(
-			"moveit.ompl_planning.model_based_planning_context", RCUTILS_LOG_SEVERITY_WARN) != RCUTILS_RET_OK)
-		RCLCPP_WARN(node->get_logger(), "Failed to quiet moveit.ompl_planning.model_based_planning_context logger");
+	QuietPlanningLoggers(node);
 
 	planning_scene::PlanningSceneConstPtr scene = planning_scene_monitor->getPlanningScene();
 
@@ -287,6 +292,9 @@ TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
 	std::mutex log_mutex;
 
 	unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+	// Pipeline construction is expensive relative to a tiny pair count -- never build more
+	// pipelines than there's work for.
+	num_threads = std::min(num_threads, static_cast<unsigned int>(total_pairs));
 
 	// One PlanningPipeline per thread, built sequentially first -- pluginlib's class loader
 	// isn't thread-safe to construct concurrently and racing it broke every later plugin load.
@@ -383,9 +391,7 @@ std::vector<TourTrajectory> PlanFinalTourTrajectories(
 	const std::vector<const ViewpointCandidate*>& selected, const std::vector<double>& start_reference_joints,
 	const std::string& group_name, double planning_time, int num_planning_attempts)
 {
-	if (rcutils_logging_set_logger_level(
-			"moveit.ompl_planning.model_based_planning_context", RCUTILS_LOG_SEVERITY_WARN) != RCUTILS_RET_OK)
-		RCLCPP_WARN(node->get_logger(), "Failed to quiet moveit.ompl_planning.model_based_planning_context logger");
+	QuietPlanningLoggers(node);
 
 	planning_pipeline::PlanningPipeline pipeline(robot_model, node, "ompl");
 	pipeline.displayComputedMotionPlans(false);

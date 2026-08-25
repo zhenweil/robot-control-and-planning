@@ -23,12 +23,12 @@ planning_scene_monitor::PlanningSceneMonitorPtr BuildLocalCollisionScene(
 	const Eigen::Vector3d& object_translation_world,
 	const Eigen::Matrix3d& object_rotation_world);
 
-// IK per candidate with a collision-validity callback (self-collision or the registered object),
-// retried on failure -- mirrors WaypointFollower::isStateCollisionFree. Fills reachable/joint_solution.
+// IK per candidate with a collision-validity callback (self-collision or the registered object) --
+// mirrors WaypointFollower::isStateCollisionFree. Parallelized: each thread owns a local RobotState.
 std::vector<ViewpointCandidate> ComputeReachabilityWithCollisionCheck(
 	std::vector<ViewpointCandidate> candidates,
-	const moveit::core::RobotStatePtr& robot_state,
-	const moveit::core::JointModelGroup* jmg,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const std::string& group_name,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Vector3d& object_translation_world,
 	const Eigen::Matrix3d& object_rotation_world,

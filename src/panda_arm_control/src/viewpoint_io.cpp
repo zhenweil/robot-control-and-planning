@@ -3,6 +3,7 @@
 #include <fstream>
 
 #include <json/json.h>
+#include <std_msgs/msg/color_rgba.hpp>
 
 Eigen::Vector3d ToVector3(const std::vector<double>& v, const Eigen::Vector3d& fallback)
 {
@@ -249,6 +250,64 @@ visualization_msgs::msg::MarkerArray BuildViewpointMarkerArray(
 		markers.markers.push_back(tour);
 	}
 
+	return markers;
+}
+
+visualization_msgs::msg::MarkerArray BuildCoverageGapMarkerArray(
+	const rclcpp::Time& stamp, const MeshData& mesh, const Eigen::Vector3d& object_translation_world,
+	const Eigen::Matrix3d& object_rotation_world, const std::vector<const ViewpointCandidate*>& selected)
+{
+	// Union visible_mask across every selected candidate -- same coverage definition
+	// ComputeAreaVisibility uses, just kept per-face instead of collapsed to a single fraction.
+	std::vector<bool> covered(mesh.NumFaces(), false);
+	for (const ViewpointCandidate* c : selected)
+		for (size_t i = 0; i < c->visible_mask.size() && i < covered.size(); ++i)
+			if (c->visible_mask[i])
+				covered[i] = true;
+
+	visualization_msgs::msg::Marker tri;
+	tri.header.frame_id = "world";
+	tri.header.stamp = stamp;
+	tri.ns = "coverage_gap";
+	tri.id = 0;
+	tri.type = visualization_msgs::msg::Marker::TRIANGLE_LIST;
+	tri.action = visualization_msgs::msg::Marker::ADD;
+	tri.pose.orientation.w = 1.0;
+	tri.scale.x = tri.scale.y = tri.scale.z = 1.0; // vertices are pre-transformed to world frame below
+	// RViz still gates TRIANGLE_LIST visibility on this top-level alpha even with per-vertex colors.
+	tri.color.a = 1.0f;
+
+	vtkSmartPointer<vtkPolyData> poly_data = mesh.poly_data;
+	poly_data->BuildCells();
+	vtkIdType n_cells = poly_data->GetNumberOfCells();
+
+	for (vtkIdType i = 0; i < n_cells && i < static_cast<vtkIdType>(covered.size()); ++i)
+	{
+		vtkIdType npts;
+		vtkIdType const* pts;
+		poly_data->GetCellPoints(i, npts, pts);
+		if (npts != 3)
+			continue;
+
+		std_msgs::msg::ColorRGBA color;
+		color.a = 1.0f;
+		if (covered[static_cast<size_t>(i)])
+			color.g = 0.8f;
+		else
+			color.r = 0.9f;
+
+		for (vtkIdType k = 0; k < 3; ++k)
+		{
+			double p[3];
+			poly_data->GetPoint(pts[k], p);
+			Eigen::Vector3d world = object_rotation_world * Eigen::Vector3d(p[0], p[1], p[2]) + object_translation_world;
+			tri.points.push_back(ToPoint(world));
+			tri.colors.push_back(color);
+		}
+	}
+
+	visualization_msgs::msg::MarkerArray markers;
+	markers.markers.push_back(tri);
 	return markers;
 }
 

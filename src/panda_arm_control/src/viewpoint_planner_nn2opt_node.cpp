@@ -298,7 +298,7 @@ private:
 			object_rotation_world);
 
 		candidates = ComputeReachabilityWithCollisionCheck(
-			std::move(candidates), this->robot_state, this->jmg, local_scene, object_translation_world,
+			std::move(candidates), this->robot_model, this->params.group_name, local_scene, object_translation_world,
 			object_rotation_world, t_tcp_camera, this->params.ik_timeout);
 
 		for (auto& c : candidates)

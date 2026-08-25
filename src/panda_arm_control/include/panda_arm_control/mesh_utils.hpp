@@ -84,14 +84,20 @@ private:
 	std::vector<double> cumulative_area;
 };
 
-// Generates the standoff/tilt candidate grid around sampled surface points.
+// Generates the standoff/tilt/tip candidate grid around sampled surface points. tilt and tip are
+// two orthogonal swing angles away from straight-on (the surface normal): tilt swings the view
+// direction within the plane spanned by the normal and a first in-plane tangent, tip swings it
+// within the plane spanned by the normal and a second tangent orthogonal to the first -- together
+// they cover viewing angles in any direction around the normal, not just one fixed swing axis.
+// tip_angles_deg defaults to {0.0} (no swing) so existing callers that don't pass it are unaffected.
 // Mirrors generate_view_candidates().
 std::vector<ViewpointCandidate> GenerateViewCandidates(
 	const MeshData& mesh,
 	int n_surface_samples,
 	const std::vector<double>& standoff_distances,
 	const std::vector<double>& tilt_angles_deg,
-	std::mt19937& rng);
+	std::mt19937& rng,
+	const std::vector<double>& tip_angles_deg = {0.0});
 
 // Greedy weighted set-cover over candidate visible faces: repeatedly picks whichever remaining
 // candidate covers the most previously-uncovered area, stopping once target_area_visibility is
