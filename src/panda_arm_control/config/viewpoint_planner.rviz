@@ -73,6 +73,18 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /coverage_gap_markers
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: ExemplarClusters
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /exemplar_cluster_markers
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

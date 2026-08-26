@@ -55,7 +55,7 @@ def generate_launch_description():
     viewpoint_planner_params = {
         "mesh_path": "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl",  # empty -> resolved via ament_index_cpp in code; rviz mesh markers require binary STL
         "mesh_scale": 0.01,
-        "target_faces": 1000,
+        "target_faces": 500,
         "n_surface_samples": 1000,
         "standoff_distances": [0.03],
         "tilt_angles_deg": [0.0],
@@ -85,6 +85,7 @@ def generate_launch_description():
         "hgtsp_ap_convergence_iterations": 15,
         "hgtsp_guide_path_planning_time": 2.0,
         "hgtsp_cluster_planning_time": 2.0,
+        "hgtsp_max_solutions_per_candidate": 3,
         "execute_on_robot": execute_on_robot,
         "execution_planning_time": 5.0,
         "execution_planning_attempts": 5,

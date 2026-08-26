@@ -77,6 +77,9 @@ struct Params
 	double hgtsp_guide_path_planning_time = 2.0;
 	// Per-pair timeout for each small per-cluster real cost matrix (lower-level local refinement).
 	double hgtsp_cluster_planning_time = 2.0;
+	// Redundant-IK tour ordering: each candidate can offer up to this many joint_solutions, letting
+	// the solver pick whichever minimizes reconfiguration. 1 = today's single-solution behavior.
+	int hgtsp_max_solutions_per_candidate = 3;
 	// When true, re-plans the tour's legs and drives the robot directly via move_group, instead
 	// of publishing waypoints. Don't also run waypoint_follower -- uncoordinated with this.
 	bool execute_on_robot = true;
@@ -130,6 +133,9 @@ public:
 		this->coverage_gap_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>(
 			"/coverage_gap_markers", rclcpp::QoS(1).transient_local());
 
+		this->exemplar_cluster_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>(
+			"/exemplar_cluster_markers", rclcpp::QoS(1).transient_local());
+
 		this->waypoint_pub = this->create_publisher<geometry_msgs::msg::PoseArray>(
 			"/cartesian_waypoints", rclcpp::QoS(1).transient_local());
 
@@ -168,6 +174,7 @@ private:
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub;
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr mesh_comparison_pub;
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr coverage_gap_pub;
+	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr exemplar_cluster_pub;
 	rclcpp::TimerBase::SharedPtr marker_timer;
 	visualization_msgs::msg::MarkerArray marker_array;
 
@@ -223,6 +230,8 @@ private:
 		this->declareIfNeeded("hgtsp_ap_convergence_iterations", this->params.hgtsp_ap_convergence_iterations);
 		this->declareIfNeeded("hgtsp_guide_path_planning_time", this->params.hgtsp_guide_path_planning_time);
 		this->declareIfNeeded("hgtsp_cluster_planning_time", this->params.hgtsp_cluster_planning_time);
+		this->declareIfNeeded(
+			"hgtsp_max_solutions_per_candidate", this->params.hgtsp_max_solutions_per_candidate);
 		this->declareIfNeeded("execute_on_robot", this->params.execute_on_robot);
 		this->declareIfNeeded("execution_planning_time", this->params.execution_planning_time);
 		this->declareIfNeeded("execution_planning_attempts", this->params.execution_planning_attempts);
@@ -264,6 +273,7 @@ private:
 		this->get_parameter("hgtsp_ap_convergence_iterations", this->params.hgtsp_ap_convergence_iterations);
 		this->get_parameter("hgtsp_guide_path_planning_time", this->params.hgtsp_guide_path_planning_time);
 		this->get_parameter("hgtsp_cluster_planning_time", this->params.hgtsp_cluster_planning_time);
+		this->get_parameter("hgtsp_max_solutions_per_candidate", this->params.hgtsp_max_solutions_per_candidate);
 		this->get_parameter("execute_on_robot", this->params.execute_on_robot);
 		this->get_parameter("execution_planning_time", this->params.execution_planning_time);
 		this->get_parameter("execution_planning_attempts", this->params.execution_planning_attempts);
@@ -356,6 +366,13 @@ private:
 
 		RCLCPP_INFO(this->get_logger(), "selected views: %zu", this->selected.size());
 
+		// Only collect alternates for the (small) selected set, not every reachable candidate --
+		// most reachable candidates never get used, so retries there would be wasted work.
+		CollectAlternateJointSolutions(
+			this->selected, this->robot_model, this->params.group_name, local_scene, object_translation_world,
+			object_rotation_world, t_tcp_camera, this->params.ik_timeout,
+			this->params.hgtsp_max_solutions_per_candidate);
+
 		HierarchicalTourParams hgtsp_params;
 		hgtsp_params.min_size_for_hierarchy = this->params.hgtsp_min_size_for_hierarchy;
 		hgtsp_params.exemplar_metric_rotation_weight = this->params.hgtsp_exemplar_metric_rotation_weight;
@@ -366,6 +383,7 @@ private:
 		hgtsp_params.joint_distance_weight = this->params.joint_distance_weight;
 		hgtsp_params.guide_path_planning_time = this->params.hgtsp_guide_path_planning_time;
 		hgtsp_params.cluster_planning_time = this->params.hgtsp_cluster_planning_time;
+		hgtsp_params.max_solutions_per_candidate = this->params.hgtsp_max_solutions_per_candidate;
 
 		RCLCPP_INFO(
 			this->get_logger(), "Ordering %zu selected views via hierarchical guide-path tour (affinity "
@@ -373,9 +391,10 @@ private:
 								 "arXiv:2502.19591)...",
 			this->selected.size());
 
+		HierarchicalTourDebug hierarchical_debug;
 		this->selected = SolveHierarchicalTour(
 			this->shared_from_this(), this->robot_model, local_scene, std::move(this->selected),
-			this->home_joint_values, this->params.group_name, hgtsp_params);
+			this->home_joint_values, this->params.group_name, hgtsp_params, &hierarchical_debug);
 
 		double achieved_visibility = ComputeAreaVisibility(simplified_mesh, this->selected);
 		RCLCPP_INFO(
@@ -399,6 +418,10 @@ private:
 		// cover -- diagnostic for why achieved_visibility falls short of target_area_visibility.
 		this->coverage_gap_pub->publish(BuildCoverageGapMarkerArray(
 			this->now(), simplified_mesh, object_translation_world, object_rotation_world, this->selected));
+
+		// Exemplar (cube) + its cluster members (spheres), spoke-connected and color-coded per cluster.
+		this->exemplar_cluster_pub->publish(BuildExemplarClusterMarkerArray(
+			this->now(), object_translation_world, object_rotation_world, hierarchical_debug));
 
 		if (this->selected.empty())
 		{

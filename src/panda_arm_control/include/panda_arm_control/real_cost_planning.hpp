@@ -39,6 +39,21 @@ std::vector<ViewpointCandidate> ComputeReachabilityWithCollisionCheck(
 // callback rejected colliding solutions.
 std::vector<ViewpointCandidate> FilterByReachability(std::vector<ViewpointCandidate> candidates);
 
+// Adds up to max_solutions_per_candidate-1 more distinct valid IK solutions per candidate (beyond
+// the existing joint_solution), via randomized-restart retries. Mutates in place through `candidates`
+// -- call only on an already-narrowed subset (e.g. after selection), not the full reachable pool,
+// since most reachable candidates never get used and retries aren't free.
+void CollectAlternateJointSolutions(
+	const std::vector<const ViewpointCandidate*>& candidates,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const std::string& group_name,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const Eigen::Vector3d& object_translation_world,
+	const Eigen::Matrix3d& object_rotation_world,
+	const Eigen::Isometry3d& t_tcp_camera,
+	double ik_timeout,
+	int max_solutions_per_candidate);
+
 // Fraction of total mesh area covered by the union of the given candidates' visible_mask.
 double ComputeAreaVisibility(const MeshData& mesh, const std::vector<const ViewpointCandidate*>& selected);
 

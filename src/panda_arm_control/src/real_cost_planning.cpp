@@ -87,6 +87,17 @@ bool IsStateCollisionFree(
 	return locked_scene->isStateValid(*state, group->getName());
 }
 
+bool AreJointSolutionsSimilar(const std::vector<double>& a, const std::vector<double>& b, double threshold_rad)
+{
+	double dist_sq = 0.0;
+	for (size_t i = 0; i < a.size(); ++i)
+	{
+		double d = a[i] - b[i];
+		dist_sq += d * d;
+	}
+	return std::sqrt(dist_sq) < threshold_rad;
+}
+
 } // namespace
 
 std::vector<ViewpointCandidate> ComputeReachabilityWithCollisionCheck(
@@ -156,6 +167,90 @@ std::vector<ViewpointCandidate> ComputeReachabilityWithCollisionCheck(
 		w.join();
 
 	return candidates;
+}
+
+void CollectAlternateJointSolutions(
+	const std::vector<const ViewpointCandidate*>& candidates,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const std::string& group_name,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const Eigen::Vector3d& object_translation_world,
+	const Eigen::Matrix3d& object_rotation_world,
+	const Eigen::Isometry3d& t_tcp_camera,
+	double ik_timeout,
+	int max_solutions_per_candidate)
+{
+	if (max_solutions_per_candidate <= 1)
+		return;
+
+	const double kDedupThresholdRad = 0.1;	 // ~5.7 degrees of combined joint distance
+	const size_t n = candidates.size();
+
+	std::atomic<size_t> next_index{0};
+	unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+	num_threads = std::min(num_threads, static_cast<unsigned int>(std::max<size_t>(n, 1)));
+
+	auto worker = [&]() {
+		moveit::core::RobotState local_state(robot_model);
+		local_state.setToDefaultValues();
+		const moveit::core::JointModelGroup* local_jmg = local_state.getJointModelGroup(group_name);
+
+		auto validity_callback = [&planning_scene_monitor](
+									  moveit::core::RobotState* state, const moveit::core::JointModelGroup* group,
+									  const double* joint_positions) {
+			return IsStateCollisionFree(planning_scene_monitor, state, group, joint_positions);
+		};
+
+		while (true)
+		{
+			if (!rclcpp::ok())
+				return;
+
+			size_t i = next_index.fetch_add(1);
+			if (i >= n)
+				return;
+
+			// Mutating through a const pointer is safe here: `candidates` is a read-only *view*
+			// over storage the caller owns non-const (see header comment) -- same convention this
+			// codebase already relies on for `selected` throughout the tour-ordering functions.
+			ViewpointCandidate* c = const_cast<ViewpointCandidate*>(candidates[i]);
+			geometry_msgs::msg::Pose tcp_pose = ConvertViewpointToTcpPose(
+				c->camera_pos, c->view_dir, object_translation_world, object_rotation_world, t_tcp_camera);
+
+			for (int attempt = 0;
+				 attempt < max_solutions_per_candidate * 3 &&
+				 static_cast<int>(c->joint_solutions.size()) < max_solutions_per_candidate;
+				 ++attempt)
+			{
+				local_state.setToRandomPositions(local_jmg);
+				if (!local_state.setFromIK(local_jmg, tcp_pose, "tool0", ik_timeout, validity_callback))
+					continue;
+
+				std::vector<double> alt_solution;
+				local_state.copyJointGroupPositions(local_jmg, alt_solution);
+
+				bool is_duplicate = false;
+				for (const auto& existing : c->joint_solutions)
+				{
+					if (AreJointSolutionsSimilar(existing, alt_solution, kDedupThresholdRad))
+					{
+						is_duplicate = true;
+						break;
+					}
+				}
+
+				if (!is_duplicate)
+					c->joint_solutions.push_back(std::move(alt_solution));
+			}
+		}
+	};
+
+	std::vector<std::thread> workers;
+	workers.reserve(num_threads);
+	for (unsigned int t = 0; t < num_threads; ++t)
+		workers.emplace_back(worker);
+	for (auto& w : workers)
+		w.join();
 }
 
 std::vector<ViewpointCandidate> FilterByReachability(std::vector<ViewpointCandidate> candidates)

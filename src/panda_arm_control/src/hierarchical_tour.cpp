@@ -5,7 +5,10 @@
 #include <limits>
 #include <unordered_map>
 
+#include <std_msgs/msg/color_rgba.hpp>
+
 #include "panda_arm_control/real_cost_planning.hpp"
+#include "panda_arm_control/viewpoint_io.hpp"
 
 namespace
 {
@@ -18,6 +21,46 @@ double ExemplarProxyDistance(const ViewpointCandidate& a, const ViewpointCandida
 	double cos_angle = a.view_dir.normalized().dot(b.view_dir.normalized());
 	cos_angle = std::clamp(cos_angle, -1.0, 1.0);
 	return cartesian + rotation_weight * std::acos(cos_angle);
+}
+
+// Standard HSV->RGB (h in degrees, s/v in [0,1]) -- used to give each cluster a distinct color.
+Eigen::Vector3d HsvToRgb(double h, double s, double v)
+{
+	double c = v * s;
+	double x = c * (1.0 - std::abs(std::fmod(h / 60.0, 2.0) - 1.0));
+	double m = v - c;
+	double r = 0.0, g = 0.0, b = 0.0;
+	if (h < 60)
+	{
+		r = c;
+		g = x;
+	}
+	else if (h < 120)
+	{
+		r = x;
+		g = c;
+	}
+	else if (h < 180)
+	{
+		g = c;
+		b = x;
+	}
+	else if (h < 240)
+	{
+		g = x;
+		b = c;
+	}
+	else if (h < 300)
+	{
+		r = x;
+		b = c;
+	}
+	else
+	{
+		r = c;
+		b = x;
+	}
+	return Eigen::Vector3d(r + m, g + m, b + m);
 }
 
 struct ExemplarClustering
@@ -230,49 +273,279 @@ size_t MatrixIndexOf(const std::vector<ViewpointCandidate>& candidates, const Vi
 	return static_cast<size_t>(ptr - candidates.data()) + 1;
 }
 
+// -1.0 means infeasible -- treat as infinitely expensive, matching real_cost_planning.cpp's own
+// (unexported) helper of the same name.
+double WeightedCost(const TravelCostMatrix& matrix, size_t a, size_t b, double joint_distance_weight)
+{
+	double cartesian = matrix.cartesian_distance[a][b];
+	if (cartesian < 0.0)
+		return std::numeric_limits<double>::max();
+	return cartesian + joint_distance_weight * matrix.joint_distance[a][b];
+}
+
+// One (original candidate, specific IK solution) node per entry -- the "Generalized" in GTSP: the
+// solver picks one node per GROUP (original candidate), not one node overall.
+struct ExpandedScratchSet
+{
+	std::vector<ViewpointCandidate> copies;
+	std::vector<const ViewpointCandidate*> original_ptrs;	// parallel to copies
+	std::vector<size_t> group_of;							// parallel to copies: index into `originals`
+	size_t num_groups = 0;
+};
+
+// Up to max_solutions_per_candidate copies per original (fewer if it has fewer stored solutions --
+// always >=1, since joint_solutions[0] == joint_solution for every reachable candidate).
+ExpandedScratchSet MakeExpandedScratchSet(
+	const std::vector<const ViewpointCandidate*>& originals, int max_solutions_per_candidate)
+{
+	ExpandedScratchSet expanded;
+	expanded.num_groups = originals.size();
+
+	size_t total = 0;
+	for (const ViewpointCandidate* original : originals)
+		total += std::max<size_t>(
+			1, std::min(original->joint_solutions.size(), static_cast<size_t>(max_solutions_per_candidate)));
+	expanded.copies.reserve(total);
+	expanded.original_ptrs.reserve(total);
+	expanded.group_of.reserve(total);
+
+	for (size_t oi = 0; oi < originals.size(); ++oi)
+	{
+		const ViewpointCandidate* original = originals[oi];
+		size_t num_solutions = std::max<size_t>(
+			1, std::min(original->joint_solutions.size(), static_cast<size_t>(max_solutions_per_candidate)));
+		for (size_t k = 0; k < num_solutions; ++k)
+		{
+			ViewpointCandidate copy = *original;
+			if (k < original->joint_solutions.size())
+				copy.joint_solution = original->joint_solutions[k];
+			expanded.copies.push_back(std::move(copy));
+			expanded.original_ptrs.push_back(original);
+			expanded.group_of.push_back(oi);
+		}
+	}
+
+	return expanded;
+}
+
+// Visits exactly one node per GROUP (unlike NearestNeighborOrderMatrix, which visits every node
+// given to it) -- at each step, picks the (group, node) pair with lowest weighted cost among all
+// nodes belonging to any unvisited group.
+std::vector<const ViewpointCandidate*> GeneralizedNearestNeighborOrderMatrix(
+	const ExpandedScratchSet& expanded, const TravelCostMatrix& matrix, double joint_distance_weight)
+{
+	std::vector<bool> group_visited(expanded.num_groups, false);
+	std::vector<const ViewpointCandidate*> ordered;
+	ordered.reserve(expanded.num_groups);
+
+	size_t current_matrix_idx = 0;	 // start reference (home)
+	for (size_t step = 0; step < expanded.num_groups; ++step)
+	{
+		double best = std::numeric_limits<double>::max();
+		size_t best_idx = expanded.copies.size();	// sentinel: none picked yet
+
+		for (size_t i = 0; i < expanded.copies.size(); ++i)
+		{
+			if (group_visited[expanded.group_of[i]])
+				continue;
+
+			size_t idx = MatrixIndexOf(expanded.copies, &expanded.copies[i]);
+			double cost = WeightedCost(matrix, current_matrix_idx, idx, joint_distance_weight);
+			if (best_idx == expanded.copies.size() || cost < best)
+			{
+				best = cost;
+				best_idx = i;
+			}
+		}
+
+		group_visited[expanded.group_of[best_idx]] = true;
+		ordered.push_back(&expanded.copies[best_idx]);
+		current_matrix_idx = MatrixIndexOf(expanded.copies, &expanded.copies[best_idx]);
+	}
+
+	return ordered;
+}
+
+// Alternates classic segment-reversal 2-opt with a "solution swap" pass (per position, try every
+// other node in that position's group, holding neighbors fixed, keep whichever lowers the two
+// adjacent edge costs) until neither improves or max_rounds is hit.
+std::vector<const ViewpointCandidate*> GeneralizedTwoOptImprove(
+	const ExpandedScratchSet& expanded, std::vector<const ViewpointCandidate*> ordered,
+	const TravelCostMatrix& matrix, double joint_distance_weight, int max_rounds = 5)
+{
+	if (ordered.size() < 2)
+		return ordered;
+
+	std::vector<std::vector<size_t>> nodes_by_group(expanded.num_groups);
+	for (size_t i = 0; i < expanded.copies.size(); ++i)
+		nodes_by_group[expanded.group_of[i]].push_back(i);
+
+	auto matrix_idx = [&](size_t pos) { return MatrixIndexOf(expanded.copies, ordered[pos]); };
+
+	for (int round = 0; round < max_rounds; ++round)
+	{
+		bool improved = false;
+
+		if (ordered.size() >= 3)
+		{
+			bool reversal_improved = true;
+			while (reversal_improved)
+			{
+				reversal_improved = false;
+				for (size_t i = 0; i + 1 < ordered.size(); ++i)
+				{
+					size_t prev_idx = (i == 0) ? 0 : matrix_idx(i - 1);
+					for (size_t j = i + 1; j < ordered.size(); ++j)
+					{
+						double old_cost = WeightedCost(matrix, prev_idx, matrix_idx(i), joint_distance_weight);
+						double new_cost = WeightedCost(matrix, prev_idx, matrix_idx(j), joint_distance_weight);
+						if (j + 1 < ordered.size())
+						{
+							old_cost +=
+								WeightedCost(matrix, matrix_idx(j), matrix_idx(j + 1), joint_distance_weight);
+							new_cost +=
+								WeightedCost(matrix, matrix_idx(i), matrix_idx(j + 1), joint_distance_weight);
+						}
+						if (new_cost < old_cost - 1e-9)
+						{
+							std::reverse(
+								ordered.begin() + static_cast<std::ptrdiff_t>(i),
+								ordered.begin() + static_cast<std::ptrdiff_t>(j) + 1);
+							reversal_improved = true;
+							improved = true;
+						}
+					}
+				}
+			}
+		}
+
+		for (size_t pos = 0; pos < ordered.size(); ++pos)
+		{
+			size_t cur_expanded_idx = static_cast<size_t>(ordered[pos] - expanded.copies.data());
+			size_t group = expanded.group_of[cur_expanded_idx];
+
+			size_t prev_matrix_idx = (pos == 0) ? 0 : matrix_idx(pos - 1);
+			bool has_next = pos + 1 < ordered.size();
+			size_t next_matrix_idx = has_next ? matrix_idx(pos + 1) : 0;
+
+			double best_cost = std::numeric_limits<double>::max();
+			size_t best_expanded_idx = cur_expanded_idx;
+
+			for (size_t candidate_idx : nodes_by_group[group])
+			{
+				size_t candidate_matrix_idx = MatrixIndexOf(expanded.copies, &expanded.copies[candidate_idx]);
+				double cost = WeightedCost(matrix, prev_matrix_idx, candidate_matrix_idx, joint_distance_weight);
+				if (has_next)
+					cost += WeightedCost(matrix, candidate_matrix_idx, next_matrix_idx, joint_distance_weight);
+				if (cost < best_cost)
+				{
+					best_cost = cost;
+					best_expanded_idx = candidate_idx;
+				}
+			}
+
+			if (best_expanded_idx != cur_expanded_idx)
+			{
+				ordered[pos] = &expanded.copies[best_expanded_idx];
+				improved = true;
+			}
+		}
+
+		if (!improved)
+			break;
+	}
+
+	return ordered;
+}
+
 // Orders `originals` via one real cost matrix + NN + 2-opt, appends it to `final_tour`, and
 // accumulates real per-leg costs. Returns the pair count, for logging savings vs. a flat matrix.
+// max_solutions_per_candidate > 1 switches to the generalized (multi-solution) path: each candidate
+// contributes multiple IK-solution nodes and the solver picks whichever minimizes reconfiguration,
+// writing the chosen solution back onto the original candidate for every downstream consumer to see.
 int OrderAndAppend(
 	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const std::vector<const ViewpointCandidate*>& originals, const std::vector<double>& start_reference_joints,
 	const std::string& group_name, double planning_time, double joint_distance_weight,
-	std::vector<const ViewpointCandidate*>& final_tour, double& total_cartesian, double& total_joint)
+	int max_solutions_per_candidate, std::vector<const ViewpointCandidate*>& final_tour, double& total_cartesian,
+	double& total_joint)
 {
-	ScratchSet scratch = MakeScratchSet(originals);
+	if (max_solutions_per_candidate <= 1)
+	{
+		ScratchSet scratch = MakeScratchSet(originals);
+
+		TravelCostMatrix matrix = ComputeEndEffectorTravelDistanceMatrix(
+			node, robot_model, planning_scene_monitor, scratch.copies, start_reference_joints, group_name,
+			planning_time);
+
+		std::vector<const ViewpointCandidate*> scratch_ptrs;
+		scratch_ptrs.reserve(scratch.copies.size());
+		for (const ViewpointCandidate& c : scratch.copies)
+			scratch_ptrs.push_back(&c);
+
+		std::vector<const ViewpointCandidate*> ordered =
+			NearestNeighborOrderMatrix(scratch.copies, std::move(scratch_ptrs), matrix, joint_distance_weight);
+		ordered = TwoOptImproveMatrix(scratch.copies, std::move(ordered), matrix, joint_distance_weight);
+
+		size_t prev_idx = 0;  // start reference
+		for (const ViewpointCandidate* ptr : ordered)
+		{
+			size_t cur_idx = MatrixIndexOf(scratch.copies, ptr);
+			double cartesian = matrix.cartesian_distance[prev_idx][cur_idx];
+			double joint = matrix.joint_distance[prev_idx][cur_idx];
+			if (cartesian >= 0.0)  // -1.0 sentinel = infeasible; excluded from the running total
+			{
+				total_cartesian += cartesian;
+				total_joint += joint;
+			}
+			prev_idx = cur_idx;
+		}
+
+		std::vector<const ViewpointCandidate*> mapped = MapScratchOrderToOriginal(scratch, ordered);
+		final_tour.insert(final_tour.end(), mapped.begin(), mapped.end());
+
+		const int n = static_cast<int>(originals.size());
+		return n * (n + 1) / 2;	 // pairs in an (n+1)-node matrix (home + n candidates)
+	}
+
+	ExpandedScratchSet expanded = MakeExpandedScratchSet(originals, max_solutions_per_candidate);
 
 	TravelCostMatrix matrix = ComputeEndEffectorTravelDistanceMatrix(
-		node, robot_model, planning_scene_monitor, scratch.copies, start_reference_joints, group_name,
+		node, robot_model, planning_scene_monitor, expanded.copies, start_reference_joints, group_name,
 		planning_time);
 
-	std::vector<const ViewpointCandidate*> scratch_ptrs;
-	scratch_ptrs.reserve(scratch.copies.size());
-	for (const ViewpointCandidate& c : scratch.copies)
-		scratch_ptrs.push_back(&c);
-
 	std::vector<const ViewpointCandidate*> ordered =
-		NearestNeighborOrderMatrix(scratch.copies, std::move(scratch_ptrs), matrix, joint_distance_weight);
-	ordered = TwoOptImproveMatrix(scratch.copies, std::move(ordered), matrix, joint_distance_weight);
+		GeneralizedNearestNeighborOrderMatrix(expanded, matrix, joint_distance_weight);
+	ordered = GeneralizedTwoOptImprove(expanded, std::move(ordered), matrix, joint_distance_weight);
 
-	size_t prev_idx = 0;  // start reference
+	size_t prev_idx = 0;
+	std::vector<const ViewpointCandidate*> mapped;
+	mapped.reserve(ordered.size());
 	for (const ViewpointCandidate* ptr : ordered)
 	{
-		size_t cur_idx = MatrixIndexOf(scratch.copies, ptr);
+		size_t cur_idx = MatrixIndexOf(expanded.copies, ptr);
 		double cartesian = matrix.cartesian_distance[prev_idx][cur_idx];
 		double joint = matrix.joint_distance[prev_idx][cur_idx];
-		if (cartesian >= 0.0)  // -1.0 sentinel = infeasible; excluded from the running total
+		if (cartesian >= 0.0)
 		{
 			total_cartesian += cartesian;
 			total_joint += joint;
 		}
 		prev_idx = cur_idx;
+
+		size_t expanded_idx = static_cast<size_t>(ptr - expanded.copies.data());
+		const ViewpointCandidate* original = expanded.original_ptrs[expanded_idx];
+		// Write the chosen solution back onto the original -- PlanFinalTourTrajectories and every
+		// other downstream consumer reads joint_solution straight off the candidate.
+		const_cast<ViewpointCandidate*>(original)->joint_solution = ptr->joint_solution;
+		mapped.push_back(original);
 	}
 
-	std::vector<const ViewpointCandidate*> mapped = MapScratchOrderToOriginal(scratch, ordered);
 	final_tour.insert(final_tour.end(), mapped.begin(), mapped.end());
 
-	const int n = static_cast<int>(originals.size());
-	return n * (n + 1) / 2;	 // pairs in an (n+1)-node matrix (home + n candidates)
+	const int n = static_cast<int>(expanded.copies.size());
+	return n * (n + 1) / 2;
 }
 
 } // namespace
@@ -281,7 +554,7 @@ std::vector<const ViewpointCandidate*> SolveHierarchicalTour(
 	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	std::vector<const ViewpointCandidate*> selected, const std::vector<double>& start_reference_joints,
-	const std::string& group_name, const HierarchicalTourParams& params)
+	const std::string& group_name, const HierarchicalTourParams& params, HierarchicalTourDebug* debug_out)
 {
 	std::vector<const ViewpointCandidate*> final_tour;
 	if (selected.empty())
@@ -299,7 +572,8 @@ std::vector<const ViewpointCandidate*> SolveHierarchicalTour(
 			selected.size(), params.min_size_for_hierarchy);
 		real_pairs_used += OrderAndAppend(
 			node, robot_model, planning_scene_monitor, selected, start_reference_joints, group_name,
-			params.cluster_planning_time, params.joint_distance_weight, final_tour, total_cartesian, total_joint);
+			params.cluster_planning_time, params.joint_distance_weight, params.max_solutions_per_candidate,
+			final_tour, total_cartesian, total_joint);
 	}
 	else
 	{
@@ -322,8 +596,8 @@ std::vector<const ViewpointCandidate*> SolveHierarchicalTour(
 		double exemplar_joint = 0.0;
 		real_pairs_used += OrderAndAppend(
 			node, robot_model, planning_scene_monitor, exemplar_originals, start_reference_joints, group_name,
-			params.guide_path_planning_time, params.joint_distance_weight, ordered_exemplars, exemplar_cartesian,
-			exemplar_joint);
+			params.guide_path_planning_time, params.joint_distance_weight, params.max_solutions_per_candidate,
+			ordered_exemplars, exemplar_cartesian, exemplar_joint);
 
 		// Group non-exemplar members by their assigned exemplar's original pointer identity. Every
 		// exemplar gets an entry (possibly empty) so the lookup below never misses.
@@ -348,10 +622,18 @@ std::vector<const ViewpointCandidate*> SolveHierarchicalTour(
 
 			real_pairs_used += OrderAndAppend(
 				node, robot_model, planning_scene_monitor, cluster_originals, *current_start, group_name,
-				params.cluster_planning_time, params.joint_distance_weight, final_tour, total_cartesian,
-				total_joint);
+				params.cluster_planning_time, params.joint_distance_weight, params.max_solutions_per_candidate,
+				final_tour, total_cartesian, total_joint);
 
 			current_start = &final_tour.back()->joint_solution;
+		}
+
+		if (debug_out != nullptr)
+		{
+			debug_out->exemplars_in_order = ordered_exemplars;
+			debug_out->cluster_members.reserve(ordered_exemplars.size());
+			for (const ViewpointCandidate* exemplar : ordered_exemplars)
+				debug_out->cluster_members.push_back(cluster_members.at(exemplar));
 		}
 	}
 
@@ -365,4 +647,80 @@ std::vector<const ViewpointCandidate*> SolveHierarchicalTour(
 		real_pairs_used, flat_pairs, total_cartesian, total_joint, weighted_total);
 
 	return final_tour;
+}
+
+visualization_msgs::msg::MarkerArray BuildExemplarClusterMarkerArray(
+	const rclcpp::Time& stamp, const Eigen::Vector3d& object_translation_world,
+	const Eigen::Matrix3d& object_rotation_world, const HierarchicalTourDebug& debug_info)
+{
+	visualization_msgs::msg::MarkerArray markers;
+	const size_t num_clusters = debug_info.exemplars_in_order.size();
+	if (num_clusters == 0)
+		return markers;
+
+	int id = 0;
+
+	visualization_msgs::msg::Marker spokes;
+	spokes.header.frame_id = "world";
+	spokes.header.stamp = stamp;
+	spokes.ns = "exemplar_cluster_spokes";
+	spokes.id = id++;
+	spokes.type = visualization_msgs::msg::Marker::LINE_LIST;
+	spokes.action = visualization_msgs::msg::Marker::ADD;
+	spokes.pose.orientation.w = 1.0;
+	spokes.scale.x = 0.001;
+	spokes.color.a = 1.0f;	// RViz gates per-vertex color visibility on this top-level alpha
+
+	for (size_t c = 0; c < num_clusters; ++c)
+	{
+		double hue = 360.0 * static_cast<double>(c) / static_cast<double>(num_clusters);
+		Eigen::Vector3d rgb = HsvToRgb(hue, 0.85, 0.95);
+		std_msgs::msg::ColorRGBA color;
+		color.r = static_cast<float>(rgb.x());
+		color.g = static_cast<float>(rgb.y());
+		color.b = static_cast<float>(rgb.z());
+		color.a = 1.0f;
+
+		const ViewpointCandidate* exemplar = debug_info.exemplars_in_order[c];
+		Eigen::Vector3d exemplar_world = object_rotation_world * exemplar->camera_pos + object_translation_world;
+
+		visualization_msgs::msg::Marker exemplar_marker;
+		exemplar_marker.header.frame_id = "world";
+		exemplar_marker.header.stamp = stamp;
+		exemplar_marker.ns = "exemplar";
+		exemplar_marker.id = id++;
+		exemplar_marker.type = visualization_msgs::msg::Marker::CUBE;
+		exemplar_marker.action = visualization_msgs::msg::Marker::ADD;
+		exemplar_marker.pose.position = ToPoint(exemplar_world);
+		exemplar_marker.pose.orientation.w = 1.0;
+		exemplar_marker.scale.x = exemplar_marker.scale.y = exemplar_marker.scale.z = 0.012;
+		exemplar_marker.color = color;
+		markers.markers.push_back(exemplar_marker);
+
+		for (const ViewpointCandidate* member : debug_info.cluster_members[c])
+		{
+			Eigen::Vector3d member_world = object_rotation_world * member->camera_pos + object_translation_world;
+
+			visualization_msgs::msg::Marker member_marker;
+			member_marker.header.frame_id = "world";
+			member_marker.header.stamp = stamp;
+			member_marker.ns = "cluster_member";
+			member_marker.id = id++;
+			member_marker.type = visualization_msgs::msg::Marker::SPHERE;
+			member_marker.action = visualization_msgs::msg::Marker::ADD;
+			member_marker.pose.position = ToPoint(member_world);
+			member_marker.pose.orientation.w = 1.0;
+			member_marker.scale.x = member_marker.scale.y = member_marker.scale.z = 0.005;
+			member_marker.color = color;
+			markers.markers.push_back(member_marker);
+
+			spokes.points.push_back(ToPoint(exemplar_world));
+			spokes.points.push_back(ToPoint(member_world));
+			spokes.colors.push_back(color);
+			spokes.colors.push_back(color);
+		}
+	}
+
+	markers.markers.push_back(spokes);
+	return markers;
 }
