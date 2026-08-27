@@ -30,6 +30,9 @@ struct HierarchicalTourParams
 	int ap_convergence_iterations = 15;  // stop early once the exemplar set is stable this long
 
 	double joint_distance_weight = 1.0;
+	// Extra penalty on the single largest per-joint swing on a leg (not just the combined L2 norm
+	// joint_distance_weight already covers) -- targets "one joint does a big twist" specifically.
+	double max_joint_deviation_weight = 1.0;
 	double guide_path_planning_time = 2.0;  // per-pair planning_time for the exemplar-only matrix
 	double cluster_planning_time = 2.0;	 // per-pair planning_time for each local cluster matrix
 

@@ -80,6 +80,9 @@ struct Params
 	// Redundant-IK tour ordering: each candidate can offer up to this many joint_solutions, letting
 	// the solver pick whichever minimizes reconfiguration. 1 = today's single-solution behavior.
 	int hgtsp_max_solutions_per_candidate = 3;
+	// Extra penalty on the single largest per-joint swing on a leg, beyond joint_distance_weight's
+	// combined L2 norm -- targets "one joint does a big twist" specifically.
+	double hgtsp_max_joint_deviation_weight = 1.0;
 	// When true, re-plans the tour's legs and drives the robot directly via move_group, instead
 	// of publishing waypoints. Don't also run waypoint_follower -- uncoordinated with this.
 	bool execute_on_robot = true;
@@ -232,6 +235,8 @@ private:
 		this->declareIfNeeded("hgtsp_cluster_planning_time", this->params.hgtsp_cluster_planning_time);
 		this->declareIfNeeded(
 			"hgtsp_max_solutions_per_candidate", this->params.hgtsp_max_solutions_per_candidate);
+		this->declareIfNeeded(
+			"hgtsp_max_joint_deviation_weight", this->params.hgtsp_max_joint_deviation_weight);
 		this->declareIfNeeded("execute_on_robot", this->params.execute_on_robot);
 		this->declareIfNeeded("execution_planning_time", this->params.execution_planning_time);
 		this->declareIfNeeded("execution_planning_attempts", this->params.execution_planning_attempts);
@@ -274,6 +279,7 @@ private:
 		this->get_parameter("hgtsp_guide_path_planning_time", this->params.hgtsp_guide_path_planning_time);
 		this->get_parameter("hgtsp_cluster_planning_time", this->params.hgtsp_cluster_planning_time);
 		this->get_parameter("hgtsp_max_solutions_per_candidate", this->params.hgtsp_max_solutions_per_candidate);
+		this->get_parameter("hgtsp_max_joint_deviation_weight", this->params.hgtsp_max_joint_deviation_weight);
 		this->get_parameter("execute_on_robot", this->params.execute_on_robot);
 		this->get_parameter("execution_planning_time", this->params.execution_planning_time);
 		this->get_parameter("execution_planning_attempts", this->params.execution_planning_attempts);
@@ -381,6 +387,7 @@ private:
 		hgtsp_params.ap_max_iterations = this->params.hgtsp_ap_max_iterations;
 		hgtsp_params.ap_convergence_iterations = this->params.hgtsp_ap_convergence_iterations;
 		hgtsp_params.joint_distance_weight = this->params.joint_distance_weight;
+		hgtsp_params.max_joint_deviation_weight = this->params.hgtsp_max_joint_deviation_weight;
 		hgtsp_params.guide_path_planning_time = this->params.hgtsp_guide_path_planning_time;
 		hgtsp_params.cluster_planning_time = this->params.hgtsp_cluster_planning_time;
 		hgtsp_params.max_solutions_per_candidate = this->params.hgtsp_max_solutions_per_candidate;

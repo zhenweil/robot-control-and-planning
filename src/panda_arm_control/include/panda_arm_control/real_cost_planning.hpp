@@ -63,6 +63,10 @@ struct TravelCostMatrix
 {
 	std::vector<std::vector<double>> cartesian_distance;  // meters, summed tool0 position deltas
 	std::vector<std::vector<double>> joint_distance;		// radians, summed joint-space deltas
+	// Largest single-joint |delta| between the pair's endpoints, radians -- unlike joint_distance
+	// (a combined L2 norm), this specifically flags one joint doing an outsized swing even when
+	// the combined movement looks moderate. Always a real value (endpoint-only, no planning needed).
+	std::vector<std::vector<double>> max_joint_deviation;
 };
 
 // Real OMPL-planned travel cost for every candidate pair, both Cartesian and joint-space, computed
@@ -78,12 +82,15 @@ TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
 	double planning_time);
 
 // Orders selected viewpoints via nearest-neighbor + 2-opt using real travel_cost_matrix costs.
-// candidates must be the same vector the matrix was built from.
+// candidates must be the same vector the matrix was built from. max_joint_deviation_weight
+// (default 0, no effect unless set) additionally penalizes any single joint swinging a lot on one
+// leg, which joint_distance_weight (a combined L2 norm) doesn't specifically flag.
 std::vector<const ViewpointCandidate*> NearestNeighborOrderMatrix(
 	const std::vector<ViewpointCandidate>& candidates,
 	std::vector<const ViewpointCandidate*> selected,
 	const TravelCostMatrix& travel_cost_matrix,
-	double joint_distance_weight);
+	double joint_distance_weight,
+	double max_joint_deviation_weight = 0.0);
 
 // 2-opt local search over an ordered tour, reversing segments that shorten total weighted
 // travel_cost_matrix cost, until no reversal improves it further.
@@ -91,15 +98,17 @@ std::vector<const ViewpointCandidate*> TwoOptImproveMatrix(
 	const std::vector<ViewpointCandidate>& candidates,
 	std::vector<const ViewpointCandidate*> ordered,
 	const TravelCostMatrix& travel_cost_matrix,
-	double joint_distance_weight);
+	double joint_distance_weight,
+	double max_joint_deviation_weight = 0.0);
 
-// Prints per-leg cartesian/joint cost breakdown and totals -- lets joint_distance_weight be tuned
-// against real magnitudes, regardless of which algorithm produced the order.
+// Prints per-leg cartesian/joint/max-joint-deviation cost breakdown and totals -- lets the weights
+// be tuned against real magnitudes, regardless of which algorithm produced the order.
 void PrintTourCostBreakdown(
 	const std::vector<ViewpointCandidate>& candidates,
 	const std::vector<const ViewpointCandidate*>& selected,
 	const TravelCostMatrix& travel_cost_matrix,
-	double joint_distance_weight);
+	double joint_distance_weight,
+	double max_joint_deviation_weight = 0.0);
 
 // One planned tour leg. Re-plans fresh (travel_cost_matrix's own trajectories were discarded) so
 // execution runs an actually-planned trajectory. ok is false if re-planning failed.

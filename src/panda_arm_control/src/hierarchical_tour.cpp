@@ -275,12 +275,15 @@ size_t MatrixIndexOf(const std::vector<ViewpointCandidate>& candidates, const Vi
 
 // -1.0 means infeasible -- treat as infinitely expensive, matching real_cost_planning.cpp's own
 // (unexported) helper of the same name.
-double WeightedCost(const TravelCostMatrix& matrix, size_t a, size_t b, double joint_distance_weight)
+double WeightedCost(
+	const TravelCostMatrix& matrix, size_t a, size_t b, double joint_distance_weight,
+	double max_joint_deviation_weight = 0.0)
 {
 	double cartesian = matrix.cartesian_distance[a][b];
 	if (cartesian < 0.0)
 		return std::numeric_limits<double>::max();
-	return cartesian + joint_distance_weight * matrix.joint_distance[a][b];
+	return cartesian + joint_distance_weight * matrix.joint_distance[a][b] +
+		max_joint_deviation_weight * matrix.max_joint_deviation[a][b];
 }
 
 // One (original candidate, specific IK solution) node per entry -- the "Generalized" in GTSP: the
@@ -332,7 +335,8 @@ ExpandedScratchSet MakeExpandedScratchSet(
 // given to it) -- at each step, picks the (group, node) pair with lowest weighted cost among all
 // nodes belonging to any unvisited group.
 std::vector<const ViewpointCandidate*> GeneralizedNearestNeighborOrderMatrix(
-	const ExpandedScratchSet& expanded, const TravelCostMatrix& matrix, double joint_distance_weight)
+	const ExpandedScratchSet& expanded, const TravelCostMatrix& matrix, double joint_distance_weight,
+	double max_joint_deviation_weight)
 {
 	std::vector<bool> group_visited(expanded.num_groups, false);
 	std::vector<const ViewpointCandidate*> ordered;
@@ -350,7 +354,7 @@ std::vector<const ViewpointCandidate*> GeneralizedNearestNeighborOrderMatrix(
 				continue;
 
 			size_t idx = MatrixIndexOf(expanded.copies, &expanded.copies[i]);
-			double cost = WeightedCost(matrix, current_matrix_idx, idx, joint_distance_weight);
+			double cost = WeightedCost(matrix, current_matrix_idx, idx, joint_distance_weight, max_joint_deviation_weight);
 			if (best_idx == expanded.copies.size() || cost < best)
 			{
 				best = cost;
@@ -371,7 +375,8 @@ std::vector<const ViewpointCandidate*> GeneralizedNearestNeighborOrderMatrix(
 // adjacent edge costs) until neither improves or max_rounds is hit.
 std::vector<const ViewpointCandidate*> GeneralizedTwoOptImprove(
 	const ExpandedScratchSet& expanded, std::vector<const ViewpointCandidate*> ordered,
-	const TravelCostMatrix& matrix, double joint_distance_weight, int max_rounds = 5)
+	const TravelCostMatrix& matrix, double joint_distance_weight, double max_joint_deviation_weight,
+	int max_rounds = 5)
 {
 	if (ordered.size() < 2)
 		return ordered;
@@ -397,14 +402,18 @@ std::vector<const ViewpointCandidate*> GeneralizedTwoOptImprove(
 					size_t prev_idx = (i == 0) ? 0 : matrix_idx(i - 1);
 					for (size_t j = i + 1; j < ordered.size(); ++j)
 					{
-						double old_cost = WeightedCost(matrix, prev_idx, matrix_idx(i), joint_distance_weight);
-						double new_cost = WeightedCost(matrix, prev_idx, matrix_idx(j), joint_distance_weight);
+						double old_cost =
+							WeightedCost(matrix, prev_idx, matrix_idx(i), joint_distance_weight, max_joint_deviation_weight);
+						double new_cost =
+							WeightedCost(matrix, prev_idx, matrix_idx(j), joint_distance_weight, max_joint_deviation_weight);
 						if (j + 1 < ordered.size())
 						{
-							old_cost +=
-								WeightedCost(matrix, matrix_idx(j), matrix_idx(j + 1), joint_distance_weight);
-							new_cost +=
-								WeightedCost(matrix, matrix_idx(i), matrix_idx(j + 1), joint_distance_weight);
+							old_cost += WeightedCost(
+								matrix, matrix_idx(j), matrix_idx(j + 1), joint_distance_weight,
+								max_joint_deviation_weight);
+							new_cost += WeightedCost(
+								matrix, matrix_idx(i), matrix_idx(j + 1), joint_distance_weight,
+								max_joint_deviation_weight);
 						}
 						if (new_cost < old_cost - 1e-9)
 						{
@@ -434,9 +443,12 @@ std::vector<const ViewpointCandidate*> GeneralizedTwoOptImprove(
 			for (size_t candidate_idx : nodes_by_group[group])
 			{
 				size_t candidate_matrix_idx = MatrixIndexOf(expanded.copies, &expanded.copies[candidate_idx]);
-				double cost = WeightedCost(matrix, prev_matrix_idx, candidate_matrix_idx, joint_distance_weight);
+				double cost = WeightedCost(
+					matrix, prev_matrix_idx, candidate_matrix_idx, joint_distance_weight, max_joint_deviation_weight);
 				if (has_next)
-					cost += WeightedCost(matrix, candidate_matrix_idx, next_matrix_idx, joint_distance_weight);
+					cost += WeightedCost(
+						matrix, candidate_matrix_idx, next_matrix_idx, joint_distance_weight,
+						max_joint_deviation_weight);
 				if (cost < best_cost)
 				{
 					best_cost = cost;
@@ -468,8 +480,9 @@ int OrderAndAppend(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const std::vector<const ViewpointCandidate*>& originals, const std::vector<double>& start_reference_joints,
 	const std::string& group_name, double planning_time, double joint_distance_weight,
-	int max_solutions_per_candidate, std::vector<const ViewpointCandidate*>& final_tour, double& total_cartesian,
-	double& total_joint)
+	double max_joint_deviation_weight, int max_solutions_per_candidate,
+	std::vector<const ViewpointCandidate*>& final_tour, double& total_cartesian, double& total_joint,
+	double& worst_max_joint_deviation)
 {
 	if (max_solutions_per_candidate <= 1)
 	{
@@ -484,9 +497,10 @@ int OrderAndAppend(
 		for (const ViewpointCandidate& c : scratch.copies)
 			scratch_ptrs.push_back(&c);
 
-		std::vector<const ViewpointCandidate*> ordered =
-			NearestNeighborOrderMatrix(scratch.copies, std::move(scratch_ptrs), matrix, joint_distance_weight);
-		ordered = TwoOptImproveMatrix(scratch.copies, std::move(ordered), matrix, joint_distance_weight);
+		std::vector<const ViewpointCandidate*> ordered = NearestNeighborOrderMatrix(
+			scratch.copies, std::move(scratch_ptrs), matrix, joint_distance_weight, max_joint_deviation_weight);
+		ordered = TwoOptImproveMatrix(
+			scratch.copies, std::move(ordered), matrix, joint_distance_weight, max_joint_deviation_weight);
 
 		size_t prev_idx = 0;  // start reference
 		for (const ViewpointCandidate* ptr : ordered)
@@ -498,6 +512,8 @@ int OrderAndAppend(
 			{
 				total_cartesian += cartesian;
 				total_joint += joint;
+				worst_max_joint_deviation =
+					std::max(worst_max_joint_deviation, matrix.max_joint_deviation[prev_idx][cur_idx]);
 			}
 			prev_idx = cur_idx;
 		}
@@ -515,9 +531,10 @@ int OrderAndAppend(
 		node, robot_model, planning_scene_monitor, expanded.copies, start_reference_joints, group_name,
 		planning_time);
 
-	std::vector<const ViewpointCandidate*> ordered =
-		GeneralizedNearestNeighborOrderMatrix(expanded, matrix, joint_distance_weight);
-	ordered = GeneralizedTwoOptImprove(expanded, std::move(ordered), matrix, joint_distance_weight);
+	std::vector<const ViewpointCandidate*> ordered = GeneralizedNearestNeighborOrderMatrix(
+		expanded, matrix, joint_distance_weight, max_joint_deviation_weight);
+	ordered = GeneralizedTwoOptImprove(
+		expanded, std::move(ordered), matrix, joint_distance_weight, max_joint_deviation_weight);
 
 	size_t prev_idx = 0;
 	std::vector<const ViewpointCandidate*> mapped;
@@ -531,6 +548,8 @@ int OrderAndAppend(
 		{
 			total_cartesian += cartesian;
 			total_joint += joint;
+			worst_max_joint_deviation =
+				std::max(worst_max_joint_deviation, matrix.max_joint_deviation[prev_idx][cur_idx]);
 		}
 		prev_idx = cur_idx;
 
@@ -562,6 +581,7 @@ std::vector<const ViewpointCandidate*> SolveHierarchicalTour(
 
 	double total_cartesian = 0.0;
 	double total_joint = 0.0;
+	double worst_max_joint_deviation = 0.0;
 	int real_pairs_used = 0;
 
 	if (static_cast<int>(selected.size()) <= params.min_size_for_hierarchy)
@@ -572,8 +592,9 @@ std::vector<const ViewpointCandidate*> SolveHierarchicalTour(
 			selected.size(), params.min_size_for_hierarchy);
 		real_pairs_used += OrderAndAppend(
 			node, robot_model, planning_scene_monitor, selected, start_reference_joints, group_name,
-			params.cluster_planning_time, params.joint_distance_weight, params.max_solutions_per_candidate,
-			final_tour, total_cartesian, total_joint);
+			params.cluster_planning_time, params.joint_distance_weight, params.max_joint_deviation_weight,
+			params.max_solutions_per_candidate, final_tour, total_cartesian, total_joint,
+			worst_max_joint_deviation);
 	}
 	else
 	{
@@ -594,10 +615,12 @@ std::vector<const ViewpointCandidate*> SolveHierarchicalTour(
 		std::vector<const ViewpointCandidate*> ordered_exemplars;
 		double exemplar_cartesian = 0.0;
 		double exemplar_joint = 0.0;
+		double exemplar_worst_max_joint_deviation = 0.0;
 		real_pairs_used += OrderAndAppend(
 			node, robot_model, planning_scene_monitor, exemplar_originals, start_reference_joints, group_name,
-			params.guide_path_planning_time, params.joint_distance_weight, params.max_solutions_per_candidate,
-			ordered_exemplars, exemplar_cartesian, exemplar_joint);
+			params.guide_path_planning_time, params.joint_distance_weight, params.max_joint_deviation_weight,
+			params.max_solutions_per_candidate, ordered_exemplars, exemplar_cartesian, exemplar_joint,
+			exemplar_worst_max_joint_deviation);
 
 		// Group non-exemplar members by their assigned exemplar's original pointer identity. Every
 		// exemplar gets an entry (possibly empty) so the lookup below never misses.
@@ -622,8 +645,9 @@ std::vector<const ViewpointCandidate*> SolveHierarchicalTour(
 
 			real_pairs_used += OrderAndAppend(
 				node, robot_model, planning_scene_monitor, cluster_originals, *current_start, group_name,
-				params.cluster_planning_time, params.joint_distance_weight, params.max_solutions_per_candidate,
-				final_tour, total_cartesian, total_joint);
+				params.cluster_planning_time, params.joint_distance_weight, params.max_joint_deviation_weight,
+				params.max_solutions_per_candidate, final_tour, total_cartesian, total_joint,
+				worst_max_joint_deviation);
 
 			current_start = &final_tour.back()->joint_solution;
 		}
@@ -643,8 +667,8 @@ std::vector<const ViewpointCandidate*> SolveHierarchicalTour(
 	RCLCPP_INFO(
 		node->get_logger(),
 		"SolveHierarchicalTour: used %d real planning pairs (flat matrix over all selected would need "
-		"%d) -- cartesian=%.4f m, joint=%.4f rad, weighted_total=%.4f",
-		real_pairs_used, flat_pairs, total_cartesian, total_joint, weighted_total);
+		"%d) -- cartesian=%.4f m, joint=%.4f rad, worst_max_joint_deviation=%.4f rad, weighted_total=%.4f",
+		real_pairs_used, flat_pairs, total_cartesian, total_joint, worst_max_joint_deviation, weighted_total);
 
 	return final_tour;
 }

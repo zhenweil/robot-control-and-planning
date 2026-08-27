@@ -332,6 +332,46 @@ double MeasureTrajectoryJointDistance(const robot_trajectory::RobotTrajectoryPtr
 	return dist;
 }
 
+// Straight-line joint-space interpolation between start/goal, checked for collision at each step
+// (~0.01 rad max per-joint step, matching typical MoveIt validity-checking resolution). If the
+// whole interpolated path is collision-free, it's a real trajectory -- and since it's a single
+// straight segment, it's necessarily the shortest possible one, cheaper and more consistent than a
+// randomized RRTConnect solve. Returns nullptr if any step is invalid, so the caller can fall back
+// to real motion planning only when a straight line genuinely isn't feasible.
+robot_trajectory::RobotTrajectoryPtr TryStraightLineInterpolatedPath(
+	const moveit::core::RobotModelConstPtr& robot_model, moveit::core::RobotState& scratch_state,
+	const moveit::core::JointModelGroup* jmg, const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::vector<double>& start_joints, const std::vector<double>& goal_joints)
+{
+	double max_diff = 0.0;
+	for (size_t k = 0; k < start_joints.size(); ++k)
+		max_diff = std::max(max_diff, std::abs(goal_joints[k] - start_joints[k]));
+	int num_steps = std::max(1, static_cast<int>(max_diff / 0.01));
+
+	auto trajectory = std::make_shared<robot_trajectory::RobotTrajectory>(robot_model, jmg);
+
+	for (int step = 0; step <= num_steps; ++step)
+	{
+		double t = static_cast<double>(step) / static_cast<double>(num_steps);
+		std::vector<double> interp(start_joints.size());
+		for (size_t k = 0; k < start_joints.size(); ++k)
+			interp[k] = start_joints[k] + t * (goal_joints[k] - start_joints[k]);
+
+		scratch_state.setJointGroupPositions(jmg, interp);
+		scratch_state.update();
+
+		{
+			planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
+			if (!locked_scene->isStateValid(scratch_state, jmg->getName()))
+				return nullptr;
+		}
+
+		trajectory->addSuffixWayPoint(scratch_state, 0.0);
+	}
+
+	return trajectory;
+}
+
 // Building/using a PlanningPipeline logs adapter chatter that floods the terminal when many
 // pipelines are built (esp. the hierarchical tour node). Parent prefixes cover all child loggers.
 void QuietPlanningLoggers(const rclcpp::Node::SharedPtr& node)
@@ -367,6 +407,7 @@ TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
 	TravelCostMatrix matrix;
 	matrix.cartesian_distance.assign(n + 1, std::vector<double>(n + 1, -1.0));
 	matrix.joint_distance.assign(n + 1, std::vector<double>(n + 1, -1.0));
+	matrix.max_joint_deviation.assign(n + 1, std::vector<double>(n + 1, 0.0));
 
 	std::vector<const std::vector<double>*> joints(n + 1);
 	joints[0] = &start_reference_joints;
@@ -422,6 +463,13 @@ TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
 			size_t i = pair_list[idx].first;
 			size_t j = pair_list[idx].second;
 
+			// Endpoint-only, so it's the same regardless of straight-line vs. RRTConnect below.
+			double max_joint_dev = 0.0;
+			for (size_t k = 0; k < joints[i]->size(); ++k)
+				max_joint_dev = std::max(max_joint_dev, std::abs((*joints[j])[k] - (*joints[i])[k]));
+			matrix.max_joint_deviation[i][j] = max_joint_dev;
+			matrix.max_joint_deviation[j][i] = max_joint_dev;
+
 			moveit::core::RobotState start_state(robot_model);
 			start_state.setToDefaultValues();
 			const moveit::core::JointModelGroup* jmg = start_state.getJointModelGroup(group_name);
@@ -433,19 +481,37 @@ TravelCostMatrix ComputeEndEffectorTravelDistanceMatrix(
 			goal_state.setJointGroupPositions(jmg, *joints[j]);
 			goal_state.update();
 
-			planning_interface::MotionPlanRequest req;
-			req.group_name = group_name;
-			req.allowed_planning_time = planning_time;
-			req.num_planning_attempts = 1;
-			moveit::core::robotStateToRobotStateMsg(start_state, req.start_state);
-			req.goal_constraints.push_back(kinematic_constraints::constructGoalConstraints(goal_state, jmg));
+			double cartesian_distance = -1.0;
+			double joint_distance = -1.0;
 
-			planning_interface::MotionPlanResponse res;
-			bool ok = pipeline.generatePlan(scene, req, res);
+			// A collision-free straight line is necessarily the shortest possible path -- cheaper
+			// and less noisy than a randomized RRTConnect solve, so try it before falling back.
+			moveit::core::RobotState interp_scratch(robot_model);
+			interp_scratch.setToDefaultValues();
+			robot_trajectory::RobotTrajectoryPtr straight_line = TryStraightLineInterpolatedPath(
+				robot_model, interp_scratch, jmg, planning_scene_monitor, *joints[i], *joints[j]);
 
-			double cartesian_distance =
-				(ok && res.trajectory_) ? MeasureTrajectoryEndEffectorDistance(res.trajectory_) : -1.0;
-			double joint_distance = (ok && res.trajectory_) ? MeasureTrajectoryJointDistance(res.trajectory_) : -1.0;
+			if (straight_line)
+			{
+				cartesian_distance = MeasureTrajectoryEndEffectorDistance(straight_line);
+				joint_distance = MeasureTrajectoryJointDistance(straight_line);
+			}
+			else
+			{
+				planning_interface::MotionPlanRequest req;
+				req.group_name = group_name;
+				req.allowed_planning_time = planning_time;
+				req.num_planning_attempts = 1;
+				moveit::core::robotStateToRobotStateMsg(start_state, req.start_state);
+				req.goal_constraints.push_back(kinematic_constraints::constructGoalConstraints(goal_state, jmg));
+
+				planning_interface::MotionPlanResponse res;
+				bool ok = pipeline.generatePlan(scene, req, res);
+
+				cartesian_distance =
+					(ok && res.trajectory_) ? MeasureTrajectoryEndEffectorDistance(res.trajectory_) : -1.0;
+				joint_distance = (ok && res.trajectory_) ? MeasureTrajectoryJointDistance(res.trajectory_) : -1.0;
+			}
 
 			// Each (i, j) pair appears exactly once in pair_list, so distinct threads never write
 			// the same matrix cells -- no lock needed here.
@@ -579,19 +645,22 @@ size_t MatrixIndexOf(const std::vector<ViewpointCandidate>& candidates, const Vi
 
 // -1.0 means infeasible -- treat as infinitely expensive so NN/2-opt avoid it, matching the
 // GA fitness function's handling.
-double WeightedCost(const TravelCostMatrix& matrix, size_t a, size_t b, double joint_distance_weight)
+double WeightedCost(
+	const TravelCostMatrix& matrix, size_t a, size_t b, double joint_distance_weight,
+	double max_joint_deviation_weight)
 {
 	double cartesian = matrix.cartesian_distance[a][b];
 	if (cartesian < 0.0)
 		return std::numeric_limits<double>::max();
-	return cartesian + joint_distance_weight * matrix.joint_distance[a][b];
+	return cartesian + joint_distance_weight * matrix.joint_distance[a][b] +
+		max_joint_deviation_weight * matrix.max_joint_deviation[a][b];
 }
 
 } // namespace
 
 std::vector<const ViewpointCandidate*> NearestNeighborOrderMatrix(
 	const std::vector<ViewpointCandidate>& candidates, std::vector<const ViewpointCandidate*> selected,
-	const TravelCostMatrix& travel_cost_matrix, double joint_distance_weight)
+	const TravelCostMatrix& travel_cost_matrix, double joint_distance_weight, double max_joint_deviation_weight)
 {
 	if (selected.size() < 2)
 		return selected;
@@ -612,7 +681,8 @@ std::vector<const ViewpointCandidate*> NearestNeighborOrderMatrix(
 				continue;
 
 			size_t idx = MatrixIndexOf(candidates, selected[i]);
-			double cost = WeightedCost(travel_cost_matrix, current_matrix_idx, idx, joint_distance_weight);
+			double cost = WeightedCost(
+				travel_cost_matrix, current_matrix_idx, idx, joint_distance_weight, max_joint_deviation_weight);
 			if (best_i == selected.size() || cost < best)
 			{
 				best = cost;
@@ -630,7 +700,7 @@ std::vector<const ViewpointCandidate*> NearestNeighborOrderMatrix(
 
 std::vector<const ViewpointCandidate*> TwoOptImproveMatrix(
 	const std::vector<ViewpointCandidate>& candidates, std::vector<const ViewpointCandidate*> ordered,
-	const TravelCostMatrix& travel_cost_matrix, double joint_distance_weight)
+	const TravelCostMatrix& travel_cost_matrix, double joint_distance_weight, double max_joint_deviation_weight)
 {
 	if (ordered.size() < 3)
 		return ordered;
@@ -648,15 +718,19 @@ std::vector<const ViewpointCandidate*> TwoOptImproveMatrix(
 
 			for (size_t j = i + 1; j < ordered.size(); ++j)
 			{
-				double old_cost = WeightedCost(travel_cost_matrix, prev_idx, matrix_idx(i), joint_distance_weight);
-				double new_cost = WeightedCost(travel_cost_matrix, prev_idx, matrix_idx(j), joint_distance_weight);
+				double old_cost = WeightedCost(
+					travel_cost_matrix, prev_idx, matrix_idx(i), joint_distance_weight, max_joint_deviation_weight);
+				double new_cost = WeightedCost(
+					travel_cost_matrix, prev_idx, matrix_idx(j), joint_distance_weight, max_joint_deviation_weight);
 
 				if (j + 1 < ordered.size())
 				{
-					old_cost +=
-						WeightedCost(travel_cost_matrix, matrix_idx(j), matrix_idx(j + 1), joint_distance_weight);
-					new_cost +=
-						WeightedCost(travel_cost_matrix, matrix_idx(i), matrix_idx(j + 1), joint_distance_weight);
+					old_cost += WeightedCost(
+						travel_cost_matrix, matrix_idx(j), matrix_idx(j + 1), joint_distance_weight,
+						max_joint_deviation_weight);
+					new_cost += WeightedCost(
+						travel_cost_matrix, matrix_idx(i), matrix_idx(j + 1), joint_distance_weight,
+						max_joint_deviation_weight);
 				}
 
 				if (new_cost < old_cost - 1e-9)
@@ -674,26 +748,32 @@ std::vector<const ViewpointCandidate*> TwoOptImproveMatrix(
 
 void PrintTourCostBreakdown(
 	const std::vector<ViewpointCandidate>& candidates, const std::vector<const ViewpointCandidate*>& selected,
-	const TravelCostMatrix& travel_cost_matrix, double joint_distance_weight)
+	const TravelCostMatrix& travel_cost_matrix, double joint_distance_weight, double max_joint_deviation_weight)
 {
 	double total_cartesian = 0.0;
 	double total_joint = 0.0;
+	double worst_max_joint_deviation = 0.0;
 	size_t prev_matrix_idx = 0; // start reference
-	printf("-- final tour cost breakdown (joint_distance_weight=%.4f) --\n", joint_distance_weight);
+	printf(
+		"-- final tour cost breakdown (joint_distance_weight=%.4f, max_joint_deviation_weight=%.4f) --\n",
+		joint_distance_weight, max_joint_deviation_weight);
 	for (const ViewpointCandidate* ptr : selected)
 	{
 		size_t cur_matrix_idx = MatrixIndexOf(candidates, ptr);
 		double cartesian = travel_cost_matrix.cartesian_distance[prev_matrix_idx][cur_matrix_idx];
 		double joint = travel_cost_matrix.joint_distance[prev_matrix_idx][cur_matrix_idx];
+		double max_joint_dev = travel_cost_matrix.max_joint_deviation[prev_matrix_idx][cur_matrix_idx];
 		printf(
-			"  leg %zu -> %zu: cartesian=%.4f m, joint=%.4f rad\n", prev_matrix_idx, cur_matrix_idx, cartesian,
-			joint);
+			"  leg %zu -> %zu: cartesian=%.4f m, joint=%.4f rad, max_joint_deviation=%.4f rad\n", prev_matrix_idx,
+			cur_matrix_idx, cartesian, joint, max_joint_dev);
 		total_cartesian += cartesian;
 		total_joint += joint;
+		worst_max_joint_deviation = std::max(worst_max_joint_deviation, max_joint_dev);
 		prev_matrix_idx = cur_matrix_idx;
 	}
 	printf(
-		"-- totals: cartesian=%.4f m, joint=%.4f rad, weighted_total=%.4f --\n", total_cartesian, total_joint,
+		"-- totals: cartesian=%.4f m, joint=%.4f rad, worst_max_joint_deviation=%.4f rad, weighted_total=%.4f --\n",
+		total_cartesian, total_joint, worst_max_joint_deviation,
 		total_cartesian + joint_distance_weight * total_joint);
 }
 
