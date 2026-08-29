@@ -37,7 +37,11 @@ struct Params
 	double bg_x_min = -0.3, bg_x_max = 0.3;
 	double bg_y_min = -0.3, bg_y_max = 0.3;
 	double bg_z_min = -0.2, bg_z_max = 0.2;
+	double bg_roll_min = -0.35, bg_roll_max = 0.35;	  // rad (~20 deg) -- object tip
+	double bg_pitch_min = -0.35, bg_pitch_max = 0.35;  // rad -- object tilt
 	double bg_initial_x = 0.0, bg_initial_y = 0.0, bg_initial_z = 0.0;
+	double bg_initial_roll = 0.0, bg_initial_pitch = 0.0;
+	double bg_rot_metric_scale = 0.3;  // m per rad, blends translation & tip/tilt in the step
 
 	double bg_joint_distance_weight = 1.0;
 	double bg_cartesian_distance_weight = 0.0;
@@ -55,7 +59,7 @@ struct Params
 	int bg_max_line_search_iters = 12;
 	double bg_jacobian_damping = 1e-3;
 
-	double bg_convergence_tolerance_xyz = 0.002;
+	double bg_convergence_tolerance_offset = 0.002;
 	double bg_convergence_tolerance_cost = 1e-3;
 	int bg_patience = 3;
 
@@ -68,7 +72,7 @@ struct Params
 
 	// Drives the real robot through the recommended placement's tour by moving the (software-only)
 	// collision object into the frame the base would see at the recommended offset. Only correct
-	// if that matches reality -- see ApplyBaseOffsetToScene's doc comment. Defaults to false.
+	// if that matches reality -- see ApplyObjectOffsetToScene's doc comment. Defaults to false.
 	bool execute_on_robot = false;
 	double execution_planning_time = 5.0;
 	int execution_planning_attempts = 5;
@@ -198,9 +202,16 @@ private:
 		this->declareIfNeeded("bg_y_max", this->params.bg_y_max);
 		this->declareIfNeeded("bg_z_min", this->params.bg_z_min);
 		this->declareIfNeeded("bg_z_max", this->params.bg_z_max);
+		this->declareIfNeeded("bg_roll_min", this->params.bg_roll_min);
+		this->declareIfNeeded("bg_roll_max", this->params.bg_roll_max);
+		this->declareIfNeeded("bg_pitch_min", this->params.bg_pitch_min);
+		this->declareIfNeeded("bg_pitch_max", this->params.bg_pitch_max);
 		this->declareIfNeeded("bg_initial_x", this->params.bg_initial_x);
 		this->declareIfNeeded("bg_initial_y", this->params.bg_initial_y);
 		this->declareIfNeeded("bg_initial_z", this->params.bg_initial_z);
+		this->declareIfNeeded("bg_initial_roll", this->params.bg_initial_roll);
+		this->declareIfNeeded("bg_initial_pitch", this->params.bg_initial_pitch);
+		this->declareIfNeeded("bg_rot_metric_scale", this->params.bg_rot_metric_scale);
 		this->declareIfNeeded("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->declareIfNeeded("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->declareIfNeeded("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
@@ -214,7 +225,7 @@ private:
 		this->declareIfNeeded("bg_min_step", this->params.bg_min_step);
 		this->declareIfNeeded("bg_max_line_search_iters", this->params.bg_max_line_search_iters);
 		this->declareIfNeeded("bg_jacobian_damping", this->params.bg_jacobian_damping);
-		this->declareIfNeeded("bg_convergence_tolerance_xyz", this->params.bg_convergence_tolerance_xyz);
+		this->declareIfNeeded("bg_convergence_tolerance_offset", this->params.bg_convergence_tolerance_offset);
 		this->declareIfNeeded("bg_convergence_tolerance_cost", this->params.bg_convergence_tolerance_cost);
 		this->declareIfNeeded("bg_patience", this->params.bg_patience);
 		this->declareIfNeeded("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
@@ -243,9 +254,16 @@ private:
 		this->get_parameter("bg_y_max", this->params.bg_y_max);
 		this->get_parameter("bg_z_min", this->params.bg_z_min);
 		this->get_parameter("bg_z_max", this->params.bg_z_max);
+		this->get_parameter("bg_roll_min", this->params.bg_roll_min);
+		this->get_parameter("bg_roll_max", this->params.bg_roll_max);
+		this->get_parameter("bg_pitch_min", this->params.bg_pitch_min);
+		this->get_parameter("bg_pitch_max", this->params.bg_pitch_max);
 		this->get_parameter("bg_initial_x", this->params.bg_initial_x);
 		this->get_parameter("bg_initial_y", this->params.bg_initial_y);
 		this->get_parameter("bg_initial_z", this->params.bg_initial_z);
+		this->get_parameter("bg_initial_roll", this->params.bg_initial_roll);
+		this->get_parameter("bg_initial_pitch", this->params.bg_initial_pitch);
+		this->get_parameter("bg_rot_metric_scale", this->params.bg_rot_metric_scale);
 		this->get_parameter("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->get_parameter("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->get_parameter("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
@@ -259,7 +277,7 @@ private:
 		this->get_parameter("bg_min_step", this->params.bg_min_step);
 		this->get_parameter("bg_max_line_search_iters", this->params.bg_max_line_search_iters);
 		this->get_parameter("bg_jacobian_damping", this->params.bg_jacobian_damping);
-		this->get_parameter("bg_convergence_tolerance_xyz", this->params.bg_convergence_tolerance_xyz);
+		this->get_parameter("bg_convergence_tolerance_offset", this->params.bg_convergence_tolerance_offset);
 		this->get_parameter("bg_convergence_tolerance_cost", this->params.bg_convergence_tolerance_cost);
 		this->get_parameter("bg_patience", this->params.bg_patience);
 		this->get_parameter("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
@@ -306,9 +324,16 @@ private:
 		bg.bounds.y_max = this->params.bg_y_max;
 		bg.bounds.z_min = this->params.bg_z_min;
 		bg.bounds.z_max = this->params.bg_z_max;
+		bg.bounds.roll_min = this->params.bg_roll_min;
+		bg.bounds.roll_max = this->params.bg_roll_max;
+		bg.bounds.pitch_min = this->params.bg_pitch_min;
+		bg.bounds.pitch_max = this->params.bg_pitch_max;
 		bg.initial_x = this->params.bg_initial_x;
 		bg.initial_y = this->params.bg_initial_y;
 		bg.initial_z = this->params.bg_initial_z;
+		bg.initial_roll = this->params.bg_initial_roll;
+		bg.initial_pitch = this->params.bg_initial_pitch;
+		bg.rot_metric_scale = this->params.bg_rot_metric_scale;
 		bg.joint_distance_weight = this->params.bg_joint_distance_weight;
 		bg.cartesian_distance_weight = this->params.bg_cartesian_distance_weight;
 		bg.max_joint_deviation_weight = this->params.bg_max_joint_deviation_weight;
@@ -323,7 +348,7 @@ private:
 		bg.min_step = this->params.bg_min_step;
 		bg.max_line_search_iters = this->params.bg_max_line_search_iters;
 		bg.jacobian_damping = this->params.bg_jacobian_damping;
-		bg.convergence_tolerance_xyz = this->params.bg_convergence_tolerance_xyz;
+		bg.convergence_tolerance_offset = this->params.bg_convergence_tolerance_offset;
 		bg.convergence_tolerance_cost = this->params.bg_convergence_tolerance_cost;
 		bg.patience = this->params.bg_patience;
 		bg.random_seed = this->params.random_seed;
@@ -333,7 +358,8 @@ private:
 		bg.visualize_progress_delay_sec = this->params.visualize_progress_delay_sec;
 
 		RCLCPP_INFO(
-			this->get_logger(), "Descending base placement for a %zu-pose tour...", tour_tcp_poses.size());
+			this->get_logger(), "Descending the object offset (x, y, z, tip, tilt) for a %zu-pose tour...",
+			tour_tcp_poses.size());
 
 		BaseGradientResult result = SolveBaseGradient(
 			this->shared_from_this(), this->robot_model, local_scene, this->params.group_name, object_translation_world,
@@ -359,23 +385,27 @@ private:
 		{
 			RCLCPP_WARN(
 				this->get_logger(),
-				"execute_on_robot: driving the REAL robot as if the base were translated by (%.4f, %.4f, %.4f) m by "
-				"moving the object in software -- only correct if the object has actually been placed there (or the "
-				"base actually remounted).",
-				result.x, result.y, result.z);
+				"execute_on_robot: driving the REAL robot against the object moved by (%.4f, %.4f, %.4f) m + tip "
+				"%.2f deg / tilt %.2f deg in software -- only correct if the physical object is actually fixtured "
+				"to match.",
+				result.x, result.y, result.z, result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI);
 
-			ApplyBaseOffsetToScene(
-				local_scene, object_translation_world, object_rotation_world, result.x, result.y, result.z);
+			ApplyObjectOffsetToScene(
+				local_scene, object_translation_world, object_rotation_world, result.x, result.y, result.z,
+				result.roll, result.pitch);
 
-			Eigen::Isometry3d base_transform_inv =
-				Eigen::Isometry3d(Eigen::Translation3d(result.x, result.y, result.z)).inverse();
+			Eigen::Isometry3d object_offset = Eigen::Isometry3d::Identity();
+			object_offset.translation() = Eigen::Vector3d(result.x, result.y, result.z);
+			object_offset.linear() = (Eigen::AngleAxisd(result.pitch, Eigen::Vector3d::UnitY()) *
+									  Eigen::AngleAxisd(result.roll, Eigen::Vector3d::UnitX()))
+										 .toRotationMatrix();
 
 			std::vector<ViewpointCandidate> owned(result.tour_order.size());
 			std::vector<const ViewpointCandidate*> selected;
 			selected.reserve(result.tour_order.size());
 			for (size_t k = 0; k < result.tour_order.size(); ++k)
 			{
-				Eigen::Isometry3d local_pose = base_transform_inv * tour_tcp_poses[result.tour_order[k]];
+				Eigen::Isometry3d local_pose = object_offset * tour_tcp_poses[result.tour_order[k]];
 				owned[k].tcp_pose.position.x = local_pose.translation().x();
 				owned[k].tcp_pose.position.y = local_pose.translation().y();
 				owned[k].tcp_pose.position.z = local_pose.translation().z();

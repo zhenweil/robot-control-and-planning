@@ -11,22 +11,26 @@
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-// Search bounds for the base offset (x, y, z), relative to the robot's actual mount
-// (panda_link0). The offset is a pure translation -- base yaw is deliberately excluded because it
-// is redundant with joint 1 (both rotate the arm about the mount's z axis), so mount height z
-// takes the third slot instead, where it genuinely changes reach and joint travel.
+// What is optimized is the rigid pose adjustment applied to the OBJECT (and, rigidly with it, its
+// viewpoints) expressed in the robot base frame (panda_link0): translation (x, y, z) plus tip
+// (roll, about base x) and tilt (pitch, about base y). Physically realized by re-fixturing the
+// object on a tip/tilt stage -- equivalent to, and easier than, repositioning/re-tilting the arm
+// base. Yaw (about base z) is excluded: it is redundant with joint 1, which rotates the whole arm
+// about that axis, so it leaves the joint-travel objective unchanged.
 struct BaseGradientBounds
 {
 	double x_min = -0.3, x_max = 0.3;
 	double y_min = -0.3, y_max = 0.3;
 	double z_min = -0.2, z_max = 0.2;
+	double roll_min = -0.35, roll_max = 0.35;	// radians (~20 deg)
+	double pitch_min = -0.35, pitch_max = 0.35;  // radians
 };
 
 struct BaseGradientParams
 {
 	BaseGradientBounds bounds;
-	// Where the descent starts, relative to today's mount (default 0 = the real mount).
-	double initial_x = 0.0, initial_y = 0.0, initial_z = 0.0;
+	// Where the descent starts, relative to the object's nominal pose (default 0 = nominal).
+	double initial_x = 0.0, initial_y = 0.0, initial_z = 0.0, initial_roll = 0.0, initial_pitch = 0.0;
 
 	// Objective weights (mirrors HierarchicalTourParams): total tour cost is
 	//   sum_edges [ w_cart*||dp|| + w_joint*||dq||_2 + w_maxdev*max_k|dq_k| ].
@@ -43,9 +47,9 @@ struct BaseGradientParams
 	int ik_retries_per_point = 8;
 	int gtsp_two_opt_rounds = 5;
 
-	// Gradient descent on the base offset. The descent direction is the unit-normalized negative
-	// gradient, so `initial_step` / `min_step` are actual base displacements in meters, not scaled
-	// by the raw (cost-per-meter) gradient magnitude.
+	// Gradient descent on the object offset. The descent direction is the unit-normalized negative
+	// gradient in a mixed metric where 1 rad of tip/tilt counts as `rot_metric_scale` meters, so
+	// `initial_step` / `min_step` are that blended displacement, not scaled by the raw gradient.
 	int max_outer_iterations = 15;
 	double initial_step = 0.05;
 	double step_shrink = 0.5;
@@ -53,9 +57,10 @@ struct BaseGradientParams
 	double min_step = 1e-4;
 	int max_line_search_iters = 12;
 	double jacobian_damping = 1e-3;  // lambda in the damped pseudo-inverse J^T (J J^T + lambda^2 I)^-1
+	double rot_metric_scale = 0.3;   // meters per radian, for blending translation & tip/tilt steps
 
-	double convergence_tolerance_xyz = 0.002;   // meters, base move per outer iteration
-	double convergence_tolerance_cost = 1e-3;  // relative tour-cost improvement per outer iteration
+	double convergence_tolerance_offset = 0.002;  // blended (see rot_metric_scale) offset move per iteration
+	double convergence_tolerance_cost = 1e-3;	  // relative tour-cost improvement per outer iteration
 	// Stop early once this many consecutive iterations each improve the cost by less than
 	// convergence_tolerance_cost (relative) -- avoids grinding through many near-zero-gain steps.
 	int patience = 3;
@@ -73,10 +78,12 @@ struct BaseGradientParams
 
 struct BaseGradientResult
 {
-	bool ok = false;  // true iff every input pose is reachable at the returned (x, y, z)
+	bool ok = false;  // true iff every input pose is reachable at the returned offset
 	int num_reachable = 0;
 	int num_total = 0;
-	double x = 0.0, y = 0.0, z = 0.0;  // translational offset relative to today's actual mount
+	// Object offset relative to its nominal pose, in the robot base frame: translation (m) + tip
+	// roll / tilt pitch (rad). Applied as T(x,y,z) * Ry(pitch) * Rx(roll).
+	double x = 0.0, y = 0.0, z = 0.0, roll = 0.0, pitch = 0.0;
 
 	// Input-pose indices in visit order (the inner GTSP's tour).
 	std::vector<int> tour_order;
@@ -84,16 +91,16 @@ struct BaseGradientResult
 	std::vector<std::vector<double>> joint_solutions;
 
 	double total_joint_path_length = 0.0;  // sum ||dq||_2 over tour edges (home -> first -> ...)
-	double total_weighted_cost = 0.0;	   // the full weighted objective at the returned base
+	double total_weighted_cost = 0.0;	   // the full weighted objective at the returned offset
 
-	// {x, y, z, weighted_cost} after each outer iteration -- for plotting the descent.
-	std::vector<std::array<double, 4>> history;
+	// {x, y, z, roll, pitch, weighted_cost} after each outer iteration -- for plotting the descent.
+	std::vector<std::array<double, 6>> history;
 };
 
-// Alternating minimization of tour joint travel over the base offset (x, y, z): run the inner
-// redundant-IK GTSP at the current base, take the analytic gradient of the weighted tour cost
-// w.r.t. the base pose (via the manipulator Jacobian), backtracking-line-search a descent step,
-// then re-run the GTSP -- until the base and the cost both settle.
+// Alternating minimization of tour joint travel over the object offset (x, y, z, roll, pitch):
+// run the inner redundant-IK GTSP at the current offset, take the analytic gradient of the
+// weighted tour cost w.r.t. the offset (via the manipulator Jacobian), backtracking-line-search a
+// descent step, then re-run the GTSP -- until the offset and the cost both settle.
 //
 // object_translation_original/object_rotation_original and tour_tcp_poses_original follow the same
 // current-mount-frame convention as SolveBasePlacement (see base_placement.hpp). The planning
@@ -113,18 +120,18 @@ BaseGradientResult SolveBaseGradient(
 // Writes base_gradient_result.json to output_dir.
 void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientResult& result);
 
-// Moves the registered "object" collision object to where it would sit if the base were
-// translated by (x, y, z) from its real mount, given the object's real pose
-// (object_translation_original/object_rotation_original). Same purpose/caveats as
-// ApplyBasePlacementToScene in base_placement.hpp -- only valid if that translation has actually
-// been realized (object physically moved, or base remounted).
-void ApplyBaseOffsetToScene(
+// Moves the registered "object" collision object to its nominal pose adjusted by the offset
+// T(x,y,z) * Ry(pitch) * Rx(roll) in the robot base frame. Only valid if that adjustment has
+// actually been realized on the physical object (re-fixtured to match).
+void ApplyObjectOffsetToScene(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Vector3d& object_translation_original,
 	const Eigen::Matrix3d& object_rotation_original,
 	double x,
 	double y,
-	double z);
+	double z,
+	double roll,
+	double pitch);
 
 // Object mesh + tour polyline/waypoints re-expressed in the recommended base's frame (same idea
 // as BuildBasePlacementMarkerArray). frame_id is "world".

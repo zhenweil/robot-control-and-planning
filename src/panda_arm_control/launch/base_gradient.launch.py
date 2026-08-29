@@ -68,18 +68,27 @@ def generate_launch_description():
         # selected_robot_poses.json -- this node's input.
         "tour_input_dir": "/tmp/viewpoint_planner_output",
         "output_dir": "/tmp/base_gradient_output",
-        # Base offset (x, y, z) search bounds, relative to today's actual mount. The offset is a
-        # pure translation -- yaw is excluded (redundant with joint 1), z takes its place.
+        # Object offset search bounds in the robot base frame: translation (m) + tip roll / tilt
+        # pitch (rad). Yaw is excluded (redundant with joint 1). Realized by re-fixturing the
+        # object, not moving the arm.
         "bg_x_min": -0.3,
         "bg_x_max": 0.3,
         "bg_y_min": -0.3,
         "bg_y_max": 0.3,
         "bg_z_min": -0.2,
         "bg_z_max": 0.2,
-        # Where the descent starts (0 = today's mount).
+        "bg_roll_min": -0.35,
+        "bg_roll_max": 0.35,
+        "bg_pitch_min": -0.35,
+        "bg_pitch_max": 0.35,
+        # Where the descent starts (0 = object's nominal pose).
         "bg_initial_x": 0.0,
         "bg_initial_y": 0.0,
         "bg_initial_z": 0.0,
+        "bg_initial_roll": 0.0,
+        "bg_initial_pitch": 0.0,
+        # Meters per radian: how tip/tilt trades off against translation in the descent step.
+        "bg_rot_metric_scale": 0.3,
         # Objective weights (see base_gradient.hpp). Cartesian term has no gradient; kept for
         # inner-GTSP ordering parity with the rest of the pipeline.
         "bg_joint_distance_weight": 1.0,
@@ -95,7 +104,7 @@ def generate_launch_description():
         "bg_min_step": 1e-4,
         "bg_max_line_search_iters": 12,
         "bg_jacobian_damping": 1e-3,
-        "bg_convergence_tolerance_xyz": 0.002,
+        "bg_convergence_tolerance_offset": 0.002,
         "bg_convergence_tolerance_cost": 1e-3,
         # Stop after this many consecutive iterations that each gain < bg_convergence_tolerance_cost.
         "bg_patience": 3,
