@@ -47,10 +47,16 @@ struct BaseGradientParams
 	// Inner GTSP (redundant-IK generalized TSP): each viewpoint offers up to this many distinct IK
 	// branches and the solver picks whichever ordering + branch minimizes reconfiguration. Used
 	// only for the committed solve each iteration; line-search probes always use 1 (cheap).
-	int max_solutions_per_candidate = 2;
-	double ik_timeout = 0.1;
-	int ik_retries_per_point = 8;
+	// Raised from 2/8/0.1 -- with thin branch coverage the tour cost at a fixed offset swings ~5%
+	// on the IK seed alone, which swamped the object-move effect in the attribution experiment.
+	int max_solutions_per_candidate = 4;
+	double ik_timeout = 0.15;
+	int ik_retries_per_point = 14;
 	int gtsp_two_opt_rounds = 5;
+	// Take the cheapest of this many independent inner solves wherever a committed cost is needed
+	// (the descent's iteration-0 solve and each accepted step, and every experiment cold/warm
+	// solve) -- min-of-N shrinks the seed-driven variance. Line-search probes still use 1.
+	int solve_restarts = 2;
 
 	// Optional basin hopping: restart 0 descends from initial_*, each later restart descends from
 	// the best offset so far kicked by a Gaussian of std-dev restart_perturbation (meters; the
@@ -111,6 +117,11 @@ struct BaseGradientResult
 	double total_joint_path_length = 0.0;  // sum ||dq||_2 over tour edges (home -> first -> ...)
 	double total_weighted_cost = 0.0;	   // the full weighted objective at the returned offset
 
+	// Full inner solves consumed by the descent (iteration-0 solve + one per accepted step, each
+	// counting solve_restarts sub-solves; line-search probes not included). A budget for a fair
+	// random-search comparison.
+	int num_inner_solves = 0;
+
 	// {restart, x, y, z, roll, pitch, weighted_cost} after each outer iteration across all
 	// restarts -- for plotting the descents.
 	std::vector<std::array<double, 7>> history;
@@ -151,6 +162,9 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 //   exp 4  the same random offsets (and b*), warm inner solve -- IK seeds and GTSP order both
 //          warm-started from the offset-0 cold solution, one hop. Isolates the warm-start
 //          discount from the placement effect.
+//   exp 5  random search of equal budget: cold-solve the descent's num_inner_solves worth of
+//          offsets drawn uniformly in the bounds, keep the best. If the descent does not beat
+//          this, the gradient is not earning its complexity.
 // ---------------------------------------------------------------------------------------------
 struct BaseGradientPointEval
 {
@@ -176,14 +190,18 @@ struct BaseGradientExperimentResult
 	double probe_d_metric = 0.0;  // radius used for the exp 3 / 4 random offsets
 	bool probe_d_floored = false;  // true if |b*| was ~0 and probe_d_metric was raised to a floor
 
+	int descent_inner_solves = 0;  // budget exp 5 matched (from BaseGradientResult::num_inner_solves)
+
 	BaseGradientPointEval c0_cold;	  // exp 1
 	BaseGradientPointEval copt_cold;  // exp 1
 	BaseGradientPointEval copt_warm;  // exp 4 at b*
 	std::vector<BaseGradientPointEval> rand_cold;  // exp 3
 	std::vector<BaseGradientPointEval> rand_warm;  // exp 4 (offsets parallel to rand_cold)
+	std::vector<BaseGradientPointEval> random_search;  // exp 5 (uniform-in-bounds, cold)
 };
 
-// Runs the descent once (for b*), then exp 1 / 3 / 4 above. Restores the scene before returning.
+// Runs the descent once (for b*), then exp 1 / 3 / 4 / 5 above. Restores the scene before
+// returning. random_search_budget <= 0 means "match the descent's num_inner_solves".
 BaseGradientExperimentResult RunBaseGradientExperiment(
 	const rclcpp::Node::SharedPtr& node,
 	const moveit::core::RobotModelConstPtr& robot_model,
@@ -195,7 +213,8 @@ BaseGradientExperimentResult RunBaseGradientExperiment(
 	const std::vector<double>& start_reference_joints,
 	const BaseGradientParams& params,
 	int num_random_directions,
-	double min_probe_d_metric);
+	double min_probe_d_metric,
+	int random_search_budget);
 
 // Writes base_gradient_experiment_seed<seed>.json to output_dir.
 void ExportBaseGradientExperimentResult(const std::string& output_dir, const BaseGradientExperimentResult& result);

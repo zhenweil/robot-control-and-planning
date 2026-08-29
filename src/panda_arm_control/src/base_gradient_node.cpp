@@ -48,9 +48,10 @@ struct Params
 	double bg_max_joint_deviation_weight = 1.0;
 	double bg_unreachable_penalty = 50.0;
 
-	int bg_max_solutions_per_candidate = 2;
-	int bg_ik_retries_per_point = 8;
+	int bg_max_solutions_per_candidate = 4;
+	int bg_ik_retries_per_point = 14;
 	int bg_gtsp_two_opt_rounds = 5;
+	int bg_solve_restarts = 2;  // min-of-N inner solves wherever a committed cost matters
 
 	int bg_num_restarts = 1;
 	double bg_restart_perturbation = 0.08;
@@ -78,8 +79,11 @@ struct Params
 	bool bg_experiment_mode = false;
 	int bg_experiment_num_random_dirs = 10;
 	double bg_experiment_min_probe_metric = 0.01;
+	// exp 5: uniform-in-bounds random-search points to cold-solve. 0 = match the descent's
+	// committed-solve count (a genuine equal-budget baseline); >0 = that many points.
+	int bg_experiment_random_search_budget = 0;
 
-	double ik_timeout = 0.1;
+	double ik_timeout = 0.15;
 	int random_seed = 42;
 	double visualize_progress_delay_sec = 0.0;
 
@@ -234,6 +238,7 @@ private:
 		this->declareIfNeeded("bg_unreachable_penalty", this->params.bg_unreachable_penalty);
 		this->declareIfNeeded("bg_max_solutions_per_candidate", this->params.bg_max_solutions_per_candidate);
 		this->declareIfNeeded("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
+		this->declareIfNeeded("bg_solve_restarts", this->params.bg_solve_restarts);
 		this->declareIfNeeded("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
 		this->declareIfNeeded("bg_num_restarts", this->params.bg_num_restarts);
 		this->declareIfNeeded("bg_restart_perturbation", this->params.bg_restart_perturbation);
@@ -254,6 +259,7 @@ private:
 		this->declareIfNeeded("bg_experiment_mode", this->params.bg_experiment_mode);
 		this->declareIfNeeded("bg_experiment_num_random_dirs", this->params.bg_experiment_num_random_dirs);
 		this->declareIfNeeded("bg_experiment_min_probe_metric", this->params.bg_experiment_min_probe_metric);
+		this->declareIfNeeded("bg_experiment_random_search_budget", this->params.bg_experiment_random_search_budget);
 		this->declareIfNeeded("ik_timeout", this->params.ik_timeout);
 		this->declareIfNeeded("random_seed", this->params.random_seed);
 		this->declareIfNeeded("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -294,6 +300,7 @@ private:
 		this->get_parameter("bg_unreachable_penalty", this->params.bg_unreachable_penalty);
 		this->get_parameter("bg_max_solutions_per_candidate", this->params.bg_max_solutions_per_candidate);
 		this->get_parameter("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
+		this->get_parameter("bg_solve_restarts", this->params.bg_solve_restarts);
 		this->get_parameter("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
 		this->get_parameter("bg_num_restarts", this->params.bg_num_restarts);
 		this->get_parameter("bg_restart_perturbation", this->params.bg_restart_perturbation);
@@ -314,6 +321,7 @@ private:
 		this->get_parameter("bg_experiment_mode", this->params.bg_experiment_mode);
 		this->get_parameter("bg_experiment_num_random_dirs", this->params.bg_experiment_num_random_dirs);
 		this->get_parameter("bg_experiment_min_probe_metric", this->params.bg_experiment_min_probe_metric);
+		this->get_parameter("bg_experiment_random_search_budget", this->params.bg_experiment_random_search_budget);
 		this->get_parameter("ik_timeout", this->params.ik_timeout);
 		this->get_parameter("random_seed", this->params.random_seed);
 		this->get_parameter("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -373,6 +381,7 @@ private:
 		bg.max_solutions_per_candidate = this->params.bg_max_solutions_per_candidate;
 		bg.ik_timeout = this->params.ik_timeout;
 		bg.ik_retries_per_point = this->params.bg_ik_retries_per_point;
+		bg.solve_restarts = this->params.bg_solve_restarts;
 		bg.gtsp_two_opt_rounds = this->params.bg_gtsp_two_opt_rounds;
 		bg.num_restarts = this->params.bg_num_restarts;
 		bg.restart_perturbation = this->params.bg_restart_perturbation;
@@ -404,7 +413,8 @@ private:
 			BaseGradientExperimentResult exp = RunBaseGradientExperiment(
 				this->shared_from_this(), this->robot_model, local_scene, this->params.group_name,
 				object_translation_world, object_rotation_world, tour_tcp_poses, this->home_joint_values, bg,
-				this->params.bg_experiment_num_random_dirs, this->params.bg_experiment_min_probe_metric);
+				this->params.bg_experiment_num_random_dirs, this->params.bg_experiment_min_probe_metric,
+				this->params.bg_experiment_random_search_budget);
 			ExportBaseGradientExperimentResult(this->params.output_dir, exp);
 			rclcpp::shutdown();
 			return;

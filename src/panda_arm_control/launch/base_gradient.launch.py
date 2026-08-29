@@ -79,6 +79,16 @@ def generate_launch_description():
         LaunchConfiguration("experiment_num_random_dirs"), value_type=int
     )
 
+    experiment_random_search_budget_arg = DeclareLaunchArgument(
+        "experiment_random_search_budget",
+        default_value="0",
+        description="experiment_mode, exp 5: uniform-in-bounds offsets to cold-solve for the "
+        "equal-budget random-search baseline. 0 = match the descent's committed-solve count.",
+    )
+    experiment_random_search_budget = ParameterValue(
+        LaunchConfiguration("experiment_random_search_budget"), value_type=int
+    )
+
     output_dir_arg = DeclareLaunchArgument(
         "output_dir",
         default_value="/tmp/base_gradient_output",
@@ -142,8 +152,11 @@ def generate_launch_description():
         "bg_max_joint_deviation_weight": 1.0,
         # Cost added per viewpoint left unreachable -- keeps a partial solution from looking cheap.
         "bg_unreachable_penalty": 50.0,
-        "bg_max_solutions_per_candidate": 2,
-        "bg_ik_retries_per_point": 8,
+        # Raised from 2/8/0.1 (see ik_timeout below) + min-of-2 committed solves: thin IK branch
+        # coverage made the tour cost at a fixed offset swing ~5% on the seed alone.
+        "bg_max_solutions_per_candidate": 4,
+        "bg_ik_retries_per_point": 14,
+        "bg_solve_restarts": 2,
         "bg_gtsp_two_opt_rounds": 5,
         # Optional basin hopping (1 = single descent, the default). Raise only for a problem that
         # looks multi-basin; each restart after the first descends from the best offset so far
@@ -168,7 +181,8 @@ def generate_launch_description():
         "bg_experiment_mode": experiment_mode,
         "bg_experiment_num_random_dirs": experiment_num_random_dirs,
         "bg_experiment_min_probe_metric": 0.01,
-        "ik_timeout": 0.1,
+        "bg_experiment_random_search_budget": experiment_random_search_budget,
+        "ik_timeout": 0.15,
         "random_seed": ParameterValue(random_seed, value_type=int),
         "visualize_progress_delay_sec": visualize_progress_delay_sec,
         "execute_on_robot": execute_on_robot,
@@ -215,6 +229,7 @@ def generate_launch_description():
             random_seed_arg,
             experiment_mode_arg,
             experiment_num_random_dirs_arg,
+            experiment_random_search_budget_arg,
             output_dir_arg,
             tour_input_dir_arg,
             base_gradient_node,

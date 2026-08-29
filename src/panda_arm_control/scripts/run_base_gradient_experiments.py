@@ -2,13 +2,13 @@
 """Seed-sweep the base_gradient attribution experiment and aggregate the results.
 
 For each seed it launches `base_gradient.launch.py experiment_mode:=true random_seed:=<s>`,
-which descends once for b*, then cold/warm re-solves the tour at b*, at offset 0, and at
+which descends once for b_opt, then cold/warm re-solves the tour at b_opt, at offset 0, and at
 `--num-random-dirs` random offsets of the same mixed-metric magnitude. Each launch writes
 base_gradient_experiment_seed<s>.json into --output-dir; this script then pools them and
 prints the attribution report:
 
   exp 1 + 2  cold re-solve at endpoints, across seeds -- is the cost drop the object move?
-  exp 3      cold placebo -- does the optimized direction beat random ones of size |b*|?
+  exp 3      cold placebo -- does the optimized direction beat random ones of size |b_opt|?
   exp 4      warm placebo -- how much of any drop is warm-starting, and does the gap survive it?
 
 The tour it optimizes over is whatever base_gradient.launch.py points tour_input_dir at
@@ -30,6 +30,8 @@ def parse_args():
     p.add_argument("--num-seeds", type=int, default=5, help="if --seeds not given: sweep this many")
     p.add_argument("--start-seed", type=int, default=1, help="first seed when using --num-seeds")
     p.add_argument("--num-random-dirs", type=int, default=10, help="random offsets per seed (exp 3/4)")
+    p.add_argument("--random-search-budget", type=int, default=0,
+                   help="exp 5 uniform-in-bounds points per seed; 0 = match the descent's budget")
     p.add_argument("--output-dir", default="/tmp/base_gradient_experiment_output")
     p.add_argument("--launch-timeout", type=float, default=1800.0, help="seconds per seed before giving up")
     p.add_argument("--skip-launch", action="store_true", help="only aggregate JSONs already in --output-dir")
@@ -46,6 +48,7 @@ def run_one_seed(seed, args):
         "use_rviz:=false",
         f"random_seed:={seed}",
         f"experiment_num_random_dirs:={args.num_random_dirs}",
+        f"experiment_random_search_budget:={args.random_search_budget}",
         f"output_dir:={args.output_dir}",
     ] + list(args.extra)
     print(f"\n=== seed {seed}: {' '.join(cmd)}", flush=True)
@@ -95,13 +98,14 @@ def report(results):
     print("=" * 78)
 
     # ---- descent summary -------------------------------------------------------------------
-    print("\nDESCENT (per seed)")
-    print(f" {'seed':>4}  {'ok':>3}  {'|b*|_metric':>11}  {'b*':>44}  {'reported D':>10}")
+    print("\nDESCENT (per seed)   b_opt = the offset the gradient descent converged to")
+    print(f" {'seed':>4}  {'ok':>3}  {'|b_opt|_m':>9}  {'b_opt':>44}  {'reported D':>10}  {'solves':>6}")
     for r in results:
         d = r["descent"]
         floored = "  [probe floored]" if r.get("probe_d_floored") else ""
-        print(f" {r['seed']:>4}  {('yes' if d['ok'] else 'NO'):>3}  {d['d_metric']:>11.4f}  "
-              f"{fmt_offset(d['offset']):>44}  {d['reported_weighted_cost']:>10.3f}{floored}")
+        print(f" {r['seed']:>4}  {('yes' if d['ok'] else 'NO'):>3}  {d['d_metric']:>9.4f}  "
+              f"{fmt_offset(d['offset']):>44}  {d['reported_weighted_cost']:>10.3f}  "
+              f"{d.get('inner_solves', 0):>6}{floored}")
 
     # ---- exp 1 + 2 -----------------------------------------------------------------------
     print("\nEXP 1 + 2 -- cold re-solve at endpoints (is the drop the object move?)")
@@ -125,7 +129,7 @@ def report(results):
     print(f" -> Copt < C0 in {n_better}/{len(results)} seeds; mean dPhi {m:+.3f} ({mp:+.1f}%), sd {sd:.3f}")
 
     # ---- exp 3 -------------------------------------------------------------------------
-    print("\nEXP 3 -- cold placebo (does the optimized direction beat random ones of size |b*|?)")
+    print("\nEXP 3 -- cold placebo (does the optimized direction beat random ones of size |b_opt|?)")
     print(f" {'seed':>4}  {'Copt_cold':>9}  {'rand mean':>9}  {'rand min':>9}  {'rand max':>9}  "
           f"{'#rand<opt':>9}")
     pooled_better, pooled_total = 0, 0
@@ -165,18 +169,45 @@ def report(results):
     od, ods = mean_sd(opt_disc)
     rd, rds = mean_sd(rand_disc)
     gw, _ = mean_sd(gap_warp)
-    print(f" warm-start discount at b*:      mean(Copt_warm - Copt_cold)   = {od:+.3f}  (sd {ods:.3f})")
+    print(f" warm-start discount at b_opt:      mean(Copt_warm - Copt_cold)   = {od:+.3f}  (sd {ods:.3f})")
     print(f" warm-start discount at random:  mean(Crand_warm - Crand_cold) = {rd:+.3f}  (sd {rds:.3f}, paired)")
     print(f" -> optimized beats {pooled_total_w - pooled_better_w}/{pooled_total_w} random dirs even warm;"
           f"  mean(Copt_warm - rand_warm_mean) = {gw:+.3f}")
+
+    # ---- exp 5 -------------------------------------------------------------------------
+    print("\nEXP 5 -- equal-budget random search (does the descent beat plain random search?)")
+    print(f" {'seed':>4}  {'Copt_cold':>9}  {'budget':>6}  {'rs best':>9}  {'rs mean':>9}  "
+          f"{'descent - rs_best':>16}  descent wins")
+    rs_gap, rs_wins = [], 0
+    for r in results:
+        co = r["exp1_cold_endpoints"]["copt_cold"]["honest_cost"]
+        rs = [e["honest_cost"] for e in r.get("exp5_random_search", [])]
+        if not rs:
+            print(f" {r['seed']:>4}  (no exp5 data)")
+            continue
+        rsm, _ = mean_sd(rs)
+        gap = co - min(rs)  # <0 => descent better than best random-search point
+        rs_gap.append(gap)
+        win = gap < 0
+        rs_wins += win
+        print(f" {r['seed']:>4}  {co:>9.3f}  {len(rs):>6}  {min(rs):>9.3f}  {rsm:>9.3f}  "
+              f"{gap:>+16.3f}  {'yes' if win else 'no'}")
+    if rs_gap:
+        rg, _ = mean_sd(rs_gap)
+        print(f" -> descent beats equal-budget random search in {rs_wins}/{len(rs_gap)} seeds; "
+              f"mean(Copt - rs_best) = {rg:+.3f}  (negative = descent better)")
 
     # ---- one-line verdict ----------------------------------------------------------------
     print("\nSUMMARY")
     print(f"  move effect (exp1):        mean cold dPhi {m:+.3f}  ({n_better}/{len(results)} seeds improve)")
     print(f"  direction quality (exp3):  optimized < random in "
           f"{pooled_total - pooled_better}/{pooled_total}; edge {gm:+.3f} vs mean / {gb:+.3f} vs best")
-    print(f"  warm-start confound (exp4): ~{od:+.3f} at b* vs ~{rd:+.3f} at random -- "
+    print(f"  warm-start confound (exp4): ~{od:+.3f} at b_opt vs ~{rd:+.3f} at random -- "
           f"{'roughly uniform, gap survives' if abs(od - rd) < abs(gw) else 'direction-dependent, inspect'}")
+    if rs_gap:
+        print(f"  vs random search (exp5):   descent wins {rs_wins}/{len(rs_gap)}; "
+              f"mean edge {rg:+.3f}  "
+              f"{'<- descent earns its complexity' if rg < 0 else '<- descent does NOT beat random search'}")
     print("=" * 78)
 
 
@@ -192,10 +223,12 @@ def make_plot(results, output_dir):
     series = {
         "C0\ncold": [r["exp1_cold_endpoints"]["c0_cold"]["honest_cost"] for r in results],
         "Copt\ncold": [r["exp1_cold_endpoints"]["copt_cold"]["honest_cost"] for r in results],
-        "rand\ncold": [e["honest_cost"] for r in results for e in r["exp3_cold_placebo"]],
+        "rand |b|\ncold": [e["honest_cost"] for r in results for e in r["exp3_cold_placebo"]],
         "Copt\nwarm": [r["exp4_warm_placebo"]["copt_warm"]["honest_cost"] for r in results],
-        "rand\nwarm": [e["honest_cost"] for r in results for e in r["exp4_warm_placebo"]["random"]],
+        "rand |b|\nwarm": [e["honest_cost"] for r in results for e in r["exp4_warm_placebo"]["random"]],
+        "rand search\n(exp5)": [e["honest_cost"] for r in results for e in r.get("exp5_random_search", [])],
     }
+    series = {k: v for k, v in series.items() if v}
     fig, ax = plt.subplots(figsize=(7, 4.5))
     for i, (label, ys) in enumerate(series.items()):
         xs = [i + 0.06 * ((j % 7) - 3) for j in range(len(ys))]

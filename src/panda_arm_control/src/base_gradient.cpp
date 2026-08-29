@@ -528,6 +528,33 @@ InnerSolution InnerSolve(
 	return out;
 }
 
+// InnerSolve run `params.solve_restarts` times (>=1), keeping the lowest-weighted_cost result.
+// Consecutive runs in one process advance the shared RNG stream, so they explore different IK
+// branch sets -- min-of-N shrinks the seed-driven cost variance at a fixed offset. Use wherever a
+// committed cost matters; keep plain InnerSolve for cheap line-search probes.
+InnerSolution BestOfNInnerSolve(
+	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
+	const std::vector<std::vector<double>>& seed_per_viewpoint, const std::vector<double>& home_joints,
+	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params,
+	const std::vector<int>* warm_order, int max_solutions)
+{
+	const int n = std::max(1, params.solve_restarts);
+	InnerSolution best = InnerSolve(
+		state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seed_per_viewpoint,
+		home_joints, home_tcp_local, base, params, warm_order, max_solutions);
+	for (int i = 1; i < n; ++i)
+	{
+		InnerSolution cand = InnerSolve(
+			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seed_per_viewpoint,
+			home_joints, home_tcp_local, base, params, warm_order, max_solutions);
+		if (cand.weighted_cost < best.weighted_cost)
+			best = std::move(cand);
+	}
+	return best;
+}
+
 // seed_per_viewpoint for the next solve: each viewpoint warm-started from its own current joints,
 // falling back to `fallback` for any viewpoint not in the current tour.
 std::vector<std::vector<double>> SeedsFromSolution(
@@ -933,9 +960,10 @@ BaseGradientResult SolveBaseGradient(
 			}
 		};
 
-		InnerSolution cur = InnerSolve(
+		InnerSolution cur = BestOfNInnerSolve(
 			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
 			start_reference_joints, home_tcp_local, base, params, nullptr, params.max_solutions_per_candidate);
+		result.num_inner_solves += std::max(1, params.solve_restarts);
 
 		if (cur.tour.empty())
 		{
@@ -1021,9 +1049,10 @@ BaseGradientResult SolveBaseGradient(
 
 			// Commit with a full multi-branch solve at the accepted offset (cost <= the cheap
 			// probe's, so still an improvement); fall back to the probe if that regresses.
-			InnerSolution committed = InnerSolve(
+			InnerSolution committed = BestOfNInnerSolve(
 				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
 				start_reference_joints, home_tcp_local, b_new, params, &next.tour, params.max_solutions_per_candidate);
+			result.num_inner_solves += std::max(1, params.solve_restarts);
 			if (committed.weighted_cost > next.weighted_cost)
 				committed = std::move(next);
 
@@ -1234,7 +1263,7 @@ BaseGradientExperimentResult RunBaseGradientExperiment(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
 	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& start_reference_joints,
-	const BaseGradientParams& params, int num_random_directions, double min_probe_d_metric)
+	const BaseGradientParams& params, int num_random_directions, double min_probe_d_metric, int random_search_budget)
 {
 	BaseGradientExperimentResult out;
 	const int n = static_cast<int>(tour_tcp_poses_original.size());
@@ -1242,6 +1271,7 @@ BaseGradientExperimentResult RunBaseGradientExperiment(
 	out.seed = params.random_seed;
 	const double rot_scale = std::max(1e-6, params.rot_metric_scale);
 	out.rot_metric_scale = rot_scale;
+	const int sr = std::max(1, params.solve_restarts);
 
 	// b* for this seed -- one full descent.
 	RCLCPP_INFO(node->get_logger(), "[experiment] seed %d: descending for b* ...", params.random_seed);
@@ -1252,6 +1282,7 @@ BaseGradientExperimentResult RunBaseGradientExperiment(
 	out.descent_ok = descent.ok;
 	out.descent_offset = {descent.x, descent.y, descent.z, descent.roll, descent.pitch};
 	out.descent_reported_cost = descent.total_weighted_cost;
+	out.descent_inner_solves = descent.num_inner_solves;
 	const BaseOffset bstar{descent.x, descent.y, descent.z, descent.roll, descent.pitch};
 	out.descent_d_metric = MetricNorm(bstar, rot_scale);
 
@@ -1278,7 +1309,7 @@ BaseGradientExperimentResult RunBaseGradientExperiment(
 	const std::vector<std::vector<double>> cold_seeds(static_cast<size_t>(n), home);
 
 	auto cold_solve = [&](const BaseOffset& b) {
-		return InnerSolve(
+		return BestOfNInnerSolve(
 			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cold_seeds, home,
 			home_tcp_local, b, params, nullptr, params.max_solutions_per_candidate);
 	};
@@ -1297,7 +1328,7 @@ BaseGradientExperimentResult RunBaseGradientExperiment(
 	const std::vector<std::vector<double>> seeds0 = SeedsFromSolution(s0, home, static_cast<size_t>(n));
 	const std::vector<int> warm_order0 = s0.tour;
 	auto warm_solve = [&](const BaseOffset& b) {
-		return InnerSolve(
+		return BestOfNInnerSolve(
 			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds0, home,
 			home_tcp_local, b, params, &warm_order0, params.max_solutions_per_candidate);
 	};
@@ -1333,6 +1364,29 @@ BaseGradientExperimentResult RunBaseGradientExperiment(
 			out.rand_cold.back().honest_cost, out.rand_warm.back().honest_cost);
 	}
 
+	// exp 5: random search of matched budget -- offsets drawn uniformly in the bounds, cold
+	// best-of-N solve each. Budget <= 0 => same number of committed solves the descent used
+	// (descent_inner_solves / solve_restarts, i.e. iterations + 1); else that many points.
+	const int rs_points =
+		random_search_budget > 0 ? random_search_budget : std::max(1, out.descent_inner_solves / sr);
+	std::uniform_real_distribution<double> ux(params.bounds.x_min, params.bounds.x_max);
+	std::uniform_real_distribution<double> uy(params.bounds.y_min, params.bounds.y_max);
+	std::uniform_real_distribution<double> uz(params.bounds.z_min, params.bounds.z_max);
+	std::uniform_real_distribution<double> ur(params.bounds.roll_min, params.bounds.roll_max);
+	std::uniform_real_distribution<double> up(params.bounds.pitch_min, params.bounds.pitch_max);
+	out.random_search.reserve(static_cast<size_t>(rs_points));
+	double rs_best = std::numeric_limits<double>::max();
+	for (int i = 0; i < rs_points; ++i)
+	{
+		BaseOffset rb{ux(rng), uy(rng), uz(rng), ur(rng), up(rng)};
+		BaseGradientPointEval e = EvalPoint(cold_solve(rb), rb, rot_scale, params.unreachable_penalty);
+		out.random_search.push_back(e);
+		rs_best = std::min(rs_best, e.honest_cost);
+		RCLCPP_INFO(
+			node->get_logger(), "[experiment] exp5 random-search %d/%d: cold=%.3f  (best so far %.3f)", i + 1,
+			rs_points, e.honest_cost, rs_best);
+	}
+
 	SetObjectPose(planning_scene_monitor, object_pose_original);  // leave the scene as we found it
 	return out;
 }
@@ -1366,6 +1420,7 @@ void ExportBaseGradientExperimentResult(const std::string& output_dir, const Bas
 	descent["ok"] = result.descent_ok;
 	descent["d_metric"] = result.descent_d_metric;
 	descent["reported_weighted_cost"] = result.descent_reported_cost;
+	descent["inner_solves"] = result.descent_inner_solves;
 	Json::Value doff(Json::arrayValue);
 	for (double c : result.descent_offset)
 		doff.append(c);
@@ -1390,6 +1445,11 @@ void ExportBaseGradientExperimentResult(const std::string& output_dir, const Bas
 		exp4rand.append(eval_to_json(e));
 	exp4["random"] = exp4rand;
 	root["exp4_warm_placebo"] = exp4;
+
+	Json::Value exp5(Json::arrayValue);
+	for (const auto& e : result.random_search)
+		exp5.append(eval_to_json(e));
+	root["exp5_random_search"] = exp5;
 
 	const std::string json_path =
 		output_dir + "/base_gradient_experiment_seed" + std::to_string(result.seed) + ".json";
