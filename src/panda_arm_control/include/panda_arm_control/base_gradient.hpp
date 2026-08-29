@@ -47,6 +47,11 @@ struct BaseGradientParams
 	int ik_retries_per_point = 8;
 	int gtsp_two_opt_rounds = 5;
 
+	// Independent descents to escape local minima: restart 0 starts from initial_*, the rest from
+	// random offsets within `bounds` (seeded by random_seed). Each restart re-solves IK/GTSP cold.
+	// The lowest fully-reachable cost across all restarts is returned. 1 = single descent.
+	int num_restarts = 8;
+
 	// Gradient descent on the object offset. The descent direction is the unit-normalized negative
 	// gradient in a mixed metric where 1 rad of tip/tilt counts as `rot_metric_scale` meters, so
 	// `initial_step` / `min_step` are that blended displacement, not scaled by the raw gradient.
@@ -93,8 +98,9 @@ struct BaseGradientResult
 	double total_joint_path_length = 0.0;  // sum ||dq||_2 over tour edges (home -> first -> ...)
 	double total_weighted_cost = 0.0;	   // the full weighted objective at the returned offset
 
-	// {x, y, z, roll, pitch, weighted_cost} after each outer iteration -- for plotting the descent.
-	std::vector<std::array<double, 6>> history;
+	// {restart, x, y, z, roll, pitch, weighted_cost} after each outer iteration across all
+	// restarts -- for plotting the descents.
+	std::vector<std::array<double, 7>> history;
 };
 
 // Alternating minimization of tour joint travel over the object offset (x, y, z, roll, pitch):

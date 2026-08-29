@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <random>
 #include <thread>
 
 #include <Eigen/Dense>
@@ -111,6 +112,13 @@ OffsetVec ToOffsetVec(const BaseOffset& a, const BaseOffset& b)  // a - b, compo
 	OffsetVec v;
 	v << a.x - b.x, a.y - b.y, a.z - b.z, a.roll - b.roll, a.pitch - b.pitch;
 	return v;
+}
+
+BaseOffset RandomOffsetInBounds(std::mt19937& rng, const BaseGradientBounds& b)
+{
+	auto u = [&rng](double lo, double hi) { return std::uniform_real_distribution<double>(lo, hi)(rng); };
+	return {u(b.x_min, b.x_max), u(b.y_min, b.y_max), u(b.z_min, b.z_max), u(b.roll_min, b.roll_max),
+			u(b.pitch_min, b.pitch_max)};
 }
 
 // Mirrors real_cost_planning.cpp's AreJointSolutionsSimilar (combined L2, radians).
@@ -873,14 +881,8 @@ BaseGradientResult SolveBaseGradient(
 	BaseGradientResult result;
 	result.num_total = n;
 
-	BaseOffset base = ProjectToBounds(
-		{params.initial_x, params.initial_y, params.initial_z, params.initial_roll, params.initial_pitch},
-		params.bounds);
-	std::vector<BaseOffset> base_history{base};
 	const double rot_scale = std::max(1e-6, params.rot_metric_scale);  // m per rad, for the step metric
-
 	const std::vector<double>& fallback_seed = start_reference_joints;
-	std::vector<std::vector<double>> seeds(static_cast<size_t>(n), fallback_seed);
 
 	auto joint_path_len = [&](const InnerSolution& s) {
 		double len = 0.0;
@@ -893,168 +895,209 @@ BaseGradientResult SolveBaseGradient(
 		return len;
 	};
 
-	// Phi(base) at the starting pose.
-	InnerSolution cur = InnerSolve(
-		state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds, start_reference_joints,
-		home_tcp_local, base, params, nullptr);
-
-	bool have_best = false;
-	BaseOffset best_base = base;
-	InnerSolution best = cur;
-	double best_cost = std::numeric_limits<double>::max();
-	int stall_count = 0;  // consecutive iterations with <convergence_tolerance_cost relative gain
-
-	auto record = [&](const BaseOffset& b, const InnerSolution& s) {
-		result.history.push_back({b.x, b.y, b.z, b.roll, b.pitch, s.weighted_cost});
-		if (s.all_reachable && s.weighted_cost < best_cost)
-		{
-			have_best = true;
-			best_base = b;
-			best = s;
-			best_cost = s.weighted_cost;
-		}
+	struct RestartResult
+	{
+		BaseOffset offset;
+		InnerSolution sol;
+		double cost = std::numeric_limits<double>::max();
+		bool ok = false;  // fully reachable
 	};
 
-	if (cur.tour.empty())
-	{
-		RCLCPP_WARN(node->get_logger(), "no tour pose is reachable at the initial base -- nothing to optimize");
-	}
-	else
-	{
-		record(base, cur);
-		RCLCPP_INFO(
-			node->get_logger(),
-			"iteration 0 (initial): offset (%.4f, %.4f, %.4f) m  tip %.1f deg tilt %.1f deg  D=%.4f  reachable %d/%d",
-			base.x, base.y, base.z, base.roll * 180.0 / M_PI, base.pitch * 180.0 / M_PI, cur.weighted_cost,
-			cur.num_reachable, n);
-	}
+	// One full gradient descent from `base`, warm-started internally but starting IK/GTSP cold.
+	auto run_descent = [&](BaseOffset base, int restart_idx) -> RestartResult {
+		base = ProjectToBounds(base, params.bounds);
+		std::vector<BaseOffset> base_history{base};
+		std::vector<std::vector<double>> seeds(static_cast<size_t>(n), fallback_seed);
+		int stall_count = 0;
 
-	for (int outer = 0; outer < params.max_outer_iterations && rclcpp::ok() && !cur.tour.empty(); ++outer)
-	{
-		OffsetVec g = AnalyticGradient(
-			state, jmg, tool0_link, tour_tcp_poses_original, cur.tour, cur.joints, start_reference_joints,
-			home_tcp_local, base, params);
+		RestartResult rr;
+		rr.offset = base;
+		bool have_best = false;
 
-		if (params.fd_gradient_check)
-		{
-			OffsetVec g_fd = FiniteDifferenceGradient(
-				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cur.tour, cur.joints,
-				start_reference_joints, home_tcp_local, base, params);
-			RCLCPP_INFO(
-				node->get_logger(),
-				"  iteration %d gradient check [x y z roll pitch]:\n    analytic     (%+.4f %+.4f %+.4f %+.4f %+.4f)"
-				"\n    central-diff (%+.4f %+.4f %+.4f %+.4f %+.4f)",
-				outer + 1, g(0), g(1), g(2), g(3), g(4), g_fd(0), g_fd(1), g_fd(2), g_fd(3), g_fd(4));
-		}
-
-		// Descend in a metric where 1 rad of tip/tilt equals rot_scale meters: scale the two
-		// rotational gradient components, take the unit step there, then convert back.
-		OffsetVec g_u = g;
-		g_u(3) /= rot_scale;
-		g_u(4) /= rot_scale;
-		double gnorm = g_u.norm();
-		if (gnorm < 1e-6)
-		{
-			RCLCPP_INFO(node->get_logger(), "  gradient ~ 0 -- converged");
-			PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
-			break;
-		}
-
-		// Backtracking line search. `step` is a blended displacement in meters (rad counted via
-		// rot_scale). Every probe re-solves the full inner problem (Phi), warm-started from the
-		// current tour; a step is accepted only if Phi itself drops -> outer cost monotone.
-		OffsetVec dir_u = -g_u / gnorm;
-		seeds = SeedsFromSolution(cur, fallback_seed, static_cast<size_t>(n));
-		double step = params.initial_step;
-		bool accepted = false;
-		BaseOffset b_new = base;
-		InnerSolution next;
-		for (int ls = 0; ls < params.max_line_search_iters; ++ls)
-		{
-			BaseOffset cand = ProjectToBounds(
-				{base.x + step * dir_u(0), base.y + step * dir_u(1), base.z + step * dir_u(2),
-				 base.roll + step * dir_u(3) / rot_scale, base.pitch + step * dir_u(4) / rot_scale},
-				params.bounds);
-			InnerSolution probe = InnerSolve(
-				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
-				start_reference_joints, home_tcp_local, cand, params, &cur.tour);
-			if (probe.all_reachable && probe.weighted_cost <= cur.weighted_cost - params.armijo_c * step * gnorm)
+		auto record = [&](const BaseOffset& b, const InnerSolution& s) {
+			result.history.push_back(
+				{static_cast<double>(restart_idx), b.x, b.y, b.z, b.roll, b.pitch, s.weighted_cost});
+			if (s.all_reachable && s.weighted_cost < rr.cost)
 			{
-				accepted = true;
-				b_new = cand;
-				next = std::move(probe);
-				break;
+				have_best = true;
+				rr.offset = b;
+				rr.sol = s;
+				rr.cost = s.weighted_cost;
+				rr.ok = true;
 			}
-			step *= params.step_shrink;
-			if (step < params.min_step)
-				break;
-		}
+		};
 
-		if (!accepted)
+		InnerSolution cur = InnerSolve(
+			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
+			start_reference_joints, home_tcp_local, base, params, nullptr);
+
+		if (cur.tour.empty())
 		{
-			RCLCPP_INFO(node->get_logger(), "  no step reduces the tour cost -- converged");
-			PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
-			break;
+			RCLCPP_WARN(node->get_logger(), "restart %d: no tour pose reachable at the start offset", restart_idx + 1);
+			return rr;
 		}
 
-		OffsetVec du = ToOffsetVec(b_new, base);
-		du(3) *= rot_scale;
-		du(4) *= rot_scale;
-		double base_move = du.norm();
-		double rel_impr = (cur.weighted_cost - next.weighted_cost) / std::max(cur.weighted_cost, 1e-9);
-
-		base = b_new;
-		cur = std::move(next);
-		base_history.push_back(base);
 		record(base, cur);
-
 		RCLCPP_INFO(
 			node->get_logger(),
-			"iteration %d/%d: offset (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg  D=%.4f  reachable %d/%d  "
-			"|grad|=%.4f  step=%.4f",
-			outer + 1, params.max_outer_iterations, base.x, base.y, base.z, base.roll * 180.0 / M_PI,
-			base.pitch * 180.0 / M_PI, cur.weighted_cost, cur.num_reachable, n, gnorm, step);
+			"restart %d/%d iter 0: offset (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg  D=%.4f  reachable %d/%d",
+			restart_idx + 1, std::max(1, params.num_restarts), base.x, base.y, base.z, base.roll * 180.0 / M_PI,
+			base.pitch * 180.0 / M_PI, cur.weighted_cost, cur.num_reachable, n);
 
-		PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
-
-		if (rel_impr < params.convergence_tolerance_cost)
+		for (int outer = 0; outer < params.max_outer_iterations && rclcpp::ok() && !cur.tour.empty(); ++outer)
 		{
-			if (++stall_count >= std::max(1, params.patience))
+			OffsetVec g = AnalyticGradient(
+				state, jmg, tool0_link, tour_tcp_poses_original, cur.tour, cur.joints, start_reference_joints,
+				home_tcp_local, base, params);
+
+			if (params.fd_gradient_check)
 			{
+				OffsetVec g_fd = FiniteDifferenceGradient(
+					state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cur.tour,
+					cur.joints, start_reference_joints, home_tcp_local, base, params);
 				RCLCPP_INFO(
 					node->get_logger(),
-					"  %d consecutive iterations improved cost by <%.1e (relative) -- stopping early", stall_count,
-					params.convergence_tolerance_cost);
+					"    grad check [x y z roll pitch]  analytic (%+.4f %+.4f %+.4f %+.4f %+.4f)  "
+					"central-diff (%+.4f %+.4f %+.4f %+.4f %+.4f)",
+					g(0), g(1), g(2), g(3), g(4), g_fd(0), g_fd(1), g_fd(2), g_fd(3), g_fd(4));
+			}
+
+			// Descend in a metric where 1 rad of tip/tilt equals rot_scale meters.
+			OffsetVec g_u = g;
+			g_u(3) /= rot_scale;
+			g_u(4) /= rot_scale;
+			double gnorm = g_u.norm();
+			if (gnorm < 1e-6)
+			{
+				RCLCPP_INFO(node->get_logger(), "  restart %d: gradient ~ 0 -- converged", restart_idx + 1);
+				PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
+				break;
+			}
+
+			// Backtracking line search: every probe re-solves the full inner problem (Phi),
+			// warm-started from the current tour; a step is accepted only if Phi itself drops.
+			OffsetVec dir_u = -g_u / gnorm;
+			seeds = SeedsFromSolution(cur, fallback_seed, static_cast<size_t>(n));
+			double step = params.initial_step;
+			bool accepted = false;
+			BaseOffset b_new = base;
+			InnerSolution next;
+			for (int ls = 0; ls < params.max_line_search_iters; ++ls)
+			{
+				BaseOffset cand = ProjectToBounds(
+					{base.x + step * dir_u(0), base.y + step * dir_u(1), base.z + step * dir_u(2),
+					 base.roll + step * dir_u(3) / rot_scale, base.pitch + step * dir_u(4) / rot_scale},
+					params.bounds);
+				InnerSolution probe = InnerSolve(
+					state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
+					start_reference_joints, home_tcp_local, cand, params, &cur.tour);
+				if (probe.all_reachable && probe.weighted_cost <= cur.weighted_cost - params.armijo_c * step * gnorm)
+				{
+					accepted = true;
+					b_new = cand;
+					next = std::move(probe);
+					break;
+				}
+				step *= params.step_shrink;
+				if (step < params.min_step)
+					break;
+			}
+
+			if (!accepted)
+			{
+				RCLCPP_INFO(node->get_logger(), "  restart %d: no step reduces the tour cost -- converged", restart_idx + 1);
+				PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
+				break;
+			}
+
+			OffsetVec du = ToOffsetVec(b_new, base);
+			du(3) *= rot_scale;
+			du(4) *= rot_scale;
+			double base_move = du.norm();
+			double rel_impr = (cur.weighted_cost - next.weighted_cost) / std::max(cur.weighted_cost, 1e-9);
+
+			base = b_new;
+			cur = std::move(next);
+			base_history.push_back(base);
+			record(base, cur);
+
+			RCLCPP_INFO(
+				node->get_logger(),
+				"restart %d/%d iter %d/%d: offset (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg  D=%.4f  "
+				"reachable %d/%d  |grad|=%.4f  step=%.4f",
+				restart_idx + 1, std::max(1, params.num_restarts), outer + 1, params.max_outer_iterations, base.x,
+				base.y, base.z, base.roll * 180.0 / M_PI, base.pitch * 180.0 / M_PI, cur.weighted_cost,
+				cur.num_reachable, n, gnorm, step);
+
+			PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
+
+			if (rel_impr < params.convergence_tolerance_cost)
+			{
+				if (++stall_count >= std::max(1, params.patience))
+				{
+					RCLCPP_INFO(
+						node->get_logger(), "  restart %d: %d iterations with <%.1e relative gain -- stopping early",
+						restart_idx + 1, stall_count, params.convergence_tolerance_cost);
+					break;
+				}
+			}
+			else
+			{
+				stall_count = 0;
+			}
+
+			if (base_move < params.convergence_tolerance_offset && rel_impr < params.convergence_tolerance_cost)
+			{
+				RCLCPP_INFO(node->get_logger(), "  restart %d: offset settled -- converged", restart_idx + 1);
 				break;
 			}
 		}
-		else
-		{
-			stall_count = 0;
-		}
 
-		if (base_move < params.convergence_tolerance_offset && rel_impr < params.convergence_tolerance_cost)
+		if (!have_best)  // never fully reachable -- report the last state so callers see the closest attempt
 		{
-			RCLCPP_INFO(
-				node->get_logger(), "  offset move %.5f (blended), rel. cost improvement %.2e -- converged", base_move,
-				rel_impr);
-			break;
+			rr.offset = base;
+			rr.sol = cur;
+			rr.cost = cur.weighted_cost;
+			rr.ok = false;
 		}
+		return rr;
+	};
+
+	std::mt19937 rng(static_cast<unsigned int>(params.random_seed));
+	const int num_restarts = std::max(1, params.num_restarts);
+	RestartResult overall;
+
+	for (int r = 0; r < num_restarts && rclcpp::ok(); ++r)
+	{
+		BaseOffset start =
+			(r == 0) ? BaseOffset{params.initial_x, params.initial_y, params.initial_z, params.initial_roll,
+								  params.initial_pitch}
+					 : RandomOffsetInBounds(rng, params.bounds);
+		RestartResult rr = run_descent(start, r);
+
+		RCLCPP_INFO(
+			node->get_logger(),
+			"restart %d/%d done: D=%.4f (%s)  offset (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg%s",
+			r + 1, num_restarts, rr.cost, rr.ok ? "all reachable" : "partial", rr.offset.x, rr.offset.y, rr.offset.z,
+			rr.offset.roll * 180.0 / M_PI, rr.offset.pitch * 180.0 / M_PI,
+			(r > 0 && rr.ok && (!overall.ok || rr.cost < overall.cost)) ? "  <-- new best" : "");
+
+		if (r == 0 || (rr.ok && !overall.ok) || (rr.ok == overall.ok && rr.cost < overall.cost))
+			overall = rr;
 	}
 
-	const InnerSolution& fin = have_best ? best : cur;
-	BaseOffset fin_base = have_best ? best_base : base;
-	result.x = fin_base.x;
-	result.y = fin_base.y;
-	result.z = fin_base.z;
-	result.roll = fin_base.roll;
-	result.pitch = fin_base.pitch;
+	const InnerSolution& fin = overall.sol;
+	result.x = overall.offset.x;
+	result.y = overall.offset.y;
+	result.z = overall.offset.z;
+	result.roll = overall.offset.roll;
+	result.pitch = overall.offset.pitch;
 	result.tour_order = fin.tour;
 	result.joint_solutions = fin.joints;
 	result.total_weighted_cost = fin.weighted_cost;
 	result.total_joint_path_length = joint_path_len(fin);
 	result.num_reachable = fin.num_reachable;
-	result.ok = fin.all_reachable && fin.num_reachable == n;
+	result.ok = overall.ok;
 
 	// Leave the scene as we found it.
 	SetObjectPose(planning_scene_monitor, object_pose_original);
@@ -1112,12 +1155,13 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 	for (const auto& h : result.history)
 	{
 		Json::Value entry(Json::objectValue);
-		entry["x"] = h[0];
-		entry["y"] = h[1];
-		entry["z"] = h[2];
-		entry["roll"] = h[3];
-		entry["pitch"] = h[4];
-		entry["weighted_cost"] = h[5];
+		entry["restart"] = static_cast<int>(h[0]);
+		entry["x"] = h[1];
+		entry["y"] = h[2];
+		entry["z"] = h[3];
+		entry["roll"] = h[4];
+		entry["pitch"] = h[5];
+		entry["weighted_cost"] = h[6];
 		history.append(entry);
 	}
 	root["history"] = history;

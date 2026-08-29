@@ -97,6 +97,8 @@ def generate_launch_description():
         "bg_max_solutions_per_candidate": 3,
         "bg_ik_retries_per_point": 8,
         "bg_gtsp_two_opt_rounds": 5,
+        # Independent descents from random starts to escape local minima (1 = single descent).
+        "bg_num_restarts": 8,
         "bg_max_outer_iterations": 15,
         "bg_initial_step": 0.05,
         "bg_step_shrink": 0.5,
