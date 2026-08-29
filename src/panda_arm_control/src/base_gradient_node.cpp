@@ -46,6 +46,7 @@ struct Params
 	double bg_joint_distance_weight = 1.0;
 	double bg_cartesian_distance_weight = 0.0;
 	double bg_max_joint_deviation_weight = 1.0;
+	double bg_unreachable_penalty = 50.0;
 
 	int bg_max_solutions_per_candidate = 2;
 	int bg_ik_retries_per_point = 8;
@@ -217,6 +218,7 @@ private:
 		this->declareIfNeeded("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->declareIfNeeded("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->declareIfNeeded("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
+		this->declareIfNeeded("bg_unreachable_penalty", this->params.bg_unreachable_penalty);
 		this->declareIfNeeded("bg_max_solutions_per_candidate", this->params.bg_max_solutions_per_candidate);
 		this->declareIfNeeded("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
 		this->declareIfNeeded("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
@@ -271,6 +273,7 @@ private:
 		this->get_parameter("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->get_parameter("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->get_parameter("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
+		this->get_parameter("bg_unreachable_penalty", this->params.bg_unreachable_penalty);
 		this->get_parameter("bg_max_solutions_per_candidate", this->params.bg_max_solutions_per_candidate);
 		this->get_parameter("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
 		this->get_parameter("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
@@ -343,6 +346,7 @@ private:
 		bg.joint_distance_weight = this->params.bg_joint_distance_weight;
 		bg.cartesian_distance_weight = this->params.bg_cartesian_distance_weight;
 		bg.max_joint_deviation_weight = this->params.bg_max_joint_deviation_weight;
+		bg.unreachable_penalty = this->params.bg_unreachable_penalty;
 		bg.max_solutions_per_candidate = this->params.bg_max_solutions_per_candidate;
 		bg.ik_timeout = this->params.ik_timeout;
 		bg.ik_retries_per_point = this->params.bg_ik_retries_per_point;

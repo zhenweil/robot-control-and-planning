@@ -94,6 +94,8 @@ def generate_launch_description():
         "bg_joint_distance_weight": 1.0,
         "bg_cartesian_distance_weight": 0.0,
         "bg_max_joint_deviation_weight": 1.0,
+        # Cost added per viewpoint left unreachable -- keeps a partial solution from looking cheap.
+        "bg_unreachable_penalty": 50.0,
         "bg_max_solutions_per_candidate": 2,
         "bg_ik_retries_per_point": 8,
         "bg_gtsp_two_opt_rounds": 5,

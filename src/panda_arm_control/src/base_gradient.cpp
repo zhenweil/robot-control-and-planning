@@ -521,7 +521,8 @@ InnerSolution InnerSolve(
 	out.num_reachable = static_cast<int>(out.tour.size());
 	out.all_reachable = (out.num_reachable == out.num_total);
 	out.weighted_cost = TourWeightedCost(
-		base, out.tour, out.joints, tour_tcp_poses_original, home_joints, home_tcp_local, params);
+							base, out.tour, out.joints, tour_tcp_poses_original, home_joints, home_tcp_local, params) +
+		params.unreachable_penalty * (out.num_total - out.num_reachable);
 	return out;
 }
 
@@ -915,18 +916,18 @@ BaseGradientResult SolveBaseGradient(
 
 		RestartResult rr;
 		rr.offset = base;
-		bool have_best = false;
 
 		auto record = [&](const BaseOffset& b, const InnerSolution& s) {
 			result.history.push_back(
 				{static_cast<double>(restart_idx), b.x, b.y, b.z, b.roll, b.pitch, s.weighted_cost});
-			if (s.all_reachable && s.weighted_cost < rr.cost)
+			// weighted_cost already includes the unreachable penalty, so the lowest-cost solution
+			// is also the one with the best reachability -- no separate all_reachable gate needed.
+			if (s.weighted_cost < rr.cost)
 			{
-				have_best = true;
 				rr.offset = b;
 				rr.sol = s;
 				rr.cost = s.weighted_cost;
-				rr.ok = true;
+				rr.ok = s.all_reachable;
 			}
 		};
 
@@ -992,10 +993,12 @@ BaseGradientResult SolveBaseGradient(
 					 base.roll + step * dir_u(3) / rot_scale, base.pitch + step * dir_u(4) / rot_scale},
 					params.bounds);
 				// Cheap probe: one warm-started IK per pose, GTSP = plain TSP off the current order.
+				// weighted_cost carries the unreachable penalty, so a step that drops a viewpoint
+				// fails this test and one that regains a viewpoint passes it easily.
 				InnerSolution probe = InnerSolve(
 					state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
 					start_reference_joints, home_tcp_local, cand, params, &cur.tour, 1);
-				if (probe.all_reachable && probe.weighted_cost <= cur.weighted_cost - params.armijo_c * step * gnorm)
+				if (probe.weighted_cost <= cur.weighted_cost - params.armijo_c * step * gnorm)
 				{
 					accepted = true;
 					b_new = cand;
@@ -1019,7 +1022,7 @@ BaseGradientResult SolveBaseGradient(
 			InnerSolution committed = InnerSolve(
 				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
 				start_reference_joints, home_tcp_local, b_new, params, &next.tour, params.max_solutions_per_candidate);
-			if (!committed.all_reachable || committed.weighted_cost > next.weighted_cost)
+			if (committed.weighted_cost > next.weighted_cost)
 				committed = std::move(next);
 
 			OffsetVec du = ToOffsetVec(b_new, base);
@@ -1065,14 +1068,7 @@ BaseGradientResult SolveBaseGradient(
 			}
 		}
 
-		if (!have_best)  // never fully reachable -- report the last state so callers see the closest attempt
-		{
-			rr.offset = base;
-			rr.sol = cur;
-			rr.cost = cur.weighted_cost;
-			rr.ok = false;
-		}
-		return rr;
+		return rr;  // record() runs at least once, so rr holds this restart's best-cost solution
 	};
 
 	std::mt19937 rng(static_cast<unsigned int>(params.random_seed));
@@ -1088,12 +1084,14 @@ BaseGradientResult SolveBaseGradient(
 					 : RandomOffsetInBounds(rng, params.bounds);
 		RestartResult rr = run_descent(start, r);
 
-		bool improved = (r == 0) || (rr.ok && !overall.ok) || (rr.ok == overall.ok && rr.cost < overall.cost);
+		// weighted_cost carries the unreachable penalty, so lower cost == better (a fully-
+		// reachable result always beats a partial one).
+		bool improved = (r == 0) || (rr.cost < overall.cost);
 
 		RCLCPP_INFO(
 			node->get_logger(),
-			"restart %d/%d done: D=%.4f (%s)  offset (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg%s",
-			r + 1, num_restarts, rr.cost, rr.ok ? "all reachable" : "partial", rr.offset.x, rr.offset.y, rr.offset.z,
+			"restart %d/%d done: D=%.4f  reachable %d/%d  offset (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg%s",
+			r + 1, num_restarts, rr.cost, rr.sol.num_reachable, n, rr.offset.x, rr.offset.y, rr.offset.z,
 			rr.offset.roll * 180.0 / M_PI, rr.offset.pitch * 180.0 / M_PI, (r > 0 && improved) ? "  <-- new best" : "");
 
 		if (improved)
@@ -1116,7 +1114,9 @@ BaseGradientResult SolveBaseGradient(
 	result.pitch = overall.offset.pitch;
 	result.tour_order = fin.tour;
 	result.joint_solutions = fin.joints;
-	result.total_weighted_cost = fin.weighted_cost;
+	// Report the honest tour cost -- strip the unreachable penalty baked in for comparison.
+	result.total_weighted_cost =
+		fin.weighted_cost - params.unreachable_penalty * (fin.num_total - fin.num_reachable);
 	result.total_joint_path_length = joint_path_len(fin);
 	result.num_reachable = fin.num_reachable;
 	result.ok = overall.ok;

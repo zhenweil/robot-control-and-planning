@@ -39,6 +39,10 @@ struct BaseGradientParams
 	double joint_distance_weight = 1.0;
 	double cartesian_distance_weight = 0.0;
 	double max_joint_deviation_weight = 1.0;
+	// Added to weighted_cost for every viewpoint left unreachable at an offset. Without it a
+	// partial solution looks cheap only because it visits fewer poses; make it dominate any
+	// plausible tour cost so full reachability always wins.
+	double unreachable_penalty = 50.0;
 
 	// Inner GTSP (redundant-IK generalized TSP): each viewpoint offers up to this many distinct IK
 	// branches and the solver picks whichever ordering + branch minimizes reconfiguration. Used
