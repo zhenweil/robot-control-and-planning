@@ -139,6 +139,67 @@ BaseGradientResult SolveBaseGradient(
 // Writes base_gradient_result.json to output_dir.
 void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientResult& result);
 
+// ---------------------------------------------------------------------------------------------
+// Attribution experiment: is a descent's cost drop the object move, or just inner-solve
+// (IK / GTSP) variance and warm-starting? For one random seed (sweep the seed across processes
+// -- that sweep is "experiment 2"):
+//   exp 1  cold inner solve (IK from scratch, every seed = home, full multi-branch GTSP) at
+//          offset 0 and at the descent's recommended offset b*. Same solver effort both ends,
+//          only the object pose differs -- so any cost gap is the move, not warm-starting.
+//   exp 3  cold inner solve at `num_random_directions` random offsets whose mixed-metric
+//          magnitude equals |b*|. The optimized direction should beat random ones of equal size.
+//   exp 4  the same random offsets (and b*), warm inner solve -- IK seeds and GTSP order both
+//          warm-started from the offset-0 cold solution, one hop. Isolates the warm-start
+//          discount from the placement effect.
+// ---------------------------------------------------------------------------------------------
+struct BaseGradientPointEval
+{
+	double weighted_cost = 0.0;  // as the solver scores it (includes the unreachable penalty)
+	double honest_cost = 0.0;	 // penalty stripped -- comparable to BaseGradientResult::total_weighted_cost
+	int num_reachable = 0;
+	bool all_reachable = false;
+	std::array<double, 5> offset{{0, 0, 0, 0, 0}};  // x, y, z, roll, pitch actually evaluated (post-bounds)
+	double d_metric = 0.0;						   // sqrt(x^2+y^2+z^2 + (roll*s)^2 + (pitch*s)^2), s = rot_metric_scale
+};
+
+struct BaseGradientExperimentResult
+{
+	int seed = 0;
+	int num_total = 0;
+	double rot_metric_scale = 0.3;
+
+	bool descent_ok = false;
+	std::array<double, 5> descent_offset{{0, 0, 0, 0, 0}};
+	double descent_d_metric = 0.0;
+	double descent_reported_cost = 0.0;  // BaseGradientResult::total_weighted_cost from the internal descent
+
+	double probe_d_metric = 0.0;  // radius used for the exp 3 / 4 random offsets
+	bool probe_d_floored = false;  // true if |b*| was ~0 and probe_d_metric was raised to a floor
+
+	BaseGradientPointEval c0_cold;	  // exp 1
+	BaseGradientPointEval copt_cold;  // exp 1
+	BaseGradientPointEval copt_warm;  // exp 4 at b*
+	std::vector<BaseGradientPointEval> rand_cold;  // exp 3
+	std::vector<BaseGradientPointEval> rand_warm;  // exp 4 (offsets parallel to rand_cold)
+};
+
+// Runs the descent once (for b*), then exp 1 / 3 / 4 above. Restores the scene before returning.
+BaseGradientExperimentResult RunBaseGradientExperiment(
+	const rclcpp::Node::SharedPtr& node,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::string& group_name,
+	const Eigen::Vector3d& object_translation_original,
+	const Eigen::Matrix3d& object_rotation_original,
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
+	const std::vector<double>& start_reference_joints,
+	const BaseGradientParams& params,
+	int num_random_directions,
+	double min_probe_d_metric);
+
+// Writes base_gradient_experiment_seed<seed>.json to output_dir.
+void ExportBaseGradientExperimentResult(const std::string& output_dir, const BaseGradientExperimentResult& result);
+
 // Moves the registered "object" collision object to its nominal pose adjusted by the offset
 // T(x,y,z) * Ry(pitch) * Rx(roll) in the robot base frame. Only valid if that adjustment has
 // actually been realized on the physical object (re-fixtured to match).

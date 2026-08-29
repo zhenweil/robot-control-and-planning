@@ -71,6 +71,14 @@ struct Params
 	bool bg_fd_gradient_check = false;
 	double bg_fd_epsilon = 1e-4;
 
+	// Attribution experiment (see base_gradient.hpp): instead of the normal run, descend once for
+	// b*, then cold/warm re-solve the tour at b*, offset 0, and random offsets of the same size.
+	// Sweep random_seed across launches for the seed distribution. Writes
+	// base_gradient_experiment_seed<seed>.json and exits.
+	bool bg_experiment_mode = false;
+	int bg_experiment_num_random_dirs = 10;
+	double bg_experiment_min_probe_metric = 0.01;
+
 	double ik_timeout = 0.1;
 	int random_seed = 42;
 	double visualize_progress_delay_sec = 0.0;
@@ -164,6 +172,9 @@ public:
 
 		this->runPipeline();
 
+		if (!rclcpp::ok())  // experiment mode shuts down when done
+			return;
+
 		this->marker_timer = this->create_wall_timer(
 			std::chrono::seconds(2), [this]() { this->marker_pub->publish(this->marker_array); });
 	}
@@ -240,6 +251,9 @@ private:
 		this->declareIfNeeded("bg_patience", this->params.bg_patience);
 		this->declareIfNeeded("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
 		this->declareIfNeeded("bg_fd_epsilon", this->params.bg_fd_epsilon);
+		this->declareIfNeeded("bg_experiment_mode", this->params.bg_experiment_mode);
+		this->declareIfNeeded("bg_experiment_num_random_dirs", this->params.bg_experiment_num_random_dirs);
+		this->declareIfNeeded("bg_experiment_min_probe_metric", this->params.bg_experiment_min_probe_metric);
 		this->declareIfNeeded("ik_timeout", this->params.ik_timeout);
 		this->declareIfNeeded("random_seed", this->params.random_seed);
 		this->declareIfNeeded("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -297,6 +311,9 @@ private:
 		this->get_parameter("bg_patience", this->params.bg_patience);
 		this->get_parameter("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
 		this->get_parameter("bg_fd_epsilon", this->params.bg_fd_epsilon);
+		this->get_parameter("bg_experiment_mode", this->params.bg_experiment_mode);
+		this->get_parameter("bg_experiment_num_random_dirs", this->params.bg_experiment_num_random_dirs);
+		this->get_parameter("bg_experiment_min_probe_metric", this->params.bg_experiment_min_probe_metric);
 		this->get_parameter("ik_timeout", this->params.ik_timeout);
 		this->get_parameter("random_seed", this->params.random_seed);
 		this->get_parameter("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -376,6 +393,22 @@ private:
 		bg.fd_epsilon = this->params.bg_fd_epsilon;
 		bg.progress_pub = this->progress_marker_pub;
 		bg.visualize_progress_delay_sec = this->params.visualize_progress_delay_sec;
+
+		if (this->params.bg_experiment_mode)
+		{
+			RCLCPP_INFO(
+				this->get_logger(),
+				"Experiment mode (seed %d): attributing the descent's cost drop to the object move vs "
+				"inner-solve variance...",
+				this->params.random_seed);
+			BaseGradientExperimentResult exp = RunBaseGradientExperiment(
+				this->shared_from_this(), this->robot_model, local_scene, this->params.group_name,
+				object_translation_world, object_rotation_world, tour_tcp_poses, this->home_joint_values, bg,
+				this->params.bg_experiment_num_random_dirs, this->params.bg_experiment_min_probe_metric);
+			ExportBaseGradientExperimentResult(this->params.output_dir, exp);
+			rclcpp::shutdown();
+			return;
+		}
 
 		RCLCPP_INFO(
 			this->get_logger(), "Descending the object offset (x, y, z, tip, tilt) for a %zu-pose tour...",

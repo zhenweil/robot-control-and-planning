@@ -1201,6 +1201,207 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 	printf("Saved base gradient result JSON: %s\n", json_path.c_str());
 }
 
+// ---------------------------------------------------------------------------------------------
+// Attribution experiment (see base_gradient.hpp). Reuses the file-local InnerSolve / GTSP so the
+// costs here are exactly the descent's objective.
+// ---------------------------------------------------------------------------------------------
+namespace
+{
+
+double MetricNorm(const BaseOffset& o, double rot_scale)
+{
+	return std::sqrt(
+		o.x * o.x + o.y * o.y + o.z * o.z + (o.roll * rot_scale) * (o.roll * rot_scale) +
+		(o.pitch * rot_scale) * (o.pitch * rot_scale));
+}
+
+BaseGradientPointEval EvalPoint(const InnerSolution& s, const BaseOffset& at, double rot_scale, double unreachable_penalty)
+{
+	BaseGradientPointEval e;
+	e.weighted_cost = s.weighted_cost;
+	e.honest_cost = s.weighted_cost - unreachable_penalty * (s.num_total - s.num_reachable);
+	e.num_reachable = s.num_reachable;
+	e.all_reachable = s.all_reachable;
+	e.offset = {at.x, at.y, at.z, at.roll, at.pitch};
+	e.d_metric = MetricNorm(at, rot_scale);
+	return e;
+}
+
+}  // namespace
+
+BaseGradientExperimentResult RunBaseGradientExperiment(
+	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
+	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& start_reference_joints,
+	const BaseGradientParams& params, int num_random_directions, double min_probe_d_metric)
+{
+	BaseGradientExperimentResult out;
+	const int n = static_cast<int>(tour_tcp_poses_original.size());
+	out.num_total = n;
+	out.seed = params.random_seed;
+	const double rot_scale = std::max(1e-6, params.rot_metric_scale);
+	out.rot_metric_scale = rot_scale;
+
+	// b* for this seed -- one full descent.
+	RCLCPP_INFO(node->get_logger(), "[experiment] seed %d: descending for b* ...", params.random_seed);
+	BaseGradientResult descent = SolveBaseGradient(
+		node, robot_model, planning_scene_monitor, group_name, object_translation_original, object_rotation_original,
+		tour_tcp_poses_original, start_reference_joints, params);
+
+	out.descent_ok = descent.ok;
+	out.descent_offset = {descent.x, descent.y, descent.z, descent.roll, descent.pitch};
+	out.descent_reported_cost = descent.total_weighted_cost;
+	const BaseOffset bstar{descent.x, descent.y, descent.z, descent.roll, descent.pitch};
+	out.descent_d_metric = MetricNorm(bstar, rot_scale);
+
+	double probe_d = out.descent_d_metric;
+	if (probe_d < min_probe_d_metric)
+	{
+		probe_d = min_probe_d_metric;
+		out.probe_d_floored = true;
+		RCLCPP_WARN(
+			node->get_logger(), "[experiment] |b*| = %.5f is ~0; probing exp 3/4 at a floor radius of %.4f",
+			out.descent_d_metric, probe_d);
+	}
+	out.probe_d_metric = probe_d;
+
+	// Solve setup (mirrors SolveBaseGradient).
+	moveit::core::RobotState state(robot_model);
+	state.setToDefaultValues();
+	const moveit::core::JointModelGroup* jmg = state.getJointModelGroup(group_name);
+	state.setJointGroupPositions(jmg, start_reference_joints);
+	state.update();
+	const Eigen::Vector3d home_tcp_local = state.getGlobalLinkTransform("tool0").translation();
+	const Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
+	const std::vector<double>& home = start_reference_joints;
+	const std::vector<std::vector<double>> cold_seeds(static_cast<size_t>(n), home);
+
+	auto cold_solve = [&](const BaseOffset& b) {
+		return InnerSolve(
+			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cold_seeds, home,
+			home_tcp_local, b, params, nullptr, params.max_solutions_per_candidate);
+	};
+
+	// exp 1: cold solve at both endpoints.
+	const InnerSolution s0 = cold_solve(BaseOffset{});
+	out.c0_cold = EvalPoint(s0, BaseOffset{}, rot_scale, params.unreachable_penalty);
+	const InnerSolution sopt = cold_solve(bstar);
+	out.copt_cold = EvalPoint(sopt, bstar, rot_scale, params.unreachable_penalty);
+	RCLCPP_INFO(
+		node->get_logger(), "[experiment] exp1 cold: C0=%.3f (%d/%d)  Copt=%.3f (%d/%d)  dPhi=%+.3f", out.c0_cold.honest_cost,
+		out.c0_cold.num_reachable, n, out.copt_cold.honest_cost, out.copt_cold.num_reachable, n,
+		out.copt_cold.honest_cost - out.c0_cold.honest_cost);
+
+	// Warm start for exp 4: IK seeds + GTSP order from the offset-0 cold solution, single hop.
+	const std::vector<std::vector<double>> seeds0 = SeedsFromSolution(s0, home, static_cast<size_t>(n));
+	const std::vector<int> warm_order0 = s0.tour;
+	auto warm_solve = [&](const BaseOffset& b) {
+		return InnerSolve(
+			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds0, home,
+			home_tcp_local, b, params, &warm_order0, params.max_solutions_per_candidate);
+	};
+
+	out.copt_warm = EvalPoint(warm_solve(bstar), bstar, rot_scale, params.unreachable_penalty);
+
+	// exp 3 / 4: random offsets of the same mixed-metric magnitude as b*.
+	std::mt19937 rng(static_cast<unsigned int>(params.random_seed));
+	std::normal_distribution<double> gauss(0.0, 1.0);
+	const int k = std::max(0, num_random_directions);
+	out.rand_cold.reserve(static_cast<size_t>(k));
+	out.rand_warm.reserve(static_cast<size_t>(k));
+	for (int i = 0; i < k; ++i)
+	{
+		double v[5];
+		double sq = 0.0;
+		for (double& c : v)
+		{
+			c = gauss(rng);
+			sq += c * c;
+		}
+		const double inv = 1.0 / std::sqrt(std::max(sq, 1e-12));
+		// Unit vector in the mixed metric, scaled to probe_d, then mapped back to offset units.
+		BaseOffset rb = ProjectToBounds(
+			{probe_d * v[0] * inv, probe_d * v[1] * inv, probe_d * v[2] * inv, probe_d * v[3] * inv / rot_scale,
+			 probe_d * v[4] * inv / rot_scale},
+			params.bounds);
+
+		out.rand_cold.push_back(EvalPoint(cold_solve(rb), rb, rot_scale, params.unreachable_penalty));
+		out.rand_warm.push_back(EvalPoint(warm_solve(rb), rb, rot_scale, params.unreachable_penalty));
+		RCLCPP_INFO(
+			node->get_logger(), "[experiment] exp3/4 dir %d/%d: cold=%.3f  warm=%.3f", i + 1, k,
+			out.rand_cold.back().honest_cost, out.rand_warm.back().honest_cost);
+	}
+
+	SetObjectPose(planning_scene_monitor, object_pose_original);  // leave the scene as we found it
+	return out;
+}
+
+void ExportBaseGradientExperimentResult(const std::string& output_dir, const BaseGradientExperimentResult& result)
+{
+	std::filesystem::create_directories(output_dir);
+
+	auto eval_to_json = [](const BaseGradientPointEval& e) {
+		Json::Value j;
+		j["weighted_cost"] = e.weighted_cost;
+		j["honest_cost"] = e.honest_cost;
+		j["num_reachable"] = e.num_reachable;
+		j["all_reachable"] = e.all_reachable;
+		j["d_metric"] = e.d_metric;
+		Json::Value off(Json::arrayValue);
+		for (double c : e.offset)
+			off.append(c);
+		j["offset"] = off;
+		return j;
+	};
+
+	Json::Value root;
+	root["seed"] = result.seed;
+	root["num_total"] = result.num_total;
+	root["rot_metric_scale"] = result.rot_metric_scale;
+	root["probe_d_metric"] = result.probe_d_metric;
+	root["probe_d_floored"] = result.probe_d_floored;
+
+	Json::Value descent(Json::objectValue);
+	descent["ok"] = result.descent_ok;
+	descent["d_metric"] = result.descent_d_metric;
+	descent["reported_weighted_cost"] = result.descent_reported_cost;
+	Json::Value doff(Json::arrayValue);
+	for (double c : result.descent_offset)
+		doff.append(c);
+	descent["offset"] = doff;
+	root["descent"] = descent;
+
+	Json::Value exp1(Json::objectValue);
+	exp1["c0_cold"] = eval_to_json(result.c0_cold);
+	exp1["copt_cold"] = eval_to_json(result.copt_cold);
+	exp1["delta_honest"] = result.copt_cold.honest_cost - result.c0_cold.honest_cost;
+	root["exp1_cold_endpoints"] = exp1;
+
+	Json::Value exp3(Json::arrayValue);
+	for (const auto& e : result.rand_cold)
+		exp3.append(eval_to_json(e));
+	root["exp3_cold_placebo"] = exp3;
+
+	Json::Value exp4(Json::objectValue);
+	exp4["copt_warm"] = eval_to_json(result.copt_warm);
+	Json::Value exp4rand(Json::arrayValue);
+	for (const auto& e : result.rand_warm)
+		exp4rand.append(eval_to_json(e));
+	exp4["random"] = exp4rand;
+	root["exp4_warm_placebo"] = exp4;
+
+	const std::string json_path =
+		output_dir + "/base_gradient_experiment_seed" + std::to_string(result.seed) + ".json";
+	std::ofstream json_file(json_path);
+	Json::StreamWriterBuilder writer_builder;
+	writer_builder["indentation"] = "    ";
+	std::unique_ptr<Json::StreamWriter> writer(writer_builder.newStreamWriter());
+	writer->write(root, &json_file);
+
+	printf("Saved base gradient experiment JSON: %s\n", json_path.c_str());
+}
+
 void ApplyObjectOffsetToScene(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original, double x,

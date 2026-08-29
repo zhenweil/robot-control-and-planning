@@ -58,6 +58,43 @@ def generate_launch_description():
     )
     random_seed = LaunchConfiguration("random_seed")
 
+    experiment_mode_arg = DeclareLaunchArgument(
+        "experiment_mode",
+        default_value="false",
+        description="Instead of the normal run: descend once for b*, then cold/warm re-solve the "
+        "tour at b*, offset 0, and random offsets of the same size, to attribute the descent's "
+        "cost drop to the object move vs inner-solve (IK/GTSP) variance. Writes "
+        "base_gradient_experiment_seed<random_seed>.json to output_dir and exits. Sweep "
+        "random_seed across launches (scripts/run_base_gradient_experiments.py does this).",
+    )
+    experiment_mode = ParameterValue(LaunchConfiguration("experiment_mode"), value_type=bool)
+
+    experiment_num_random_dirs_arg = DeclareLaunchArgument(
+        "experiment_num_random_dirs",
+        default_value="10",
+        description="experiment_mode: how many random offsets (of magnitude |b*|) to probe for "
+        "experiments 3 and 4.",
+    )
+    experiment_num_random_dirs = ParameterValue(
+        LaunchConfiguration("experiment_num_random_dirs"), value_type=int
+    )
+
+    output_dir_arg = DeclareLaunchArgument(
+        "output_dir",
+        default_value="/tmp/base_gradient_output",
+        description="Where base_gradient_result.json (or, in experiment_mode, "
+        "base_gradient_experiment_seed<seed>.json) is written.",
+    )
+    output_dir = LaunchConfiguration("output_dir")
+
+    tour_input_dir_arg = DeclareLaunchArgument(
+        "tour_input_dir",
+        default_value="/tmp/viewpoint_planner_output",
+        description="Directory a prior viewpoint_planner_* run exported selected_robot_poses.json "
+        "into -- the tour this node optimizes a base offset for.",
+    )
+    tour_input_dir = LaunchConfiguration("tour_input_dir")
+
     moveit_config = (
         MoveItConfigsBuilder("panda", package_name="panda_arm_moveit")
         .robot_description(file_path="config/panda.urdf.xacro")
@@ -75,8 +112,8 @@ def generate_launch_description():
         "group_name": "panda_arm",
         # Where a prior viewpoint_planner_* run exported the ordered tour's
         # selected_robot_poses.json -- this node's input.
-        "tour_input_dir": "/tmp/viewpoint_planner_output",
-        "output_dir": "/tmp/base_gradient_output",
+        "tour_input_dir": tour_input_dir,
+        "output_dir": output_dir,
         # Object offset search bounds in the robot base frame: translation (m) + tip roll / tilt
         # pitch (rad). Yaw is excluded (redundant with joint 1). Realized by re-fixturing the
         # object, not moving the arm.
@@ -128,6 +165,9 @@ def generate_launch_description():
         "bg_patience": 3,
         "bg_fd_gradient_check": fd_gradient_check,
         "bg_fd_epsilon": 1e-4,
+        "bg_experiment_mode": experiment_mode,
+        "bg_experiment_num_random_dirs": experiment_num_random_dirs,
+        "bg_experiment_min_probe_metric": 0.01,
         "ik_timeout": 0.1,
         "random_seed": ParameterValue(random_seed, value_type=int),
         "visualize_progress_delay_sec": visualize_progress_delay_sec,
@@ -173,6 +213,10 @@ def generate_launch_description():
             visualize_progress_delay_sec_arg,
             fd_gradient_check_arg,
             random_seed_arg,
+            experiment_mode_arg,
+            experiment_num_random_dirs_arg,
+            output_dir_arg,
+            tour_input_dir_arg,
             base_gradient_node,
             rviz_node,
         ]
