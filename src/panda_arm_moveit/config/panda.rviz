@@ -194,6 +194,30 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /base_placement_progress_markers
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: BaseGradient
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /base_gradient_markers
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: BaseGradientProgress
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /base_gradient_progress_markers
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

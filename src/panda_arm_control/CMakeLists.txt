@@ -78,7 +78,15 @@ add_executable(base_placement
 	src/base_placement_node.cpp
 	)
 
-foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp base_placement)
+add_executable(base_gradient
+	src/base_gradient.cpp
+	src/base_placement.cpp
+	src/real_cost_planning.cpp
+	src/viewpoint_io.cpp
+	src/base_gradient_node.cpp
+	)
+
+foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp base_placement base_gradient)
 	target_include_directories(${viewpoint_planner_target} PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		)
@@ -110,7 +118,7 @@ install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp base_placement
+install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp base_placement base_gradient
 	DESTINATION lib/${PROJECT_NAME}
 	)
 
