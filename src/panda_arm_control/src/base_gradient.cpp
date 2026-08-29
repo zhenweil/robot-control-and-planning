@@ -25,18 +25,18 @@ namespace
 // "Mirrors real_cost_planning.cpp" note in base_placement.cpp).
 // ---------------------------------------------------------------------------------------------
 
-struct BasePose2D
+// Base offset is a pure translation (x, y, z) -- see BaseGradientBounds doc for why yaw is out.
+struct BaseOffset
 {
 	double x = 0.0;
 	double y = 0.0;
-	double yaw = 0.0;
+	double z = 0.0;
 };
 
-Eigen::Isometry3d MakeBaseTransform(const BasePose2D& p)
+Eigen::Isometry3d MakeBaseTransform(const BaseOffset& p)
 {
 	Eigen::Isometry3d t = Eigen::Isometry3d::Identity();
-	t.translation() = Eigen::Vector3d(p.x, p.y, 0.0);
-	t.linear() = Eigen::AngleAxisd(p.yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+	t.translation() = Eigen::Vector3d(p.x, p.y, p.z);
 	return t;
 }
 
@@ -86,27 +86,11 @@ void SetObjectPose(
 	locked_scene->processCollisionObjectMsg(obj);
 }
 
-double WrapAngle(double a)
-{
-	while (a > M_PI)
-		a -= 2.0 * M_PI;
-	while (a < -M_PI)
-		a += 2.0 * M_PI;
-	return a;
-}
-
-bool IsFullYawRange(const BaseGradientBounds& b)
-{
-	return (b.yaw_max - b.yaw_min) >= 2.0 * M_PI - 1e-6;
-}
-
-BasePose2D ProjectToBounds(BasePose2D p, const BaseGradientBounds& b)
+BaseOffset ProjectToBounds(BaseOffset p, const BaseGradientBounds& b)
 {
 	p.x = std::clamp(p.x, b.x_min, b.x_max);
 	p.y = std::clamp(p.y, b.y_min, b.y_max);
-	p.yaw = WrapAngle(p.yaw);
-	if (!IsFullYawRange(b))
-		p.yaw = std::clamp(p.yaw, b.yaw_min, b.yaw_max);
+	p.z = std::clamp(p.z, b.z_min, b.z_max);
 	return p;
 }
 
@@ -166,7 +150,7 @@ std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
-	const std::vector<std::vector<double>>& seed_per_viewpoint, const BasePose2D& base, const BaseGradientParams& params)
+	const std::vector<std::vector<double>>& seed_per_viewpoint, const BaseOffset& base, const BaseGradientParams& params)
 {
 	Eigen::Isometry3d base_inv = MakeBaseTransform(base).inverse();
 	SetObjectPose(planning_scene_monitor, base_inv * object_pose_original);
@@ -382,7 +366,7 @@ struct GtspSolution
 // and the cheaper result is kept -- so a base step can never make the tour worse just because the
 // heuristic re-ordered it, which is what caused the cost to bounce between iterations.
 GtspSolution RunGtsp(
-	const std::vector<std::vector<std::vector<double>>>& branches, const BasePose2D& base,
+	const std::vector<std::vector<std::vector<double>>>& branches, const BaseOffset& base,
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& home_joints,
 	const Eigen::Vector3d& home_tcp_local, const BaseGradientParams& params,
 	const std::vector<int>* warm_order = nullptr)
@@ -455,7 +439,7 @@ GtspSolution RunGtsp(
 // ---------------------------------------------------------------------------------------------
 
 double TourWeightedCost(
-	const BasePose2D& base, const std::vector<int>& tour, const std::vector<std::vector<double>>& joints,
+	const BaseOffset& base, const std::vector<int>& tour, const std::vector<std::vector<double>>& joints,
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& home_joints,
 	const Eigen::Vector3d& home_tcp_local, const BaseGradientParams& params)
 {
@@ -491,7 +475,7 @@ InnerSolution InnerSolve(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
 	const std::vector<std::vector<double>>& seed_per_viewpoint, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BasePose2D& base, const BaseGradientParams& params,
+	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params,
 	const std::vector<int>* warm_order)
 {
 	std::vector<std::vector<std::vector<double>>> branches = CollectIkSolutions(
@@ -538,7 +522,7 @@ TrackResult TrackTour(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
 	const std::vector<int>& tour, const std::vector<std::vector<double>>& seeds, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BasePose2D& base, const BaseGradientParams& params)
+	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params)
 {
 	Eigen::Isometry3d base_inv = MakeBaseTransform(base).inverse();
 	SetObjectPose(planning_scene_monitor, base_inv * object_pose_original);
@@ -584,16 +568,15 @@ TrackResult TrackTour(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Analytic gradient of the weighted tour cost w.r.t. the base pose (x, y, yaw).
+// Analytic gradient of the weighted tour cost w.r.t. the base offset (x, y, z).
 //
-// A fixed world target T_i, seen from base b, sits at p_i^b = Rz(yaw)^T (p_i^w - c). The tracking
-// config q_i(b) satisfies FK(q_i) = T_i^b; with minimum-norm redundancy resolution
+// The offset is a pure translation c, so a fixed world target T_i seen from the base sits at
+// p_i^b = p_i^w - c with unchanged orientation. The tracking config q_i(b) satisfies
+// FK(q_i) = T_i^b; with minimum-norm redundancy resolution
 //   dq_i/db = J_i^#  S_i          (J_i^# = damped pinv of the base-frame tool0 Jacobian)
 // where S_i (6x3, [v; w] order to match RobotState::getJacobian) is the target twist induced by
-// each base parameter:
-//   d/dx :  [ Rz(yaw)^T (-e_x) ; 0 ]
-//   d/dy :  [ Rz(yaw)^T (-e_y) ; 0 ]
-//   d/dyaw: [ (p_iy^b, -p_ix^b, 0) ; (0, 0, -1) ]
+// each offset component -- pure translation, no angular part:
+//   S_i = [ -I_3 ; 0_3 ]
 // Edge cost d(q_a, q_b) then contributes (dd/dq_a) dq_a/db + (dd/dq_b) dq_b/db, home configs being
 // base-independent (their sensitivities are zero).
 // ---------------------------------------------------------------------------------------------
@@ -602,12 +585,15 @@ Eigen::Vector3d AnalyticGradient(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const moveit::core::LinkModel* tool0_link, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
 	const std::vector<int>& tour, const std::vector<std::vector<double>>& joints, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BasePose2D& base, const BaseGradientParams& params)
+	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params)
 {
 	const size_t n = tour.size();
-	Eigen::Matrix3d RzT = Eigen::AngleAxisd(base.yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix().transpose();
 	Eigen::Isometry3d base_inv = MakeBaseTransform(base).inverse();
 	const double lambda2 = params.jacobian_damping * params.jacobian_damping;
+
+	// Target twist sensitivity to the base translation: pure -I on the linear rows.
+	Eigen::Matrix<double, 6, 3> S = Eigen::Matrix<double, 6, 3>::Zero();
+	S.topRows<3>() = -Eigen::Matrix3d::Identity();
 
 	// Per visit position: dq/db (dof x 3) and dp/db (3 x 3).
 	std::vector<Eigen::MatrixXd> dq_db(n);
@@ -615,19 +601,10 @@ Eigen::Vector3d AnalyticGradient(
 
 	for (size_t k = 0; k < n; ++k)
 	{
-		Eigen::Vector3d p_local = (base_inv * tour_tcp_poses_original[tour[k]]).translation();
-
 		state.setJointGroupPositions(jmg, joints[k]);
 		state.update();
 		Eigen::MatrixXd J;  // 6 x dof, [linear; angular] in the model (base) frame
 		state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
-
-		Eigen::Matrix<double, 6, 3> S = Eigen::Matrix<double, 6, 3>::Zero();
-		S.block<3, 1>(0, 0) = RzT * (-Eigen::Vector3d::UnitX());
-		S.block<3, 1>(0, 1) = RzT * (-Eigen::Vector3d::UnitY());
-		S(0, 2) = p_local.y();
-		S(1, 2) = -p_local.x();
-		S(5, 2) = -1.0;
 
 		Eigen::MatrixXd JJt = J * J.transpose();
 		JJt.diagonal().array() += lambda2;
@@ -688,15 +665,15 @@ Eigen::Vector3d FiniteDifferenceGradient(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
 	const std::vector<int>& tour, const std::vector<std::vector<double>>& seeds, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BasePose2D& base, const BaseGradientParams& params)
+	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params)
 {
 	const double eps = params.fd_epsilon;
 	Eigen::Vector3d g = Eigen::Vector3d::Constant(std::nan(""));
 	for (int axis = 0; axis < 3; ++axis)
 	{
-		BasePose2D bp = base, bm = base;
-		double* pp = axis == 0 ? &bp.x : axis == 1 ? &bp.y : &bp.yaw;
-		double* pm = axis == 0 ? &bm.x : axis == 1 ? &bm.y : &bm.yaw;
+		BaseOffset bp = base, bm = base;
+		double* pp = axis == 0 ? &bp.x : axis == 1 ? &bp.y : &bp.z;
+		double* pm = axis == 0 ? &bm.x : axis == 1 ? &bm.y : &bm.z;
 		*pp += eps;
 		*pm -= eps;
 		TrackResult rp = TrackTour(
@@ -720,8 +697,8 @@ Eigen::Vector3d FiniteDifferenceGradient(
 // /base_gradient_markers (BuildBaseGradientMarkerArray). Every marker below uses a fixed id per
 // namespace so each publish overwrites the last instead of stacking ghosts across iterations.
 void PublishProgress(
-	const rclcpp::Node::SharedPtr& node, const BaseGradientParams& params, const std::vector<BasePose2D>& base_history,
-	const Eigen::Vector3d& neg_grad_xy, const BasePose2D& base, double weighted_cost)
+	const rclcpp::Node::SharedPtr& node, const BaseGradientParams& params, const std::vector<BaseOffset>& base_history,
+	const Eigen::Vector3d& neg_grad, const BaseOffset& base, double weighted_cost)
 {
 	if (!params.progress_pub)
 		return;
@@ -734,18 +711,13 @@ void PublishProgress(
 	base_marker.header.stamp = stamp;
 	base_marker.ns = "base_gradient_current";
 	base_marker.id = 0;
-	base_marker.type = visualization_msgs::msg::Marker::CYLINDER;
+	base_marker.type = visualization_msgs::msg::Marker::SPHERE;
 	base_marker.action = visualization_msgs::msg::Marker::ADD;
 	base_marker.pose.position.x = base.x;
 	base_marker.pose.position.y = base.y;
-	base_marker.pose.position.z = 0.015;
-	Eigen::Quaterniond bq(Eigen::AngleAxisd(base.yaw, Eigen::Vector3d::UnitZ()));
-	base_marker.pose.orientation.x = bq.x();
-	base_marker.pose.orientation.y = bq.y();
-	base_marker.pose.orientation.z = bq.z();
-	base_marker.pose.orientation.w = bq.w();
-	base_marker.scale.x = base_marker.scale.y = 0.05;
-	base_marker.scale.z = 0.03;
+	base_marker.pose.position.z = base.z;
+	base_marker.pose.orientation.w = 1.0;
+	base_marker.scale.x = base_marker.scale.y = base_marker.scale.z = 0.04;
 	base_marker.color.r = 1.0f;
 	base_marker.color.g = 0.85f;
 	base_marker.color.a = 1.0f;
@@ -788,7 +760,7 @@ void PublishProgress(
 			geometry_msgs::msg::Point pt;
 			pt.x = base_history[h].x;
 			pt.y = base_history[h].y;
-			pt.z = 0.012;
+			pt.z = base_history[h].z;
 			trail.points.push_back(pt);
 			if (h + 1 < base_history.size())
 				crumbs.points.push_back(pt);
@@ -797,9 +769,9 @@ void PublishProgress(
 		markers.markers.push_back(crumbs);
 	}
 
-	// -grad(D) direction (xy) as an arrow from the current base.
-	double gxy = neg_grad_xy.head<2>().norm();
-	if (gxy > 1e-9)
+	// -grad(D) as a 3D arrow from the current base offset.
+	double gnorm = neg_grad.norm();
+	if (gnorm > 1e-9)
 	{
 		visualization_msgs::msg::Marker arrow;
 		arrow.header.frame_id = "world";
@@ -816,14 +788,14 @@ void PublishProgress(
 		arrow.color.g = 0.5f;
 		arrow.color.b = 1.0f;
 		arrow.color.a = 0.95f;
+		double scale = 0.15 / gnorm;  // fixed on-screen length regardless of magnitude
 		geometry_msgs::msg::Point tail, tip;
 		tail.x = base.x;
 		tail.y = base.y;
-		tail.z = 0.02;
-		double scale = 0.15 / gxy;  // fixed on-screen length regardless of magnitude
-		tip.x = base.x + neg_grad_xy.x() * scale;
-		tip.y = base.y + neg_grad_xy.y() * scale;
-		tip.z = 0.02;
+		tail.z = base.z;
+		tip.x = base.x + neg_grad.x() * scale;
+		tip.y = base.y + neg_grad.y() * scale;
+		tip.z = base.z + neg_grad.z() * scale;
 		arrow.points.push_back(tail);
 		arrow.points.push_back(tip);
 		markers.markers.push_back(arrow);
@@ -838,7 +810,7 @@ void PublishProgress(
 	text.action = visualization_msgs::msg::Marker::ADD;
 	text.pose.position.x = base.x;
 	text.pose.position.y = base.y;
-	text.pose.position.z = 0.09;
+	text.pose.position.z = base.z + 0.08;
 	text.pose.orientation.w = 1.0;
 	text.scale.z = 0.03;
 	text.color.r = text.color.g = text.color.b = 1.0f;
@@ -881,8 +853,8 @@ BaseGradientResult SolveBaseGradient(
 	BaseGradientResult result;
 	result.num_total = n;
 
-	BasePose2D base = ProjectToBounds({params.initial_x, params.initial_y, params.initial_yaw}, params.bounds);
-	std::vector<BasePose2D> base_history{base};
+	BaseOffset base = ProjectToBounds({params.initial_x, params.initial_y, params.initial_z}, params.bounds);
+	std::vector<BaseOffset> base_history{base};
 
 	const std::vector<double>& fallback_seed = start_reference_joints;
 	std::vector<std::vector<double>> seeds(static_cast<size_t>(n), fallback_seed);
@@ -904,13 +876,13 @@ BaseGradientResult SolveBaseGradient(
 		home_tcp_local, base, params, nullptr);
 
 	bool have_best = false;
-	BasePose2D best_base = base;
+	BaseOffset best_base = base;
 	InnerSolution best = cur;
 	double best_cost = std::numeric_limits<double>::max();
 	int stall_count = 0;  // consecutive iterations with <convergence_tolerance_cost relative gain
 
-	auto record = [&](const BasePose2D& b, const InnerSolution& s) {
-		result.history.push_back({b.x, b.y, b.yaw, s.weighted_cost});
+	auto record = [&](const BaseOffset& b, const InnerSolution& s) {
+		result.history.push_back({b.x, b.y, b.z, s.weighted_cost});
 		if (s.all_reachable && s.weighted_cost < best_cost)
 		{
 			have_best = true;
@@ -928,8 +900,8 @@ BaseGradientResult SolveBaseGradient(
 	{
 		record(base, cur);
 		RCLCPP_INFO(
-			node->get_logger(), "iteration 0 (initial): base (%.4f, %.4f, %.4f rad)  D=%.4f  reachable %d/%d",
-			base.x, base.y, base.yaw, cur.weighted_cost, cur.num_reachable, n);
+			node->get_logger(), "iteration 0 (initial): base (%.4f, %.4f, %.4f) m  D=%.4f  reachable %d/%d",
+			base.x, base.y, base.z, cur.weighted_cost, cur.num_reachable, n);
 	}
 
 	for (int outer = 0; outer < params.max_outer_iterations && rclcpp::ok() && !cur.tour.empty(); ++outer)
@@ -949,10 +921,6 @@ BaseGradientResult SolveBaseGradient(
 				outer + 1, g.x(), g.y(), g.z(), g_fd.x(), g_fd.y(), g_fd.z());
 		}
 
-		// Base yaw is redundant with joint 1 for joint travel -- freeze it unless asked otherwise.
-		if (!params.optimize_yaw)
-			g.z() = 0.0;
-
 		double gnorm = g.norm();
 		if (gnorm < 1e-6)
 		{
@@ -962,19 +930,19 @@ BaseGradientResult SolveBaseGradient(
 		}
 
 		// Backtracking line search along the unit descent direction. `step` is an actual base
-		// displacement (m on x/y, rad on yaw). Every probe re-solves the full inner problem
-		// (Phi), warm-started from the current tour, and a step is accepted only if Phi itself
-		// drops -- so the outer cost is monotone non-increasing, unlike testing a stale tour.
+		// displacement in meters. Every probe re-solves the full inner problem (Phi), warm-started
+		// from the current tour, and a step is accepted only if Phi itself drops -- so the outer
+		// cost is monotone non-increasing, unlike testing a stale tour.
 		Eigen::Vector3d dir = -g / gnorm;
 		seeds = SeedsFromSolution(cur, fallback_seed, static_cast<size_t>(n));
 		double step = params.initial_step;
 		bool accepted = false;
-		BasePose2D b_new = base;
+		BaseOffset b_new = base;
 		InnerSolution next;
 		for (int ls = 0; ls < params.max_line_search_iters; ++ls)
 		{
-			BasePose2D cand = ProjectToBounds(
-				{base.x + step * dir.x(), base.y + step * dir.y(), base.yaw + step * dir.z()}, params.bounds);
+			BaseOffset cand = ProjectToBounds(
+				{base.x + step * dir.x(), base.y + step * dir.y(), base.z + step * dir.z()}, params.bounds);
 			InnerSolution probe = InnerSolve(
 				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
 				start_reference_joints, home_tcp_local, cand, params, &cur.tour);
@@ -999,7 +967,7 @@ BaseGradientResult SolveBaseGradient(
 
 		double dx = b_new.x - base.x;
 		double dy = b_new.y - base.y;
-		double dyaw = WrapAngle(b_new.yaw - base.yaw);
+		double dz = b_new.z - base.z;
 		double rel_impr = (cur.weighted_cost - next.weighted_cost) / std::max(cur.weighted_cost, 1e-9);
 
 		base = b_new;
@@ -1009,8 +977,8 @@ BaseGradientResult SolveBaseGradient(
 
 		RCLCPP_INFO(
 			node->get_logger(),
-			"iteration %d/%d: base (%.4f, %.4f, %.4f rad)  D=%.4f  reachable %d/%d  |grad|=%.4f  step=%.4f",
-			outer + 1, params.max_outer_iterations, base.x, base.y, base.yaw, cur.weighted_cost, cur.num_reachable, n,
+			"iteration %d/%d: base (%.4f, %.4f, %.4f) m  D=%.4f  reachable %d/%d  |grad|=%.4f  step=%.4f",
+			outer + 1, params.max_outer_iterations, base.x, base.y, base.z, cur.weighted_cost, cur.num_reachable, n,
 			gnorm, step);
 
 		PublishProgress(node, params, base_history, -g, base, cur.weighted_cost);
@@ -1031,21 +999,20 @@ BaseGradientResult SolveBaseGradient(
 			stall_count = 0;
 		}
 
-		if (std::hypot(dx, dy) < params.convergence_tolerance_xy && std::abs(dyaw) < params.convergence_tolerance_yaw &&
-			rel_impr < params.convergence_tolerance_cost)
+		double base_move = std::sqrt(dx * dx + dy * dy + dz * dz);
+		if (base_move < params.convergence_tolerance_xyz && rel_impr < params.convergence_tolerance_cost)
 		{
 			RCLCPP_INFO(
-				node->get_logger(), "  base move %.5f m / %.5f rad, rel. cost improvement %.2e -- converged",
-				std::hypot(dx, dy), std::abs(dyaw), rel_impr);
+				node->get_logger(), "  base move %.5f m, rel. cost improvement %.2e -- converged", base_move, rel_impr);
 			break;
 		}
 	}
 
 	const InnerSolution& fin = have_best ? best : cur;
-	BasePose2D fin_base = have_best ? best_base : base;
+	BaseOffset fin_base = have_best ? best_base : base;
 	result.x = fin_base.x;
 	result.y = fin_base.y;
-	result.yaw = fin_base.yaw;
+	result.z = fin_base.z;
 	result.tour_order = fin.tour;
 	result.joint_solutions = fin.joints;
 	result.total_weighted_cost = fin.weighted_cost;
@@ -1059,14 +1026,14 @@ BaseGradientResult SolveBaseGradient(
 	if (result.ok)
 		RCLCPP_INFO(
 			node->get_logger(),
-			"Done. Base offset x=%.4f, y=%.4f, yaw=%.4f rad -- reaches all %d poses, tour joint path %.4f rad "
+			"Done. Base offset x=%.4f, y=%.4f, z=%.4f m -- reaches all %d poses, tour joint path %.4f rad "
 			"(weighted cost %.4f).",
-			result.x, result.y, result.yaw, n, result.total_joint_path_length, result.total_weighted_cost);
+			result.x, result.y, result.z, n, result.total_joint_path_length, result.total_weighted_cost);
 	else
 		RCLCPP_WARN(
 			node->get_logger(),
-			"Done. Base offset x=%.4f, y=%.4f, yaw=%.4f rad -- reaches only %d/%d poses.", result.x, result.y,
-			result.yaw, result.num_reachable, n);
+			"Done. Base offset x=%.4f, y=%.4f, z=%.4f m -- reaches only %d/%d poses.", result.x, result.y,
+			result.z, result.num_reachable, n);
 
 	return result;
 }
@@ -1081,7 +1048,7 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 	root["num_total"] = result.num_total;
 	root["x"] = result.x;
 	root["y"] = result.y;
-	root["yaw"] = result.yaw;
+	root["z"] = result.z;
 	root["total_joint_path_length"] = result.total_joint_path_length;
 	root["total_weighted_cost"] = result.total_weighted_cost;
 
@@ -1106,7 +1073,7 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 		Json::Value entry(Json::objectValue);
 		entry["x"] = h[0];
 		entry["y"] = h[1];
-		entry["yaw"] = h[2];
+		entry["z"] = h[2];
 		entry["weighted_cost"] = h[3];
 		history.append(entry);
 	}
@@ -1122,6 +1089,16 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 	printf("Saved base gradient result JSON: %s\n", json_path.c_str());
 }
 
+void ApplyBaseOffsetToScene(
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original, double x,
+	double y, double z)
+{
+	Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
+	Eigen::Isometry3d base_inv = MakeBaseTransform(BaseOffset{x, y, z}).inverse();
+	SetObjectPose(planning_scene_monitor, base_inv * object_pose_original);
+}
+
 visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
 	const rclcpp::Time& stamp, const std::string& resolved_mesh_path, double mesh_scale,
 	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
@@ -1130,7 +1107,7 @@ visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
 	visualization_msgs::msg::MarkerArray markers;
 	int id = 0;
 
-	Eigen::Isometry3d base_inv = MakeBaseTransform({result.x, result.y, result.yaw}).inverse();
+	Eigen::Isometry3d base_inv = MakeBaseTransform({result.x, result.y, result.z}).inverse();
 	Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
 
 	visualization_msgs::msg::Marker mesh_marker;

@@ -15,7 +15,6 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include "panda_arm_control/base_gradient.hpp"
-#include "panda_arm_control/base_placement.hpp"
 #include "panda_arm_control/real_cost_planning.hpp"
 #include "panda_arm_control/viewpoint_io.hpp"
 #include "panda_arm_control/viewpoint_types.hpp"
@@ -37,9 +36,8 @@ struct Params
 
 	double bg_x_min = -0.3, bg_x_max = 0.3;
 	double bg_y_min = -0.3, bg_y_max = 0.3;
-	double bg_yaw_min = -M_PI, bg_yaw_max = M_PI;
-	double bg_initial_x = 0.0, bg_initial_y = 0.0, bg_initial_yaw = 0.0;
-	bool bg_optimize_yaw = false;
+	double bg_z_min = -0.2, bg_z_max = 0.2;
+	double bg_initial_x = 0.0, bg_initial_y = 0.0, bg_initial_z = 0.0;
 
 	double bg_joint_distance_weight = 1.0;
 	double bg_cartesian_distance_weight = 0.0;
@@ -57,8 +55,7 @@ struct Params
 	int bg_max_line_search_iters = 12;
 	double bg_jacobian_damping = 1e-3;
 
-	double bg_convergence_tolerance_xy = 0.002;
-	double bg_convergence_tolerance_yaw = 0.01;
+	double bg_convergence_tolerance_xyz = 0.002;
 	double bg_convergence_tolerance_cost = 1e-3;
 	int bg_patience = 3;
 
@@ -71,7 +68,7 @@ struct Params
 
 	// Drives the real robot through the recommended placement's tour by moving the (software-only)
 	// collision object into the frame the base would see at the recommended offset. Only correct
-	// if that matches reality -- see ApplyBasePlacementToScene's doc comment. Defaults to false.
+	// if that matches reality -- see ApplyBaseOffsetToScene's doc comment. Defaults to false.
 	bool execute_on_robot = false;
 	double execution_planning_time = 5.0;
 	int execution_planning_attempts = 5;
@@ -199,12 +196,11 @@ private:
 		this->declareIfNeeded("bg_x_max", this->params.bg_x_max);
 		this->declareIfNeeded("bg_y_min", this->params.bg_y_min);
 		this->declareIfNeeded("bg_y_max", this->params.bg_y_max);
-		this->declareIfNeeded("bg_yaw_min", this->params.bg_yaw_min);
-		this->declareIfNeeded("bg_yaw_max", this->params.bg_yaw_max);
+		this->declareIfNeeded("bg_z_min", this->params.bg_z_min);
+		this->declareIfNeeded("bg_z_max", this->params.bg_z_max);
 		this->declareIfNeeded("bg_initial_x", this->params.bg_initial_x);
 		this->declareIfNeeded("bg_initial_y", this->params.bg_initial_y);
-		this->declareIfNeeded("bg_initial_yaw", this->params.bg_initial_yaw);
-		this->declareIfNeeded("bg_optimize_yaw", this->params.bg_optimize_yaw);
+		this->declareIfNeeded("bg_initial_z", this->params.bg_initial_z);
 		this->declareIfNeeded("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->declareIfNeeded("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->declareIfNeeded("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
@@ -218,8 +214,7 @@ private:
 		this->declareIfNeeded("bg_min_step", this->params.bg_min_step);
 		this->declareIfNeeded("bg_max_line_search_iters", this->params.bg_max_line_search_iters);
 		this->declareIfNeeded("bg_jacobian_damping", this->params.bg_jacobian_damping);
-		this->declareIfNeeded("bg_convergence_tolerance_xy", this->params.bg_convergence_tolerance_xy);
-		this->declareIfNeeded("bg_convergence_tolerance_yaw", this->params.bg_convergence_tolerance_yaw);
+		this->declareIfNeeded("bg_convergence_tolerance_xyz", this->params.bg_convergence_tolerance_xyz);
 		this->declareIfNeeded("bg_convergence_tolerance_cost", this->params.bg_convergence_tolerance_cost);
 		this->declareIfNeeded("bg_patience", this->params.bg_patience);
 		this->declareIfNeeded("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
@@ -246,12 +241,11 @@ private:
 		this->get_parameter("bg_x_max", this->params.bg_x_max);
 		this->get_parameter("bg_y_min", this->params.bg_y_min);
 		this->get_parameter("bg_y_max", this->params.bg_y_max);
-		this->get_parameter("bg_yaw_min", this->params.bg_yaw_min);
-		this->get_parameter("bg_yaw_max", this->params.bg_yaw_max);
+		this->get_parameter("bg_z_min", this->params.bg_z_min);
+		this->get_parameter("bg_z_max", this->params.bg_z_max);
 		this->get_parameter("bg_initial_x", this->params.bg_initial_x);
 		this->get_parameter("bg_initial_y", this->params.bg_initial_y);
-		this->get_parameter("bg_initial_yaw", this->params.bg_initial_yaw);
-		this->get_parameter("bg_optimize_yaw", this->params.bg_optimize_yaw);
+		this->get_parameter("bg_initial_z", this->params.bg_initial_z);
 		this->get_parameter("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->get_parameter("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->get_parameter("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
@@ -265,8 +259,7 @@ private:
 		this->get_parameter("bg_min_step", this->params.bg_min_step);
 		this->get_parameter("bg_max_line_search_iters", this->params.bg_max_line_search_iters);
 		this->get_parameter("bg_jacobian_damping", this->params.bg_jacobian_damping);
-		this->get_parameter("bg_convergence_tolerance_xy", this->params.bg_convergence_tolerance_xy);
-		this->get_parameter("bg_convergence_tolerance_yaw", this->params.bg_convergence_tolerance_yaw);
+		this->get_parameter("bg_convergence_tolerance_xyz", this->params.bg_convergence_tolerance_xyz);
 		this->get_parameter("bg_convergence_tolerance_cost", this->params.bg_convergence_tolerance_cost);
 		this->get_parameter("bg_patience", this->params.bg_patience);
 		this->get_parameter("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
@@ -311,12 +304,11 @@ private:
 		bg.bounds.x_max = this->params.bg_x_max;
 		bg.bounds.y_min = this->params.bg_y_min;
 		bg.bounds.y_max = this->params.bg_y_max;
-		bg.bounds.yaw_min = this->params.bg_yaw_min;
-		bg.bounds.yaw_max = this->params.bg_yaw_max;
+		bg.bounds.z_min = this->params.bg_z_min;
+		bg.bounds.z_max = this->params.bg_z_max;
 		bg.initial_x = this->params.bg_initial_x;
 		bg.initial_y = this->params.bg_initial_y;
-		bg.initial_yaw = this->params.bg_initial_yaw;
-		bg.optimize_yaw = this->params.bg_optimize_yaw;
+		bg.initial_z = this->params.bg_initial_z;
 		bg.joint_distance_weight = this->params.bg_joint_distance_weight;
 		bg.cartesian_distance_weight = this->params.bg_cartesian_distance_weight;
 		bg.max_joint_deviation_weight = this->params.bg_max_joint_deviation_weight;
@@ -331,8 +323,7 @@ private:
 		bg.min_step = this->params.bg_min_step;
 		bg.max_line_search_iters = this->params.bg_max_line_search_iters;
 		bg.jacobian_damping = this->params.bg_jacobian_damping;
-		bg.convergence_tolerance_xy = this->params.bg_convergence_tolerance_xy;
-		bg.convergence_tolerance_yaw = this->params.bg_convergence_tolerance_yaw;
+		bg.convergence_tolerance_xyz = this->params.bg_convergence_tolerance_xyz;
 		bg.convergence_tolerance_cost = this->params.bg_convergence_tolerance_cost;
 		bg.patience = this->params.bg_patience;
 		bg.random_seed = this->params.random_seed;
@@ -368,18 +359,16 @@ private:
 		{
 			RCLCPP_WARN(
 				this->get_logger(),
-				"execute_on_robot: driving the REAL robot as if the base were at (%.4f, %.4f, %.4f rad) by moving "
-				"the object in software -- only correct if the object has actually been placed there (or the base "
-				"actually remounted).",
-				result.x, result.y, result.yaw);
+				"execute_on_robot: driving the REAL robot as if the base were translated by (%.4f, %.4f, %.4f) m by "
+				"moving the object in software -- only correct if the object has actually been placed there (or the "
+				"base actually remounted).",
+				result.x, result.y, result.z);
 
-			ApplyBasePlacementToScene(
-				local_scene, object_translation_world, object_rotation_world, result.x, result.y, result.yaw);
+			ApplyBaseOffsetToScene(
+				local_scene, object_translation_world, object_rotation_world, result.x, result.y, result.z);
 
 			Eigen::Isometry3d base_transform_inv =
-				(Eigen::Translation3d(result.x, result.y, 0.0) *
-				 Eigen::AngleAxisd(result.yaw, Eigen::Vector3d::UnitZ()))
-					.inverse();
+				Eigen::Isometry3d(Eigen::Translation3d(result.x, result.y, result.z)).inverse();
 
 			std::vector<ViewpointCandidate> owned(result.tour_order.size());
 			std::vector<const ViewpointCandidate*> selected;

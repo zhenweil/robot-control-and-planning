@@ -11,25 +11,22 @@
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-// Search bounds for the base offset (x, y, yaw), relative to the robot's actual mount
-// (panda_link0) -- same convention as BasePlacementBounds in base_placement.hpp.
+// Search bounds for the base offset (x, y, z), relative to the robot's actual mount
+// (panda_link0). The offset is a pure translation -- base yaw is deliberately excluded because it
+// is redundant with joint 1 (both rotate the arm about the mount's z axis), so mount height z
+// takes the third slot instead, where it genuinely changes reach and joint travel.
 struct BaseGradientBounds
 {
 	double x_min = -0.3, x_max = 0.3;
 	double y_min = -0.3, y_max = 0.3;
-	double yaw_min = -M_PI, yaw_max = M_PI;
+	double z_min = -0.2, z_max = 0.2;
 };
 
 struct BaseGradientParams
 {
 	BaseGradientBounds bounds;
 	// Where the descent starts, relative to today's mount (default 0 = the real mount).
-	double initial_x = 0.0, initial_y = 0.0, initial_yaw = 0.0;
-
-	// Base yaw is redundant with joint 1 (both rotate the arm about the mount's z axis), so for the
-	// joint-travel objective it has no effect and is not optimized by default -- the base stays at
-	// initial_yaw. Enable only if joint-1 limits at some viewpoints make the base angle matter.
-	bool optimize_yaw = false;
+	double initial_x = 0.0, initial_y = 0.0, initial_z = 0.0;
 
 	// Objective weights (mirrors HierarchicalTourParams): total tour cost is
 	//   sum_edges [ w_cart*||dp|| + w_joint*||dq||_2 + w_maxdev*max_k|dq_k| ].
@@ -46,9 +43,9 @@ struct BaseGradientParams
 	int ik_retries_per_point = 8;
 	int gtsp_two_opt_rounds = 5;
 
-	// Gradient descent on the base pose. The descent direction is the unit-normalized negative
-	// gradient, so `initial_step` / `min_step` are actual base displacements (meters on x/y,
-	// radians on yaw), not scaled by the raw (cost-per-meter) gradient magnitude.
+	// Gradient descent on the base offset. The descent direction is the unit-normalized negative
+	// gradient, so `initial_step` / `min_step` are actual base displacements in meters, not scaled
+	// by the raw (cost-per-meter) gradient magnitude.
 	int max_outer_iterations = 15;
 	double initial_step = 0.05;
 	double step_shrink = 0.5;
@@ -57,8 +54,7 @@ struct BaseGradientParams
 	int max_line_search_iters = 12;
 	double jacobian_damping = 1e-3;  // lambda in the damped pseudo-inverse J^T (J J^T + lambda^2 I)^-1
 
-	double convergence_tolerance_xy = 0.002;   // meters, base move per outer iteration
-	double convergence_tolerance_yaw = 0.01;   // radians
+	double convergence_tolerance_xyz = 0.002;   // meters, base move per outer iteration
 	double convergence_tolerance_cost = 1e-3;  // relative tour-cost improvement per outer iteration
 	// Stop early once this many consecutive iterations each improve the cost by less than
 	// convergence_tolerance_cost (relative) -- avoids grinding through many near-zero-gain steps.
@@ -77,10 +73,10 @@ struct BaseGradientParams
 
 struct BaseGradientResult
 {
-	bool ok = false;  // true iff every input pose is reachable at the returned (x, y, yaw)
+	bool ok = false;  // true iff every input pose is reachable at the returned (x, y, z)
 	int num_reachable = 0;
 	int num_total = 0;
-	double x = 0.0, y = 0.0, yaw = 0.0;  // offset relative to today's actual mount
+	double x = 0.0, y = 0.0, z = 0.0;  // translational offset relative to today's actual mount
 
 	// Input-pose indices in visit order (the inner GTSP's tour).
 	std::vector<int> tour_order;
@@ -90,11 +86,11 @@ struct BaseGradientResult
 	double total_joint_path_length = 0.0;  // sum ||dq||_2 over tour edges (home -> first -> ...)
 	double total_weighted_cost = 0.0;	   // the full weighted objective at the returned base
 
-	// {x, y, yaw, weighted_cost} after each outer iteration -- for plotting the descent.
+	// {x, y, z, weighted_cost} after each outer iteration -- for plotting the descent.
 	std::vector<std::array<double, 4>> history;
 };
 
-// Alternating minimization of tour joint travel over the base offset (x, y, yaw): run the inner
+// Alternating minimization of tour joint travel over the base offset (x, y, z): run the inner
 // redundant-IK GTSP at the current base, take the analytic gradient of the weighted tour cost
 // w.r.t. the base pose (via the manipulator Jacobian), backtracking-line-search a descent step,
 // then re-run the GTSP -- until the base and the cost both settle.
@@ -116,6 +112,19 @@ BaseGradientResult SolveBaseGradient(
 
 // Writes base_gradient_result.json to output_dir.
 void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientResult& result);
+
+// Moves the registered "object" collision object to where it would sit if the base were
+// translated by (x, y, z) from its real mount, given the object's real pose
+// (object_translation_original/object_rotation_original). Same purpose/caveats as
+// ApplyBasePlacementToScene in base_placement.hpp -- only valid if that translation has actually
+// been realized (object physically moved, or base remounted).
+void ApplyBaseOffsetToScene(
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const Eigen::Vector3d& object_translation_original,
+	const Eigen::Matrix3d& object_rotation_original,
+	double x,
+	double y,
+	double z);
 
 // Object mesh + tour polyline/waypoints re-expressed in the recommended base's frame (same idea
 // as BuildBasePlacementMarkerArray). frame_id is "world".

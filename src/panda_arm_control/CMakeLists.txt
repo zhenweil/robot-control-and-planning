@@ -80,7 +80,6 @@ add_executable(base_placement
 
 add_executable(base_gradient
 	src/base_gradient.cpp
-	src/base_placement.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
 	src/base_gradient_node.cpp

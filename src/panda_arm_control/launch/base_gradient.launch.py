@@ -68,19 +68,18 @@ def generate_launch_description():
         # selected_robot_poses.json -- this node's input.
         "tour_input_dir": "/tmp/viewpoint_planner_output",
         "output_dir": "/tmp/base_gradient_output",
-        # Base offset search bounds, relative to today's actual mount.
+        # Base offset (x, y, z) search bounds, relative to today's actual mount. The offset is a
+        # pure translation -- yaw is excluded (redundant with joint 1), z takes its place.
         "bg_x_min": -0.3,
         "bg_x_max": 0.3,
         "bg_y_min": -0.3,
         "bg_y_max": 0.3,
-        "bg_yaw_min": -3.14159265,
-        "bg_yaw_max": 3.14159265,
+        "bg_z_min": -0.2,
+        "bg_z_max": 0.2,
         # Where the descent starts (0 = today's mount).
         "bg_initial_x": 0.0,
         "bg_initial_y": 0.0,
-        "bg_initial_yaw": 0.0,
-        # Base yaw is redundant with joint 1 for joint travel -- not optimized by default.
-        "bg_optimize_yaw": False,
+        "bg_initial_z": 0.0,
         # Objective weights (see base_gradient.hpp). Cartesian term has no gradient; kept for
         # inner-GTSP ordering parity with the rest of the pipeline.
         "bg_joint_distance_weight": 1.0,
@@ -96,8 +95,7 @@ def generate_launch_description():
         "bg_min_step": 1e-4,
         "bg_max_line_search_iters": 12,
         "bg_jacobian_damping": 1e-3,
-        "bg_convergence_tolerance_xy": 0.002,
-        "bg_convergence_tolerance_yaw": 0.01,
+        "bg_convergence_tolerance_xyz": 0.002,
         "bg_convergence_tolerance_cost": 1e-3,
         # Stop after this many consecutive iterations that each gain < bg_convergence_tolerance_cost.
         "bg_patience": 3,
