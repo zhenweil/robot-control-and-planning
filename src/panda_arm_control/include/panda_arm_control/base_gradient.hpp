@@ -52,11 +52,12 @@ struct BaseGradientParams
 	int ik_retries_per_point = 8;
 	int gtsp_two_opt_rounds = 5;
 
-	// Basin hopping to escape local minima: restart 0 descends from initial_*, each later restart
-	// descends from the best offset so far kicked by a Gaussian of std-dev restart_perturbation
-	// (meters; the tip/tilt kick is that over rot_metric_scale). Staying near the incumbent keeps
-	// restarts feasible, unlike sampling the whole bounds box. 1 = single descent.
-	int num_restarts = 5;
+	// Optional basin hopping: restart 0 descends from initial_*, each later restart descends from
+	// the best offset so far kicked by a Gaussian of std-dev restart_perturbation (meters; the
+	// tip/tilt kick is that over rot_metric_scale). Off by default -- with deterministic IK the
+	// descent reliably finds the one good basin near initial_*, and small kicks just re-descend
+	// to it. Raise num_restarts only if a problem looks genuinely multi-basin.
+	int num_restarts = 1;
 	double restart_perturbation = 0.08;
 	// Stop launching restarts once there is a fully-reachable result and this many consecutive
 	// restarts failed to beat it -- but never before min_restarts have run. 0 patience disables

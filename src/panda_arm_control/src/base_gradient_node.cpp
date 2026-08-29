@@ -52,7 +52,7 @@ struct Params
 	int bg_ik_retries_per_point = 8;
 	int bg_gtsp_two_opt_rounds = 5;
 
-	int bg_num_restarts = 5;
+	int bg_num_restarts = 1;
 	double bg_restart_perturbation = 0.08;
 	int bg_restart_patience = 2;
 	int bg_min_restarts = 3;

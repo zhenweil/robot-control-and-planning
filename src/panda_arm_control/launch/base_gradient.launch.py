@@ -108,10 +108,10 @@ def generate_launch_description():
         "bg_max_solutions_per_candidate": 2,
         "bg_ik_retries_per_point": 8,
         "bg_gtsp_two_opt_rounds": 5,
-        # Basin hopping to escape local minima (1 = single descent): each restart after the first
-        # descends from the best offset so far kicked by a Gaussian of std-dev restart_perturbation
-        # (m). Stops early once restart_patience in a row fail to beat the best.
-        "bg_num_restarts": 5,
+        # Optional basin hopping (1 = single descent, the default). Raise only for a problem that
+        # looks multi-basin; each restart after the first descends from the best offset so far
+        # kicked by a Gaussian of std-dev restart_perturbation (m).
+        "bg_num_restarts": 1,
         "bg_restart_perturbation": 0.08,
         "bg_restart_patience": 2,
         "bg_min_restarts": 3,
