@@ -725,13 +725,13 @@ OffsetVec FiniteDifferenceGradient(
 // Live progress markers
 // ---------------------------------------------------------------------------------------------
 
-// Base-pose descent only -- the current base, the trail it has walked, and the -grad(D) arrow.
-// The tour / viewpoints are deliberately NOT drawn here; they appear once, after convergence, on
-// /base_gradient_markers (BuildBaseGradientMarkerArray). Every marker below uses a fixed id per
-// namespace so each publish overwrites the last instead of stacking ghosts across iterations.
+// Offset descent only -- the current offset (cube), the trail it has walked, and the -grad(D)
+// arrow. The tour / viewpoints are deliberately NOT drawn here; they appear once, after
+// convergence, on /base_gradient_markers (BuildBaseGradientMarkerArray). Every marker below uses a
+// fixed id per namespace so each publish overwrites the last instead of stacking ghosts.
 void PublishProgress(
 	const rclcpp::Node::SharedPtr& node, const BaseGradientParams& params, const std::vector<BaseOffset>& base_history,
-	const Eigen::Vector3d& neg_grad_translation, const BaseOffset& base, double weighted_cost)
+	const Eigen::Vector3d& neg_grad_translation, const BaseOffset& base)
 {
 	if (!params.progress_pub)
 		return;
@@ -839,27 +839,6 @@ void PublishProgress(
 		arrow.points.push_back(tip);
 		markers.markers.push_back(arrow);
 	}
-
-	visualization_msgs::msg::Marker text;
-	text.header.frame_id = "world";
-	text.header.stamp = stamp;
-	text.ns = "base_gradient_cost";
-	text.id = 0;
-	text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
-	text.action = visualization_msgs::msg::Marker::ADD;
-	text.pose.position.x = base.x;
-	text.pose.position.y = base.y;
-	text.pose.position.z = base.z + 0.08;
-	text.pose.orientation.w = 1.0;
-	text.scale.z = 0.03;
-	text.color.r = text.color.g = text.color.b = 1.0f;
-	text.color.a = 1.0f;
-	char buf[96];
-	std::snprintf(
-		buf, sizeof(buf), "D = %.4f   tip %.1f deg  tilt %.1f deg", weighted_cost, base.roll * 180.0 / M_PI,
-		base.pitch * 180.0 / M_PI);
-	text.text = buf;
-	markers.markers.push_back(text);
 
 	params.progress_pub->publish(markers);
 	if (params.visualize_progress_delay_sec > 0.0)
@@ -977,7 +956,7 @@ BaseGradientResult SolveBaseGradient(
 		if (gnorm < 1e-6)
 		{
 			RCLCPP_INFO(node->get_logger(), "  gradient ~ 0 -- converged");
-			PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base, cur.weighted_cost);
+			PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
 			break;
 		}
 
@@ -1014,7 +993,7 @@ BaseGradientResult SolveBaseGradient(
 		if (!accepted)
 		{
 			RCLCPP_INFO(node->get_logger(), "  no step reduces the tour cost -- converged");
-			PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base, cur.weighted_cost);
+			PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
 			break;
 		}
 
@@ -1036,7 +1015,7 @@ BaseGradientResult SolveBaseGradient(
 			outer + 1, params.max_outer_iterations, base.x, base.y, base.z, base.roll * 180.0 / M_PI,
 			base.pitch * 180.0 / M_PI, cur.weighted_cost, cur.num_reachable, n, gnorm, step);
 
-		PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base, cur.weighted_cost);
+		PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
 
 		if (rel_impr < params.convergence_tolerance_cost)
 		{
