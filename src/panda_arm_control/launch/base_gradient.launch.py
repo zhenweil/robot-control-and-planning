@@ -49,6 +49,15 @@ def generate_launch_description():
     )
     fd_gradient_check = ParameterValue(LaunchConfiguration("fd_gradient_check"), value_type=bool)
 
+    random_seed_arg = DeclareLaunchArgument(
+        "random_seed",
+        default_value="42",
+        description="Seeds both the basin-hop RNG (bg param) and, via the RANDOM_SEED env var, "
+        "MoveIt's IK plugin -- so a full run is reproducible. Change it to sample a different "
+        "run; the KDL IK re-seeds nondeterministically without this.",
+    )
+    random_seed = LaunchConfiguration("random_seed")
+
     moveit_config = (
         MoveItConfigsBuilder("panda", package_name="panda_arm_moveit")
         .robot_description(file_path="config/panda.urdf.xacro")
@@ -102,9 +111,10 @@ def generate_launch_description():
         # Basin hopping to escape local minima (1 = single descent): each restart after the first
         # descends from the best offset so far kicked by a Gaussian of std-dev restart_perturbation
         # (m). Stops early once restart_patience in a row fail to beat the best.
-        "bg_num_restarts": 3,
+        "bg_num_restarts": 5,
         "bg_restart_perturbation": 0.08,
         "bg_restart_patience": 2,
+        "bg_min_restarts": 3,
         "bg_max_outer_iterations": 15,
         "bg_initial_step": 0.05,
         "bg_step_shrink": 0.5,
@@ -119,7 +129,7 @@ def generate_launch_description():
         "bg_fd_gradient_check": fd_gradient_check,
         "bg_fd_epsilon": 1e-4,
         "ik_timeout": 0.1,
-        "random_seed": 42,
+        "random_seed": ParameterValue(random_seed, value_type=int),
         "visualize_progress_delay_sec": visualize_progress_delay_sec,
         "execute_on_robot": execute_on_robot,
         "execution_planning_time": 5.0,
@@ -138,6 +148,9 @@ def generate_launch_description():
         name="base_gradient",
         output="screen",
         parameters=[moveit_config.to_dict(), base_gradient_params, object_pose_config],
+        # Makes MoveIt's IK (KDL) deterministic -- it otherwise re-seeds from /dev/urandom on
+        # retries, which is the main run-to-run inconsistency in the result.
+        additional_env={"RANDOM_SEED": random_seed},
     )
 
     rviz_config = PathJoinSubstitution(
@@ -159,6 +172,7 @@ def generate_launch_description():
             execute_on_robot_arg,
             visualize_progress_delay_sec_arg,
             fd_gradient_check_arg,
+            random_seed_arg,
             base_gradient_node,
             rviz_node,
         ]

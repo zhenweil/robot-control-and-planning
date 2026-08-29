@@ -1100,7 +1100,8 @@ BaseGradientResult SolveBaseGradient(
 			overall = rr;
 
 		since_improved = improved ? 0 : since_improved + 1;
-		if (overall.ok && params.restart_patience > 0 && since_improved >= params.restart_patience)
+		if (overall.ok && params.restart_patience > 0 && r + 1 >= params.min_restarts &&
+			since_improved >= params.restart_patience)
 		{
 			RCLCPP_INFO(
 				node->get_logger(), "stopping restarts: %d in a row did not beat D=%.4f", since_improved, overall.cost);

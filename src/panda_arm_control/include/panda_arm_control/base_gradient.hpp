@@ -56,11 +56,13 @@ struct BaseGradientParams
 	// descends from the best offset so far kicked by a Gaussian of std-dev restart_perturbation
 	// (meters; the tip/tilt kick is that over rot_metric_scale). Staying near the incumbent keeps
 	// restarts feasible, unlike sampling the whole bounds box. 1 = single descent.
-	int num_restarts = 3;
+	int num_restarts = 5;
 	double restart_perturbation = 0.08;
 	// Stop launching restarts once there is a fully-reachable result and this many consecutive
-	// restarts failed to beat it. 0 disables (always run all num_restarts).
+	// restarts failed to beat it -- but never before min_restarts have run. 0 patience disables
+	// early stopping (always run all num_restarts).
 	int restart_patience = 2;
+	int min_restarts = 3;
 
 	// Gradient descent on the object offset. The descent direction is the unit-normalized negative
 	// gradient in a mixed metric where 1 rad of tip/tilt counts as `rot_metric_scale` meters, so

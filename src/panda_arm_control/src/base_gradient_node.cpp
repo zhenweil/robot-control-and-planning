@@ -52,9 +52,10 @@ struct Params
 	int bg_ik_retries_per_point = 8;
 	int bg_gtsp_two_opt_rounds = 5;
 
-	int bg_num_restarts = 3;
+	int bg_num_restarts = 5;
 	double bg_restart_perturbation = 0.08;
 	int bg_restart_patience = 2;
+	int bg_min_restarts = 3;
 	int bg_max_outer_iterations = 15;
 	double bg_initial_step = 0.05;
 	double bg_step_shrink = 0.5;
@@ -226,6 +227,7 @@ private:
 		this->declareIfNeeded("bg_num_restarts", this->params.bg_num_restarts);
 		this->declareIfNeeded("bg_restart_perturbation", this->params.bg_restart_perturbation);
 		this->declareIfNeeded("bg_restart_patience", this->params.bg_restart_patience);
+		this->declareIfNeeded("bg_min_restarts", this->params.bg_min_restarts);
 		this->declareIfNeeded("bg_max_outer_iterations", this->params.bg_max_outer_iterations);
 		this->declareIfNeeded("bg_initial_step", this->params.bg_initial_step);
 		this->declareIfNeeded("bg_step_shrink", this->params.bg_step_shrink);
@@ -282,6 +284,7 @@ private:
 		this->get_parameter("bg_num_restarts", this->params.bg_num_restarts);
 		this->get_parameter("bg_restart_perturbation", this->params.bg_restart_perturbation);
 		this->get_parameter("bg_restart_patience", this->params.bg_restart_patience);
+		this->get_parameter("bg_min_restarts", this->params.bg_min_restarts);
 		this->get_parameter("bg_max_outer_iterations", this->params.bg_max_outer_iterations);
 		this->get_parameter("bg_initial_step", this->params.bg_initial_step);
 		this->get_parameter("bg_step_shrink", this->params.bg_step_shrink);
@@ -357,6 +360,7 @@ private:
 		bg.num_restarts = this->params.bg_num_restarts;
 		bg.restart_perturbation = this->params.bg_restart_perturbation;
 		bg.restart_patience = this->params.bg_restart_patience;
+		bg.min_restarts = this->params.bg_min_restarts;
 		bg.max_outer_iterations = this->params.bg_max_outer_iterations;
 		bg.initial_step = this->params.bg_initial_step;
 		bg.step_shrink = this->params.bg_step_shrink;
