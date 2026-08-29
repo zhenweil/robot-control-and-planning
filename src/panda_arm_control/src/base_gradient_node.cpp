@@ -39,6 +39,7 @@ struct Params
 	double bg_y_min = -0.3, bg_y_max = 0.3;
 	double bg_yaw_min = -M_PI, bg_yaw_max = M_PI;
 	double bg_initial_x = 0.0, bg_initial_y = 0.0, bg_initial_yaw = 0.0;
+	bool bg_optimize_yaw = false;
 
 	double bg_joint_distance_weight = 1.0;
 	double bg_cartesian_distance_weight = 0.0;
@@ -203,6 +204,7 @@ private:
 		this->declareIfNeeded("bg_initial_x", this->params.bg_initial_x);
 		this->declareIfNeeded("bg_initial_y", this->params.bg_initial_y);
 		this->declareIfNeeded("bg_initial_yaw", this->params.bg_initial_yaw);
+		this->declareIfNeeded("bg_optimize_yaw", this->params.bg_optimize_yaw);
 		this->declareIfNeeded("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->declareIfNeeded("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->declareIfNeeded("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
@@ -249,6 +251,7 @@ private:
 		this->get_parameter("bg_initial_x", this->params.bg_initial_x);
 		this->get_parameter("bg_initial_y", this->params.bg_initial_y);
 		this->get_parameter("bg_initial_yaw", this->params.bg_initial_yaw);
+		this->get_parameter("bg_optimize_yaw", this->params.bg_optimize_yaw);
 		this->get_parameter("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->get_parameter("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->get_parameter("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
@@ -313,6 +316,7 @@ private:
 		bg.initial_x = this->params.bg_initial_x;
 		bg.initial_y = this->params.bg_initial_y;
 		bg.initial_yaw = this->params.bg_initial_yaw;
+		bg.optimize_yaw = this->params.bg_optimize_yaw;
 		bg.joint_distance_weight = this->params.bg_joint_distance_weight;
 		bg.cartesian_distance_weight = this->params.bg_cartesian_distance_weight;
 		bg.max_joint_deviation_weight = this->params.bg_max_joint_deviation_weight;

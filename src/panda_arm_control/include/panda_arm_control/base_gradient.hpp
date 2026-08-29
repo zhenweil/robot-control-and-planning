@@ -26,6 +26,11 @@ struct BaseGradientParams
 	// Where the descent starts, relative to today's mount (default 0 = the real mount).
 	double initial_x = 0.0, initial_y = 0.0, initial_yaw = 0.0;
 
+	// Base yaw is redundant with joint 1 (both rotate the arm about the mount's z axis), so for the
+	// joint-travel objective it has no effect and is not optimized by default -- the base stays at
+	// initial_yaw. Enable only if joint-1 limits at some viewpoints make the base angle matter.
+	bool optimize_yaw = false;
+
 	// Objective weights (mirrors HierarchicalTourParams): total tour cost is
 	//   sum_edges [ w_cart*||dp|| + w_joint*||dq||_2 + w_maxdev*max_k|dq_k| ].
 	// The Cartesian term is invariant to the base pose, so it never affects the gradient -- it is

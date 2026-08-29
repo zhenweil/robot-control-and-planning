@@ -949,6 +949,10 @@ BaseGradientResult SolveBaseGradient(
 				outer + 1, g.x(), g.y(), g.z(), g_fd.x(), g_fd.y(), g_fd.z());
 		}
 
+		// Base yaw is redundant with joint 1 for joint travel -- freeze it unless asked otherwise.
+		if (!params.optimize_yaw)
+			g.z() = 0.0;
+
 		double gnorm = g.norm();
 		if (gnorm < 1e-6)
 		{

@@ -79,6 +79,8 @@ def generate_launch_description():
         "bg_initial_x": 0.0,
         "bg_initial_y": 0.0,
         "bg_initial_yaw": 0.0,
+        # Base yaw is redundant with joint 1 for joint travel -- not optimized by default.
+        "bg_optimize_yaw": False,
         # Objective weights (see base_gradient.hpp). Cartesian term has no gradient; kept for
         # inner-GTSP ordering parity with the rest of the pipeline.
         "bg_joint_distance_weight": 1.0,
