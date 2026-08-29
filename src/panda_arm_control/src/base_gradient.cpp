@@ -114,11 +114,13 @@ OffsetVec ToOffsetVec(const BaseOffset& a, const BaseOffset& b)  // a - b, compo
 	return v;
 }
 
-BaseOffset RandomOffsetInBounds(std::mt19937& rng, const BaseGradientBounds& b)
+// Gaussian kick around `center`: sigma_m meters on x/y/z, sigma_m/rot_scale rad on roll/pitch.
+BaseOffset PerturbOffset(const BaseOffset& center, std::mt19937& rng, double sigma_m, double rot_scale)
 {
-	auto u = [&rng](double lo, double hi) { return std::uniform_real_distribution<double>(lo, hi)(rng); };
-	return {u(b.x_min, b.x_max), u(b.y_min, b.y_max), u(b.z_min, b.z_max), u(b.roll_min, b.roll_max),
-			u(b.pitch_min, b.pitch_max)};
+	std::normal_distribution<double> nm(0.0, sigma_m);
+	std::normal_distribution<double> nr(0.0, sigma_m / std::max(1e-6, rot_scale));
+	return {center.x + nm(rng), center.y + nm(rng), center.z + nm(rng), center.roll + nr(rng),
+			center.pitch + nr(rng)};
 }
 
 // Mirrors real_cost_planning.cpp's AreJointSolutionsSimilar (combined L2, radians).
@@ -1081,7 +1083,7 @@ BaseGradientResult SolveBaseGradient(
 		BaseOffset start =
 			(r == 0) ? BaseOffset{params.initial_x, params.initial_y, params.initial_z, params.initial_roll,
 								  params.initial_pitch}
-					 : RandomOffsetInBounds(rng, params.bounds);
+					 : PerturbOffset(overall.offset, rng, params.restart_perturbation, rot_scale);
 		RestartResult rr = run_descent(start, r);
 
 		// weighted_cost carries the unreachable penalty, so lower cost == better (a fully-

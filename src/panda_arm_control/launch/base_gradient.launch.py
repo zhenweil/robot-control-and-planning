@@ -99,9 +99,11 @@ def generate_launch_description():
         "bg_max_solutions_per_candidate": 2,
         "bg_ik_retries_per_point": 8,
         "bg_gtsp_two_opt_rounds": 5,
-        # Independent descents from random starts to escape local minima (1 = single descent);
-        # stops early once restart_patience in a row fail to beat the best fully-reachable result.
-        "bg_num_restarts": 4,
+        # Basin hopping to escape local minima (1 = single descent): each restart after the first
+        # descends from the best offset so far kicked by a Gaussian of std-dev restart_perturbation
+        # (m). Stops early once restart_patience in a row fail to beat the best.
+        "bg_num_restarts": 3,
+        "bg_restart_perturbation": 0.08,
         "bg_restart_patience": 2,
         "bg_max_outer_iterations": 15,
         "bg_initial_step": 0.05,

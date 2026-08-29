@@ -52,10 +52,12 @@ struct BaseGradientParams
 	int ik_retries_per_point = 8;
 	int gtsp_two_opt_rounds = 5;
 
-	// Independent descents to escape local minima: restart 0 starts from initial_*, the rest from
-	// random offsets within `bounds` (seeded by random_seed). Each restart re-solves IK/GTSP cold.
-	// The lowest fully-reachable cost across all restarts is returned. 1 = single descent.
-	int num_restarts = 4;
+	// Basin hopping to escape local minima: restart 0 descends from initial_*, each later restart
+	// descends from the best offset so far kicked by a Gaussian of std-dev restart_perturbation
+	// (meters; the tip/tilt kick is that over rot_metric_scale). Staying near the incumbent keeps
+	// restarts feasible, unlike sampling the whole bounds box. 1 = single descent.
+	int num_restarts = 3;
+	double restart_perturbation = 0.08;
 	// Stop launching restarts once there is a fully-reachable result and this many consecutive
 	// restarts failed to beat it. 0 disables (always run all num_restarts).
 	int restart_patience = 2;
