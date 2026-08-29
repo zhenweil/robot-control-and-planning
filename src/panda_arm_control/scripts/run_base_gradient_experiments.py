@@ -21,6 +21,7 @@ import os
 import statistics
 import subprocess
 import sys
+import time
 from math import degrees
 
 
@@ -33,7 +34,11 @@ def parse_args():
     p.add_argument("--random-search-budget", type=int, default=0,
                    help="exp 5 uniform-in-bounds points per seed; 0 = match the descent's budget")
     p.add_argument("--output-dir", default="/tmp/base_gradient_experiment_output")
-    p.add_argument("--launch-timeout", type=float, default=1800.0, help="seconds per seed before giving up")
+    p.add_argument("--launch-timeout", type=float, default=3600.0, help="seconds per seed before giving up")
+    p.add_argument("--parallel", type=int, default=1,
+                   help="run this many seeds concurrently, each on its own ROS_DOMAIN_ID")
+    p.add_argument("--ros-domain-base", type=int, default=40,
+                   help="ROS_DOMAIN_ID for the first parallel worker (then +1 per worker)")
     p.add_argument("--skip-launch", action="store_true", help="only aggregate JSONs already in --output-dir")
     p.add_argument("--plot", action="store_true", help="also write a strip-plot PNG (needs matplotlib)")
     p.add_argument("--extra", nargs="*", default=[], metavar="name:=value",
@@ -41,8 +46,8 @@ def parse_args():
     return p.parse_args()
 
 
-def run_one_seed(seed, args):
-    cmd = [
+def seed_cmd(seed, args):
+    return [
         "ros2", "launch", "panda_arm_control", "base_gradient.launch.py",
         "experiment_mode:=true",
         "use_rviz:=false",
@@ -51,11 +56,33 @@ def run_one_seed(seed, args):
         f"experiment_random_search_budget:={args.random_search_budget}",
         f"output_dir:={args.output_dir}",
     ] + list(args.extra)
-    print(f"\n=== seed {seed}: {' '.join(cmd)}", flush=True)
-    try:
-        subprocess.run(cmd, timeout=args.launch_timeout, check=False)
-    except subprocess.TimeoutExpired:
-        print(f"!!! seed {seed}: launch timed out after {args.launch_timeout}s", flush=True)
+
+
+def run_seeds(seeds, args):
+    """Run seeds, up to args.parallel at a time; each worker gets its own ROS_DOMAIN_ID and
+    a per-seed log file (concurrent stdout would be unreadable)."""
+    pending = list(seeds)
+    running = {}  # popen -> (seed, log, logpath, deadline)
+    while pending or running:
+        while pending and len(running) < max(1, args.parallel):
+            seed = pending.pop(0)
+            slot = len(running)
+            env = dict(os.environ, ROS_DOMAIN_ID=str(args.ros_domain_base + slot))
+            logpath = os.path.join(args.output_dir, f"seed{seed}.log")
+            log = open(logpath, "w")
+            p = subprocess.Popen(seed_cmd(seed, args), env=env, stdout=log, stderr=subprocess.STDOUT)
+            running[p] = (seed, log, logpath, time.time() + args.launch_timeout)
+            print(f"=== seed {seed} started (domain {env['ROS_DOMAIN_ID']}, log {logpath})", flush=True)
+        for p, (seed, log, logpath, deadline) in list(running.items()):
+            if p.poll() is None and time.time() > deadline:
+                p.kill()
+                print(f"!!! seed {seed}: killed after {args.launch_timeout:.0f}s", flush=True)
+            if p.poll() is not None:
+                running.pop(p)
+                log.close()
+                print(f"=== seed {seed} finished (exit {p.returncode}, {logpath})", flush=True)
+        if running:
+            time.sleep(5)
 
 
 def load_results(output_dir, seeds):
@@ -251,8 +278,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     if not args.skip_launch:
-        for s in seeds:
-            run_one_seed(s, args)
+        run_seeds(seeds, args)
 
     results = load_results(args.output_dir, seeds)
     report(results)

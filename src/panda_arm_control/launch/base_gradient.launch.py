@@ -58,6 +58,36 @@ def generate_launch_description():
     )
     random_seed = LaunchConfiguration("random_seed")
 
+    # Inner-solve tuning -- exposed so speed vs. IK-seed noise can be traded without a rebuild.
+    solve_restarts_arg = DeclareLaunchArgument(
+        "solve_restarts",
+        default_value="2",
+        description="Min-of-N inner solves wherever a committed cost matters (descent iter-0 + each "
+        "accepted step, and every experiment cold/warm solve). 1 = fastest.",
+    )
+    solve_restarts = ParameterValue(LaunchConfiguration("solve_restarts"), value_type=int)
+
+    max_solutions_per_candidate_arg = DeclareLaunchArgument(
+        "max_solutions_per_candidate", default_value="4",
+        description="IK branches collected per viewpoint for the committed GTSP solve.",
+    )
+    max_solutions_per_candidate = ParameterValue(
+        LaunchConfiguration("max_solutions_per_candidate"), value_type=int
+    )
+
+    ik_retries_per_point_arg = DeclareLaunchArgument(
+        "ik_retries_per_point", default_value="14",
+        description="Extra random IK attempts per viewpoint on top of max_solutions_per_candidate*3.",
+    )
+    ik_retries_per_point = ParameterValue(
+        LaunchConfiguration("ik_retries_per_point"), value_type=int
+    )
+
+    ik_timeout_arg = DeclareLaunchArgument(
+        "ik_timeout", default_value="0.15", description="Per-attempt IK time budget (s)."
+    )
+    ik_timeout = ParameterValue(LaunchConfiguration("ik_timeout"), value_type=float)
+
     experiment_mode_arg = DeclareLaunchArgument(
         "experiment_mode",
         default_value="false",
@@ -152,11 +182,11 @@ def generate_launch_description():
         "bg_max_joint_deviation_weight": 1.0,
         # Cost added per viewpoint left unreachable -- keeps a partial solution from looking cheap.
         "bg_unreachable_penalty": 50.0,
-        # Raised from 2/8/0.1 (see ik_timeout below) + min-of-2 committed solves: thin IK branch
-        # coverage made the tour cost at a fixed offset swing ~5% on the seed alone.
-        "bg_max_solutions_per_candidate": 4,
-        "bg_ik_retries_per_point": 14,
-        "bg_solve_restarts": 2,
+        # Raised from 2/8/0.1 + min-of-N committed solves: thin IK branch coverage made the tour
+        # cost at a fixed offset swing ~5% on the seed alone. All four are launch args.
+        "bg_max_solutions_per_candidate": max_solutions_per_candidate,
+        "bg_ik_retries_per_point": ik_retries_per_point,
+        "bg_solve_restarts": solve_restarts,
         "bg_gtsp_two_opt_rounds": 5,
         # Optional basin hopping (1 = single descent, the default). Raise only for a problem that
         # looks multi-basin; each restart after the first descends from the best offset so far
@@ -182,7 +212,7 @@ def generate_launch_description():
         "bg_experiment_num_random_dirs": experiment_num_random_dirs,
         "bg_experiment_min_probe_metric": 0.01,
         "bg_experiment_random_search_budget": experiment_random_search_budget,
-        "ik_timeout": 0.15,
+        "ik_timeout": ik_timeout,
         "random_seed": ParameterValue(random_seed, value_type=int),
         "visualize_progress_delay_sec": visualize_progress_delay_sec,
         "execute_on_robot": execute_on_robot,
@@ -227,6 +257,10 @@ def generate_launch_description():
             visualize_progress_delay_sec_arg,
             fd_gradient_check_arg,
             random_seed_arg,
+            solve_restarts_arg,
+            max_solutions_per_candidate_arg,
+            ik_retries_per_point_arg,
+            ik_timeout_arg,
             experiment_mode_arg,
             experiment_num_random_dirs_arg,
             experiment_random_search_budget_arg,
