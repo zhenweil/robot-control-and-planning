@@ -94,17 +94,19 @@ def generate_launch_description():
         "bg_joint_distance_weight": 1.0,
         "bg_cartesian_distance_weight": 0.0,
         "bg_max_joint_deviation_weight": 1.0,
-        "bg_max_solutions_per_candidate": 3,
+        "bg_max_solutions_per_candidate": 2,
         "bg_ik_retries_per_point": 8,
         "bg_gtsp_two_opt_rounds": 5,
-        # Independent descents from random starts to escape local minima (1 = single descent).
-        "bg_num_restarts": 8,
+        # Independent descents from random starts to escape local minima (1 = single descent);
+        # stops early once restart_patience in a row fail to beat the best fully-reachable result.
+        "bg_num_restarts": 4,
+        "bg_restart_patience": 2,
         "bg_max_outer_iterations": 15,
         "bg_initial_step": 0.05,
         "bg_step_shrink": 0.5,
         "bg_armijo_c": 1e-4,
         "bg_min_step": 1e-4,
-        "bg_max_line_search_iters": 12,
+        "bg_max_line_search_iters": 8,
         "bg_jacobian_damping": 1e-3,
         "bg_convergence_tolerance_offset": 0.002,
         "bg_convergence_tolerance_cost": 1e-3,

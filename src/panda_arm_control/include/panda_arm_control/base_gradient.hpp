@@ -41,8 +41,9 @@ struct BaseGradientParams
 	double max_joint_deviation_weight = 1.0;
 
 	// Inner GTSP (redundant-IK generalized TSP): each viewpoint offers up to this many distinct IK
-	// branches and the solver picks whichever ordering + branch minimizes reconfiguration.
-	int max_solutions_per_candidate = 3;
+	// branches and the solver picks whichever ordering + branch minimizes reconfiguration. Used
+	// only for the committed solve each iteration; line-search probes always use 1 (cheap).
+	int max_solutions_per_candidate = 2;
 	double ik_timeout = 0.1;
 	int ik_retries_per_point = 8;
 	int gtsp_two_opt_rounds = 5;
@@ -50,7 +51,10 @@ struct BaseGradientParams
 	// Independent descents to escape local minima: restart 0 starts from initial_*, the rest from
 	// random offsets within `bounds` (seeded by random_seed). Each restart re-solves IK/GTSP cold.
 	// The lowest fully-reachable cost across all restarts is returned. 1 = single descent.
-	int num_restarts = 8;
+	int num_restarts = 4;
+	// Stop launching restarts once there is a fully-reachable result and this many consecutive
+	// restarts failed to beat it. 0 disables (always run all num_restarts).
+	int restart_patience = 2;
 
 	// Gradient descent on the object offset. The descent direction is the unit-normalized negative
 	// gradient in a mixed metric where 1 rad of tip/tilt counts as `rot_metric_scale` meters, so
@@ -60,7 +64,7 @@ struct BaseGradientParams
 	double step_shrink = 0.5;
 	double armijo_c = 1e-4;
 	double min_step = 1e-4;
-	int max_line_search_iters = 12;
+	int max_line_search_iters = 8;
 	double jacobian_damping = 1e-3;  // lambda in the damped pseudo-inverse J^T (J J^T + lambda^2 I)^-1
 	double rot_metric_scale = 0.3;   // meters per radian, for blending translation & tip/tilt steps
 

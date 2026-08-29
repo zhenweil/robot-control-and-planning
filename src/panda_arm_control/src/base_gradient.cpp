@@ -166,9 +166,9 @@ double WeightedEdgeCost(
 // IK-branch collection
 // ---------------------------------------------------------------------------------------------
 
-// Up to params.max_solutions_per_candidate distinct collision-free IK solutions for every tour
-// pose, at base `base`. Object is moved into `base`'s frame once up front. Empty inner vector for
-// a pose that has no feasible solution at this base.
+// Up to `max_solutions` distinct collision-free IK solutions for every tour pose, at base `base`.
+// Object is moved into `base`'s frame once up front. Empty inner vector for a pose that has no
+// feasible solution at this base.
 //
 // seed_per_viewpoint[i] is the warm start for pose i's first IK attempt -- passing the previous
 // base's solution for that pose keeps q_i(b) on a continuous IK branch as the base moves, which
@@ -177,7 +177,8 @@ std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
-	const std::vector<std::vector<double>>& seed_per_viewpoint, const BaseOffset& base, const BaseGradientParams& params)
+	const std::vector<std::vector<double>>& seed_per_viewpoint, const BaseOffset& base, const BaseGradientParams& params,
+	int max_solutions)
 {
 	Eigen::Isometry3d xform = MakeObjectOffset(base);
 	SetObjectPose(planning_scene_monitor, xform * object_pose_original);
@@ -187,7 +188,7 @@ std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 								 const double* jp) { return IsStateCollisionFree(planning_scene_monitor, s, g, jp); };
 
 	std::vector<std::vector<std::vector<double>>> branches(tour_tcp_poses_original.size());
-	const int max_sol = std::max(1, params.max_solutions_per_candidate);
+	const int max_sol = std::max(1, max_solutions);
 
 	for (size_t i = 0; i < tour_tcp_poses_original.size(); ++i)
 	{
@@ -497,17 +498,19 @@ struct InnerSolution
 	bool all_reachable = false;
 };
 
+// max_solutions: IK branches to collect per pose. Pass 1 for a cheap probe (single warm-started
+// IK per pose, GTSP degenerates to plain TSP); pass params.max_solutions_per_candidate to commit.
 InnerSolution InnerSolve(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
 	const std::vector<std::vector<double>>& seed_per_viewpoint, const std::vector<double>& home_joints,
 	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params,
-	const std::vector<int>* warm_order)
+	const std::vector<int>* warm_order, int max_solutions)
 {
 	std::vector<std::vector<std::vector<double>>> branches = CollectIkSolutions(
 		state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seed_per_viewpoint, base,
-		params);
+		params, max_solutions);
 	GtspSolution gtsp = RunGtsp(
 		branches, base, tour_tcp_poses_original, home_joints, home_tcp_local, params, warm_order);
 
@@ -929,7 +932,7 @@ BaseGradientResult SolveBaseGradient(
 
 		InnerSolution cur = InnerSolve(
 			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
-			start_reference_joints, home_tcp_local, base, params, nullptr);
+			start_reference_joints, home_tcp_local, base, params, nullptr, params.max_solutions_per_candidate);
 
 		if (cur.tour.empty())
 		{
@@ -988,9 +991,10 @@ BaseGradientResult SolveBaseGradient(
 					{base.x + step * dir_u(0), base.y + step * dir_u(1), base.z + step * dir_u(2),
 					 base.roll + step * dir_u(3) / rot_scale, base.pitch + step * dir_u(4) / rot_scale},
 					params.bounds);
+				// Cheap probe: one warm-started IK per pose, GTSP = plain TSP off the current order.
 				InnerSolution probe = InnerSolve(
 					state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
-					start_reference_joints, home_tcp_local, cand, params, &cur.tour);
+					start_reference_joints, home_tcp_local, cand, params, &cur.tour, 1);
 				if (probe.all_reachable && probe.weighted_cost <= cur.weighted_cost - params.armijo_c * step * gnorm)
 				{
 					accepted = true;
@@ -1010,14 +1014,22 @@ BaseGradientResult SolveBaseGradient(
 				break;
 			}
 
+			// Commit with a full multi-branch solve at the accepted offset (cost <= the cheap
+			// probe's, so still an improvement); fall back to the probe if that regresses.
+			InnerSolution committed = InnerSolve(
+				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
+				start_reference_joints, home_tcp_local, b_new, params, &next.tour, params.max_solutions_per_candidate);
+			if (!committed.all_reachable || committed.weighted_cost > next.weighted_cost)
+				committed = std::move(next);
+
 			OffsetVec du = ToOffsetVec(b_new, base);
 			du(3) *= rot_scale;
 			du(4) *= rot_scale;
 			double base_move = du.norm();
-			double rel_impr = (cur.weighted_cost - next.weighted_cost) / std::max(cur.weighted_cost, 1e-9);
+			double rel_impr = (cur.weighted_cost - committed.weighted_cost) / std::max(cur.weighted_cost, 1e-9);
 
 			base = b_new;
-			cur = std::move(next);
+			cur = std::move(committed);
 			base_history.push_back(base);
 			record(base, cur);
 
@@ -1066,6 +1078,7 @@ BaseGradientResult SolveBaseGradient(
 	std::mt19937 rng(static_cast<unsigned int>(params.random_seed));
 	const int num_restarts = std::max(1, params.num_restarts);
 	RestartResult overall;
+	int since_improved = 0;  // restarts since `overall` last improved (only counted once it is ok)
 
 	for (int r = 0; r < num_restarts && rclcpp::ok(); ++r)
 	{
@@ -1075,15 +1088,24 @@ BaseGradientResult SolveBaseGradient(
 					 : RandomOffsetInBounds(rng, params.bounds);
 		RestartResult rr = run_descent(start, r);
 
+		bool improved = (r == 0) || (rr.ok && !overall.ok) || (rr.ok == overall.ok && rr.cost < overall.cost);
+
 		RCLCPP_INFO(
 			node->get_logger(),
 			"restart %d/%d done: D=%.4f (%s)  offset (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg%s",
 			r + 1, num_restarts, rr.cost, rr.ok ? "all reachable" : "partial", rr.offset.x, rr.offset.y, rr.offset.z,
-			rr.offset.roll * 180.0 / M_PI, rr.offset.pitch * 180.0 / M_PI,
-			(r > 0 && rr.ok && (!overall.ok || rr.cost < overall.cost)) ? "  <-- new best" : "");
+			rr.offset.roll * 180.0 / M_PI, rr.offset.pitch * 180.0 / M_PI, (r > 0 && improved) ? "  <-- new best" : "");
 
-		if (r == 0 || (rr.ok && !overall.ok) || (rr.ok == overall.ok && rr.cost < overall.cost))
+		if (improved)
 			overall = rr;
+
+		since_improved = improved ? 0 : since_improved + 1;
+		if (overall.ok && params.restart_patience > 0 && since_improved >= params.restart_patience)
+		{
+			RCLCPP_INFO(
+				node->get_logger(), "stopping restarts: %d in a row did not beat D=%.4f", since_improved, overall.cost);
+			break;
+		}
 	}
 
 	const InnerSolution& fin = overall.sol;
