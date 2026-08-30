@@ -1678,7 +1678,12 @@ PlacementOrderExperimentResult RunPlacementOrderExperiment(
 	out.unreachable_penalty = params.unreachable_penalty;
 
 	grid_n = std::max(1, grid_n);
-	out.grid_shape = {grid_n, grid_n, grid_n};
+	// Collapse an axis to a single point when its bounds are degenerate (min == max), so e.g.
+	// passing z_min:=0 z_max:=0 does an x-y sweep only instead of grid_n redundant z-layers.
+	const int nx = (params.bounds.x_max - params.bounds.x_min > 1e-9) ? grid_n : 1;
+	const int ny = (params.bounds.y_max - params.bounds.y_min > 1e-9) ? grid_n : 1;
+	const int nz = (params.bounds.z_max - params.bounds.z_min > 1e-9) ? grid_n : 1;
+	out.grid_shape = {nx, ny, nz};
 	out.grid_min = {params.bounds.x_min, params.bounds.y_min, params.bounds.z_min};
 	out.grid_max = {params.bounds.x_max, params.bounds.y_max, params.bounds.z_max};
 
@@ -1728,6 +1733,18 @@ PlacementOrderExperimentResult RunPlacementOrderExperiment(
 		const double sx = 0.7 * std::max(std::abs(params.bounds.x_min), std::abs(params.bounds.x_max));
 		const double sy = 0.7 * std::max(std::abs(params.bounds.y_min), std::abs(params.bounds.y_max));
 		const double sz = 0.7 * std::max(std::abs(params.bounds.z_min), std::abs(params.bounds.z_max));
+		// Route 0 is the tour exactly as the viewpoint_planner_* run produced it (viewpoints are
+		// already stored in visiting order), so the EXP 1 / EXP 3 frozen route is the real
+		// pipeline order, not one re-derived at a particular offset.
+		{
+			std::vector<int> file_order(n);
+			for (int i = 0; i < n; ++i)
+				file_order[i] = i;
+			out.order_labels.push_back("file_order");
+			out.reference_orders.push_back(file_order);
+			RCLCPP_INFO(node->get_logger(), "[placement] reference route file_order: the input tour as given (%d poses)", n);
+		}
+
 		const std::vector<std::pair<std::string, BaseOffset>> seed_offsets = {
 			{"gtsp@nominal", {0, 0, 0, 0, 0}}, {"gtsp@+x", {sx, 0, 0, 0, 0}},   {"gtsp@-x", {-sx, 0, 0, 0, 0}},
 			{"gtsp@+y", {0, sy, 0, 0, 0}},	  {"gtsp@-y", {0, -sy, 0, 0, 0}},  {"gtsp@+z", {0, 0, sz, 0, 0}},
@@ -1778,24 +1795,25 @@ PlacementOrderExperimentResult RunPlacementOrderExperiment(
 	}
 
 	// ---- grid sweep (this shard's slice) ---------------------------------------------------
-	const int P = grid_n * grid_n * grid_n;
+	const int P = nx * ny * nz;
 	const int lo = std::clamp(grid_start, 0, P);
 	const int hi = grid_count < 0 ? P : std::min(P, lo + grid_count);
 	out.grid_start = lo;
 	out.grid_count = std::max(0, hi - lo);
 	RCLCPP_INFO(
-		node->get_logger(), "[placement] seed %d: sweeping grid points [%d, %d) of %d (%d^3), %d routes, min-of-%d",
-		params.random_seed, lo, hi, P, grid_n, K, R);
+		node->get_logger(),
+		"[placement] seed %d: sweeping grid points [%d, %d) of %d (%dx%dx%d), %d routes, min-of-%d",
+		params.random_seed, lo, hi, P, nx, ny, nz, K, R);
 
 	for (int idx = lo; idx < hi && rclcpp::ok(); ++idx)
 	{
-		const int ix = idx / (grid_n * grid_n);
-		const int iy = (idx / grid_n) % grid_n;
-		const int iz = idx % grid_n;
+		const int ix = idx / (ny * nz);
+		const int iy = (idx / nz) % ny;
+		const int iz = idx % nz;
 		const BaseOffset b{
-			GridCoord(ix, grid_n, params.bounds.x_min, params.bounds.x_max),
-			GridCoord(iy, grid_n, params.bounds.y_min, params.bounds.y_max),
-			GridCoord(iz, grid_n, params.bounds.z_min, params.bounds.z_max), 0.0, 0.0};
+			GridCoord(ix, nx, params.bounds.x_min, params.bounds.x_max),
+			GridCoord(iy, ny, params.bounds.y_min, params.bounds.y_max),
+			GridCoord(iz, nz, params.bounds.z_min, params.bounds.z_max), 0.0, 0.0};
 
 		PlacementGridPoint gp;
 		gp.offset = {b.x, b.y, b.z};

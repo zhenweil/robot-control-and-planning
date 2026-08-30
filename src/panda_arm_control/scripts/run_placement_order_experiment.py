@@ -6,7 +6,7 @@ sharding the grid_n^3 (x,y,z) grid across `--parallel` processes (each on its ow
 ROS_DOMAIN_ID). Every shard writes placement_experiment_seed<seed>_g<start>.json into
 --output-dir; this script merges the shards and prints the three-experiment report:
 
-  EXP 1  route frozen (gtsp@nominal): does the object (x,y,z) position change the tour cost?
+  EXP 1  route frozen (route 0 = input tour order): does the object (x,y,z) position change the tour cost?
   EXP 2  at that route's best position, does re-routing (full GTSP) lower the cost further?
   EXP 3  does the best position move when the route changes -- placement/routing separable?
 
@@ -34,6 +34,8 @@ def parse_args():
     p.add_argument("--range", type=float, default=0.15,
                    help="half-extent (m) of the (x,y,z) offset box, symmetric about nominal; "
                         "sets x/y/z min/max unless overridden in --extra")
+    p.add_argument("--no-z", action="store_true",
+                   help="x-y sweep only (z pinned to 0): grid_n^2 points instead of grid_n^3")
     p.add_argument("--parallel", type=int, default=1,
                    help="split each seed's grid into this many shards, run concurrently")
     p.add_argument("--output-dir", default="/tmp/placement_experiment_output")
@@ -60,7 +62,8 @@ def shard_cmd(seed, grid_n, start, count, args, routes_file=""):
         f"output_dir:={args.output_dir}",
     ]
     r = abs(args.range)
-    for name, val in (("x_min", -r), ("x_max", r), ("y_min", -r), ("y_max", r), ("z_min", -r), ("z_max", r)):
+    zr = 0.0 if args.no_z else r
+    for name, val in (("x_min", -r), ("x_max", r), ("y_min", -r), ("y_max", r), ("z_min", -zr), ("z_max", zr)):
         if name not in extra_names:
             cmd.append(f"{name}:={val}")
     if routes_file:
@@ -101,7 +104,7 @@ def _wait(running, launch_timeout):
 
 
 def run_seed(seed, args):
-    total = args.grid_n ** 3
+    total = args.grid_n ** (2 if args.no_z else 3)
     rfile = routes_path(args.output_dir, seed)
 
     # Prep run: solve the reference routes once and write them, so every grid shard scores
@@ -199,7 +202,7 @@ def report(m, seed):
     best, _ = best_for_route(grid, 0, n)
     d = dist(best["offset"], nom["offset"])
     full_hcs = [gp["order_honest_cost"][0] for gp in grid if gp["order_num_reachable"][0] == n]
-    print("\nEXP 1 -- route frozen (gtsp@nominal): does object position change cost?")
+    print("\nEXP 1 -- route frozen (route 0 = input tour order): does object position change cost?")
     print(f"  nominal (0,0,0):   honest cost {nom_hc:8.3f}   reach {nom_nr}/{n}")
     if full_hcs:
         print(f"  best full-reach:   honest cost {min(full_hcs):8.3f}   at "
@@ -272,7 +275,7 @@ def make_plots(m, seed, output_dir):
     def slice_grid(getter):
         return [[getter(grid[ix * ny * nz + iy * nz + kz]) for ix in range(nx)] for iy in range(ny)]
 
-    panels = [("route0 (gtsp@nominal), frozen", lambda gp: gp["order_weighted_cost"][0]),
+    panels = [("route 0 (input order), frozen", lambda gp: gp["order_weighted_cost"][0]),
               ("free-routing (full GTSP)", lambda gp: gp["full_weighted_cost"])]
     fig, axes = plt.subplots(1, len(panels), figsize=(5.5 * len(panels), 4.6))
     for ax, (title, getter) in zip(axes, panels):
