@@ -35,17 +35,22 @@ struct Params
 	std::string tour_input_dir = "/tmp/viewpoint_planner_output";
 	std::string output_dir = "/tmp/base_placement_output";
 
-	double bp_x_min = -0.3, bp_x_max = 0.3;
-	double bp_y_min = -0.3, bp_y_max = 0.3;
-	double bp_yaw_min = -M_PI, bp_yaw_max = M_PI;
-	int bp_num_restarts = 6;
-	int bp_max_outer_iterations = 8;
+	// Object-offset search box (m), relative to the object's nominal pose. Rotation held at 0.
+	double bp_x_min = -0.15, bp_x_max = 0.15;
+	double bp_y_min = -0.15, bp_y_max = 0.15;
+	double bp_z_min = -0.15, bp_z_max = 0.15;
+	int bp_num_restarts = 3;
+	int bp_max_outer_iterations = 10;
 	int bp_candidates_per_point = 16;
 	int bp_ik_retries_per_point = 4;
-	double bp_radius_shrink_factor = 0.6;
-	double bp_convergence_tolerance_xy = 0.002;
-	double bp_convergence_tolerance_yaw = 0.01;
-	double ik_timeout = 0.1;
+	double bp_initial_step = 0.06;
+	double bp_step_shrink = 0.5;
+	double bp_min_step = 0.005;
+	double bp_convergence_tolerance_cost = 1e-2;
+	// solve_restarts for the ScoreObjectOffset cost -- 1 (default) trades some noise for speed;
+	// 2 matches the placement experiment's careful runs.
+	int bp_score_solve_restarts = 1;
+	double ik_timeout = 0.15;
 	int random_seed = 42;
 	// Seconds to pause after each refinement-loop iteration's progress publish, so the
 	// convergence can actually be watched in RViz on /base_placement_progress_markers. 0.0
@@ -185,15 +190,17 @@ private:
 		this->declareIfNeeded("bp_x_max", this->params.bp_x_max);
 		this->declareIfNeeded("bp_y_min", this->params.bp_y_min);
 		this->declareIfNeeded("bp_y_max", this->params.bp_y_max);
-		this->declareIfNeeded("bp_yaw_min", this->params.bp_yaw_min);
-		this->declareIfNeeded("bp_yaw_max", this->params.bp_yaw_max);
+		this->declareIfNeeded("bp_z_min", this->params.bp_z_min);
+		this->declareIfNeeded("bp_z_max", this->params.bp_z_max);
 		this->declareIfNeeded("bp_num_restarts", this->params.bp_num_restarts);
 		this->declareIfNeeded("bp_max_outer_iterations", this->params.bp_max_outer_iterations);
 		this->declareIfNeeded("bp_candidates_per_point", this->params.bp_candidates_per_point);
 		this->declareIfNeeded("bp_ik_retries_per_point", this->params.bp_ik_retries_per_point);
-		this->declareIfNeeded("bp_radius_shrink_factor", this->params.bp_radius_shrink_factor);
-		this->declareIfNeeded("bp_convergence_tolerance_xy", this->params.bp_convergence_tolerance_xy);
-		this->declareIfNeeded("bp_convergence_tolerance_yaw", this->params.bp_convergence_tolerance_yaw);
+		this->declareIfNeeded("bp_initial_step", this->params.bp_initial_step);
+		this->declareIfNeeded("bp_step_shrink", this->params.bp_step_shrink);
+		this->declareIfNeeded("bp_min_step", this->params.bp_min_step);
+		this->declareIfNeeded("bp_convergence_tolerance_cost", this->params.bp_convergence_tolerance_cost);
+		this->declareIfNeeded("bp_score_solve_restarts", this->params.bp_score_solve_restarts);
 		this->declareIfNeeded("ik_timeout", this->params.ik_timeout);
 		this->declareIfNeeded("random_seed", this->params.random_seed);
 		this->declareIfNeeded("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -216,15 +223,17 @@ private:
 		this->get_parameter("bp_x_max", this->params.bp_x_max);
 		this->get_parameter("bp_y_min", this->params.bp_y_min);
 		this->get_parameter("bp_y_max", this->params.bp_y_max);
-		this->get_parameter("bp_yaw_min", this->params.bp_yaw_min);
-		this->get_parameter("bp_yaw_max", this->params.bp_yaw_max);
+		this->get_parameter("bp_z_min", this->params.bp_z_min);
+		this->get_parameter("bp_z_max", this->params.bp_z_max);
 		this->get_parameter("bp_num_restarts", this->params.bp_num_restarts);
 		this->get_parameter("bp_max_outer_iterations", this->params.bp_max_outer_iterations);
 		this->get_parameter("bp_candidates_per_point", this->params.bp_candidates_per_point);
 		this->get_parameter("bp_ik_retries_per_point", this->params.bp_ik_retries_per_point);
-		this->get_parameter("bp_radius_shrink_factor", this->params.bp_radius_shrink_factor);
-		this->get_parameter("bp_convergence_tolerance_xy", this->params.bp_convergence_tolerance_xy);
-		this->get_parameter("bp_convergence_tolerance_yaw", this->params.bp_convergence_tolerance_yaw);
+		this->get_parameter("bp_initial_step", this->params.bp_initial_step);
+		this->get_parameter("bp_step_shrink", this->params.bp_step_shrink);
+		this->get_parameter("bp_min_step", this->params.bp_min_step);
+		this->get_parameter("bp_convergence_tolerance_cost", this->params.bp_convergence_tolerance_cost);
+		this->get_parameter("bp_score_solve_restarts", this->params.bp_score_solve_restarts);
 		this->get_parameter("ik_timeout", this->params.ik_timeout);
 		this->get_parameter("random_seed", this->params.random_seed);
 		this->get_parameter("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -267,26 +276,45 @@ private:
 		bp_params.bounds.x_max = this->params.bp_x_max;
 		bp_params.bounds.y_min = this->params.bp_y_min;
 		bp_params.bounds.y_max = this->params.bp_y_max;
-		bp_params.bounds.yaw_min = this->params.bp_yaw_min;
-		bp_params.bounds.yaw_max = this->params.bp_yaw_max;
+		bp_params.bounds.z_min = this->params.bp_z_min;
+		bp_params.bounds.z_max = this->params.bp_z_max;
 		bp_params.num_restarts = this->params.bp_num_restarts;
 		bp_params.max_outer_iterations = this->params.bp_max_outer_iterations;
 		bp_params.candidates_per_point = this->params.bp_candidates_per_point;
 		bp_params.ik_retries_per_point = this->params.bp_ik_retries_per_point;
-		bp_params.radius_shrink_factor = this->params.bp_radius_shrink_factor;
-		bp_params.convergence_tolerance_xy = this->params.bp_convergence_tolerance_xy;
-		bp_params.convergence_tolerance_yaw = this->params.bp_convergence_tolerance_yaw;
 		bp_params.ik_timeout = this->params.ik_timeout;
+		bp_params.initial_step = this->params.bp_initial_step;
+		bp_params.step_shrink = this->params.bp_step_shrink;
+		bp_params.min_step = this->params.bp_min_step;
+		bp_params.convergence_tolerance_cost = this->params.bp_convergence_tolerance_cost;
 		bp_params.random_seed = this->params.random_seed;
 		bp_params.progress_pub = this->progress_marker_pub;
 		bp_params.visualize_progress_delay_sec = this->params.visualize_progress_delay_sec;
 
+		// The cost every candidate offset is scored with -- identical to the base_gradient
+		// placement experiment: struct defaults are the retuned IK / weight / penalty values;
+		// only the offset bounds and (optionally) solve_restarts / ik_timeout differ.
+		BaseGradientParams score_params;
+		score_params.bounds.x_min = this->params.bp_x_min;
+		score_params.bounds.x_max = this->params.bp_x_max;
+		score_params.bounds.y_min = this->params.bp_y_min;
+		score_params.bounds.y_max = this->params.bp_y_max;
+		score_params.bounds.z_min = this->params.bp_z_min;
+		score_params.bounds.z_max = this->params.bp_z_max;
+		score_params.bounds.roll_min = score_params.bounds.roll_max = 0.0;
+		score_params.bounds.pitch_min = score_params.bounds.pitch_max = 0.0;
+		score_params.solve_restarts = this->params.bp_score_solve_restarts;
+		score_params.ik_timeout = this->params.ik_timeout;
+		score_params.random_seed = this->params.random_seed;
+
 		RCLCPP_INFO(
-			this->get_logger(), "Searching for the best base position to reach all %zu points...", tour_tcp_poses.size());
+			this->get_logger(), "B* baseline: optimizing the object offset (x,y,z) over %zu viewpoints...",
+			tour_tcp_poses.size());
 
 		BasePlacementResult result = SolveBasePlacement(
 			this->shared_from_this(), this->robot_model, local_scene, this->params.group_name,
-			object_translation_world, object_rotation_world, tour_tcp_poses, this->home_joint_values, bp_params);
+			object_translation_world, object_rotation_world, tour_tcp_poses, this->home_joint_values, bp_params,
+			score_params);
 
 		ExportBasePlacementResult(this->params.output_dir, result);
 
@@ -309,35 +337,32 @@ private:
 		{
 			RCLCPP_WARN(
 				this->get_logger(),
-				"execute_on_robot: driving the REAL robot as if the base were at (%.4f, %.4f, %.4f rad) by "
-				"moving the object in software -- this is only correct if the object has actually been "
-				"placed there (or the base actually remounted). Aborting if that is not the case.",
-				result.x, result.y, result.yaw);
+				"execute_on_robot: driving the REAL robot against the object moved by (%.4f, %.4f, %.4f) m in "
+				"software -- only correct if the physical object has actually been re-fixtured to match.",
+				result.x, result.y, result.z);
 
 			ApplyBasePlacementToScene(
-				local_scene, object_translation_world, object_rotation_world, result.x, result.y, result.yaw);
+				local_scene, object_translation_world, object_rotation_world, result.x, result.y, result.z);
 
-			Eigen::Isometry3d base_transform_inv =
-				(Eigen::Translation3d(result.x, result.y, 0.0) *
-				 Eigen::AngleAxisd(result.yaw, Eigen::Vector3d::UnitZ()))
-					.inverse();
+			Eigen::Isometry3d object_offset = Eigen::Isometry3d::Identity();
+			object_offset.translation() = Eigen::Vector3d(result.x, result.y, result.z);
 
-			std::vector<ViewpointCandidate> owned(tour_tcp_poses.size());
+			std::vector<ViewpointCandidate> owned(result.tour_order.size());
 			std::vector<const ViewpointCandidate*> selected;
-			selected.reserve(tour_tcp_poses.size());
-			for (size_t i = 0; i < tour_tcp_poses.size(); ++i)
+			selected.reserve(result.tour_order.size());
+			for (size_t k = 0; k < result.tour_order.size(); ++k)
 			{
-				Eigen::Isometry3d local_pose = base_transform_inv * tour_tcp_poses[i];
-				owned[i].tcp_pose.position.x = local_pose.translation().x();
-				owned[i].tcp_pose.position.y = local_pose.translation().y();
-				owned[i].tcp_pose.position.z = local_pose.translation().z();
+				Eigen::Isometry3d local_pose = object_offset * tour_tcp_poses[result.tour_order[k]];
+				owned[k].tcp_pose.position.x = local_pose.translation().x();
+				owned[k].tcp_pose.position.y = local_pose.translation().y();
+				owned[k].tcp_pose.position.z = local_pose.translation().z();
 				Eigen::Quaterniond q(local_pose.rotation());
-				owned[i].tcp_pose.orientation.x = q.x();
-				owned[i].tcp_pose.orientation.y = q.y();
-				owned[i].tcp_pose.orientation.z = q.z();
-				owned[i].tcp_pose.orientation.w = q.w();
-				owned[i].joint_solution = result.joint_solutions[i];
-				selected.push_back(&owned[i]);
+				owned[k].tcp_pose.orientation.x = q.x();
+				owned[k].tcp_pose.orientation.y = q.y();
+				owned[k].tcp_pose.orientation.z = q.z();
+				owned[k].tcp_pose.orientation.w = q.w();
+				owned[k].joint_solution = result.joint_solutions[k];
+				selected.push_back(&owned[k]);
 			}
 
 			ExecuteTourOnRobot(

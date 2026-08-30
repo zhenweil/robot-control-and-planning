@@ -40,6 +40,37 @@ def generate_launch_description():
         LaunchConfiguration("visualize_progress_delay_sec"), value_type=float
     )
 
+    random_seed_arg = DeclareLaunchArgument(
+        "random_seed",
+        default_value="42",
+        description="Seeds the restart RNG and, via RANDOM_SEED env, MoveIt's IK plugin -- so a "
+        "run is reproducible. Change it to sample a different run.",
+    )
+    random_seed = LaunchConfiguration("random_seed")
+
+    score_solve_restarts_arg = DeclareLaunchArgument(
+        "score_solve_restarts",
+        default_value="1",
+        description="min-of-N IK collections per candidate score. 1 = fast (some noise); 2 "
+        "matches the experiment's careful runs.",
+    )
+    score_solve_restarts = ParameterValue(LaunchConfiguration("score_solve_restarts"), value_type=int)
+
+    num_restarts_arg = DeclareLaunchArgument("num_restarts", default_value="3")
+    num_restarts = ParameterValue(LaunchConfiguration("num_restarts"), value_type=int)
+
+    offset_bound_args = []
+    offset_bounds = {}
+    for _axis in ("x", "y", "z"):
+        for _side, _default in (("min", "-0.15"), ("max", "0.15")):
+            _name = f"{_axis}_{_side}"
+            offset_bound_args.append(DeclareLaunchArgument(
+                _name, default_value=_default,
+                description=f"Object offset {_axis} {_side} bound (m).",
+            ))
+            offset_bounds[f"bp_{_name}"] = ParameterValue(
+                LaunchConfiguration(_name), value_type=float)
+
     moveit_config = (
         MoveItConfigsBuilder("panda", package_name="panda_arm_moveit")
         .robot_description(file_path="config/panda.urdf.xacro")
@@ -59,23 +90,19 @@ def generate_launch_description():
         # ordered tour's selected_robot_poses.json -- this node's input.
         "tour_input_dir": "/tmp/viewpoint_planner_output",
         "output_dir": "/tmp/base_placement_output",
-        # Candidate base offset search bounds, relative to today's actual mount -- see
-        # base_placement.hpp for what each controls.
-        "bp_x_min": -0.3,
-        "bp_x_max": 0.3,
-        "bp_y_min": -0.3,
-        "bp_y_max": 0.3,
-        "bp_yaw_min": -3.14159265,
-        "bp_yaw_max": 3.14159265,
-        "bp_num_restarts": 6,
-        "bp_max_outer_iterations": 8,
+        # Object-offset search box (m) + search-strategy knobs -- see base_placement.hpp.
+        **offset_bounds,
+        "bp_num_restarts": num_restarts,
+        "bp_max_outer_iterations": 10,
         "bp_candidates_per_point": 16,
         "bp_ik_retries_per_point": 4,
-        "bp_radius_shrink_factor": 0.6,
-        "bp_convergence_tolerance_xy": 0.002,
-        "bp_convergence_tolerance_yaw": 0.01,
-        "ik_timeout": 0.1,
-        "random_seed": 42,
+        "bp_initial_step": 0.06,
+        "bp_step_shrink": 0.5,
+        "bp_min_step": 0.005,
+        "bp_convergence_tolerance_cost": 0.01,
+        "bp_score_solve_restarts": score_solve_restarts,
+        "ik_timeout": 0.15,
+        "random_seed": ParameterValue(random_seed, value_type=int),
         "visualize_progress_delay_sec": visualize_progress_delay_sec,
         "execute_on_robot": execute_on_robot,
         "execution_planning_time": 5.0,
@@ -94,6 +121,8 @@ def generate_launch_description():
         name="base_placement",
         output="screen",
         parameters=[moveit_config.to_dict(), base_placement_params, object_pose_config],
+        # Makes MoveIt's IK (KDL) deterministic -- it otherwise re-seeds from /dev/urandom.
+        additional_env={"RANDOM_SEED": random_seed},
     )
 
     rviz_config = PathJoinSubstitution(
@@ -114,6 +143,10 @@ def generate_launch_description():
             use_rviz_arg,
             execute_on_robot_arg,
             visualize_progress_delay_sec_arg,
+            random_seed_arg,
+            score_solve_restarts_arg,
+            num_restarts_arg,
+            *offset_bound_args,
             base_placement_node,
             rviz_node,
         ]

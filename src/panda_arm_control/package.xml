@@ -18,6 +18,7 @@
   <depend>geometric_shapes</depend>
   <depend>visualization_msgs</depend>
   <depend>ament_index_cpp</depend>
+  <depend>random_numbers</depend>
   <depend>libvtk9-dev</depend>
   <depend>libjsoncpp-dev</depend>
 

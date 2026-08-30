@@ -21,6 +21,7 @@ find_package(shape_msgs REQUIRED)
 find_package(geometric_shapes REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+find_package(random_numbers REQUIRED)
 find_package(jsoncpp REQUIRED)
 find_package(VTK 9.1 REQUIRED COMPONENTS
 	CommonCore
@@ -73,6 +74,7 @@ add_executable(viewpoint_planner_hgtsp
 
 add_executable(base_placement
 	src/base_placement.cpp
+	src/base_gradient.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
 	src/base_placement_node.cpp
@@ -95,6 +97,7 @@ foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt
 		moveit_ros_planning_interface
 		moveit_ros_planning
 		moveit_msgs
+		random_numbers
 		geometry_msgs
 		shape_msgs
 		geometric_shapes
@@ -128,6 +131,7 @@ install(
 
 install(PROGRAMS
   scripts/run_base_gradient_experiments.py
+  scripts/run_placement_order_experiment.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
