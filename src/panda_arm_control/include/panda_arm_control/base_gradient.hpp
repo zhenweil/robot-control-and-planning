@@ -219,6 +219,115 @@ BaseGradientExperimentResult RunBaseGradientExperiment(
 // Writes base_gradient_experiment_seed<seed>.json to output_dir.
 void ExportBaseGradientExperimentResult(const std::string& output_dir, const BaseGradientExperimentResult& result);
 
+// ---------------------------------------------------------------------------------------------
+// Score one object offset with exactly the placement experiment's / descent's inner solve, so a
+// separate placement optimizer (e.g. the B* baseline in base_placement.cpp) can share the
+// objective verbatim. offset is (x, y, z, roll, pitch); it is clamped to params.bounds.
+// min-of-params.solve_restarts IK collections, then a full redundant-IK GTSP re-route -- or, if
+// fixed_order is non-empty, an exact fixed-order branch DP over that visiting sequence. Restores
+// the scene before returning.
+// ---------------------------------------------------------------------------------------------
+struct ObjectOffsetScore
+{
+	double weighted_cost = 0.0;  // solver metric: joint L2 + max-dev, + unreachable_penalty/pose
+	double honest_cost = 0.0;	 // penalty stripped
+	int num_reachable = 0;
+	int num_total = 0;
+	bool all_reachable = false;
+	std::vector<int> tour;					 // visit order (viewpoint indices)
+	std::vector<std::vector<double>> joints;  // parallel: chosen IK branch
+};
+
+ObjectOffsetScore ScoreObjectOffset(
+	const rclcpp::Node::SharedPtr& node,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::string& group_name,
+	const Eigen::Vector3d& object_translation_original,
+	const Eigen::Matrix3d& object_rotation_original,
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
+	const std::vector<double>& start_reference_joints,
+	const BaseGradientParams& params,
+	const std::array<double, 5>& offset,
+	const std::vector<int>& fixed_order);
+
+// ---------------------------------------------------------------------------------------------
+// Placement / order separability experiment. Answers three questions the descent leaves open:
+//   1  with the visiting route frozen, does the object (x, y, z) position change the tour cost?
+//      (rotation is held at 0 here.)
+//   2  at the best position for a route, does re-routing (full GTSP) lower the cost further?
+//   3  does the best object position move when the route changes -- are placement and routing
+//      separable, or coupled?
+// One sweep feeds all three: a grid_n^3 grid of (x, y, z) offsets over the bounds. At each grid
+// point the IK branch set is collected once (min-of-solve_restarts), then every reference route
+// is scored against it with an exact fixed-order branch DP (SolveFixedOrder), and one free-
+// routing full GTSP is run on the same branches. Reference routes are the full GTSP's output at
+// the nominal offset and at 6 spread offsets, each padded to a full permutation.
+// The grid can be sharded (grid_start / grid_count) across processes. The seed-pose RNG is
+// re-seeded per grid point from (seed, flat index); MoveIt's IK plugin RNG still advances with
+// the global call order, so a sharded run differs slightly from a single-process one -- within
+// the min-of-solve_restarts cost noise, not enough to move the flat-vs-structured verdict.
+// ---------------------------------------------------------------------------------------------
+struct PlacementGridPoint
+{
+	std::array<double, 3> offset{{0, 0, 0}};  // x, y, z actually evaluated
+	int num_ik_reachable = 0;				 // viewpoints with >=1 collision-free IK branch here
+
+	// Parallel to PlacementOrderExperimentResult::reference_orders -- the fixed-route branch-DP
+	// score of each reference route at this offset (best over the solve_restarts replicas).
+	std::vector<double> order_weighted_cost;  // includes the unreachable penalty (solver metric)
+	std::vector<double> order_honest_cost;	 // penalty stripped
+	std::vector<int> order_num_reachable;
+
+	// Free-routing full GTSP (reorder + branch) on the same branch set, best over replicas.
+	double full_weighted_cost = 0.0;
+	double full_honest_cost = 0.0;
+	int full_num_reachable = 0;
+	std::vector<int> full_tour;  // the re-optimized visiting order (viewpoint indices)
+};
+
+struct PlacementOrderExperimentResult
+{
+	int seed = 0;
+	int num_total = 0;
+	double unreachable_penalty = 50.0;
+
+	std::array<int, 3> grid_shape{{0, 0, 0}};	   // (nx, ny, nz), all = grid_n
+	std::array<double, 3> grid_min{{0, 0, 0}};	   // (x_min, y_min, z_min)
+	std::array<double, 3> grid_max{{0, 0, 0}};
+	int grid_start = 0;	 // flat index of the first grid point in `grid`
+	int grid_count = 0;	 // number of grid points in `grid` (this shard's slice)
+
+	std::vector<std::string> order_labels;
+	std::vector<std::vector<int>> reference_orders;	// full permutations of 0..num_total-1
+	std::vector<PlacementGridPoint> grid;			// the slice [grid_start, grid_start + grid_count)
+};
+
+// grid_count < 0 means "to the end of the grid from grid_start".
+// reference_orders_file: if non-empty, load the reference routes from that JSON instead of
+// solving for them -- so every shard of a parallel sweep scores against an identical route set
+// (route generation at reachability-breaking offsets is IK-timeout / CPU-load sensitive and does
+// not reproduce across processes). When empty, the routes are solved and written to
+// <output_dir>/placement_reference_orders_seed<seed>.json for the grid shards to reuse.
+PlacementOrderExperimentResult RunPlacementOrderExperiment(
+	const rclcpp::Node::SharedPtr& node,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::string& group_name,
+	const Eigen::Vector3d& object_translation_original,
+	const Eigen::Matrix3d& object_rotation_original,
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
+	const std::vector<double>& start_reference_joints,
+	const BaseGradientParams& params,
+	int grid_n,
+	int grid_start,
+	int grid_count,
+	const std::string& reference_orders_file,
+	const std::string& output_dir);
+
+// Writes placement_experiment_seed<seed>_g<grid_start>.json to output_dir.
+void ExportPlacementOrderExperimentResult(const std::string& output_dir, const PlacementOrderExperimentResult& result);
+
 // Moves the registered "object" collision object to its nominal pose adjusted by the offset
 // T(x,y,z) * Ry(pitch) * Rx(roll) in the robot base frame. Only valid if that adjustment has
 // actually been realized on the physical object (re-fixtured to match).

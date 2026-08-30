@@ -83,6 +83,18 @@ struct Params
 	// committed-solve count (a genuine equal-budget baseline); >0 = that many points.
 	int bg_experiment_random_search_budget = 0;
 
+	// Placement / order separability experiment (see base_gradient.hpp): sweep a grid_n^3 grid of
+	// (x, y, z) offsets, score each reference route with a fixed-order branch DP + a free-routing
+	// GTSP. Writes placement_experiment_seed<seed>_g<grid_start>.json and exits. The grid can be
+	// sharded across processes with grid_start / grid_count (-1 = to the end).
+	bool bg_placement_experiment = false;
+	int bg_placement_grid_n = 5;
+	int bg_placement_grid_start = 0;
+	int bg_placement_grid_count = -1;
+	// Empty = solve the reference routes and write them to output_dir; a path = load them (so
+	// every shard of a parallel sweep scores against an identical route set).
+	std::string bg_placement_reference_orders_file = "";
+
 	double ik_timeout = 0.15;
 	int random_seed = 42;
 	double visualize_progress_delay_sec = 0.0;
@@ -260,6 +272,11 @@ private:
 		this->declareIfNeeded("bg_experiment_num_random_dirs", this->params.bg_experiment_num_random_dirs);
 		this->declareIfNeeded("bg_experiment_min_probe_metric", this->params.bg_experiment_min_probe_metric);
 		this->declareIfNeeded("bg_experiment_random_search_budget", this->params.bg_experiment_random_search_budget);
+		this->declareIfNeeded("bg_placement_experiment", this->params.bg_placement_experiment);
+		this->declareIfNeeded("bg_placement_grid_n", this->params.bg_placement_grid_n);
+		this->declareIfNeeded("bg_placement_grid_start", this->params.bg_placement_grid_start);
+		this->declareIfNeeded("bg_placement_grid_count", this->params.bg_placement_grid_count);
+		this->declareIfNeeded("bg_placement_reference_orders_file", this->params.bg_placement_reference_orders_file);
 		this->declareIfNeeded("ik_timeout", this->params.ik_timeout);
 		this->declareIfNeeded("random_seed", this->params.random_seed);
 		this->declareIfNeeded("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -322,6 +339,11 @@ private:
 		this->get_parameter("bg_experiment_num_random_dirs", this->params.bg_experiment_num_random_dirs);
 		this->get_parameter("bg_experiment_min_probe_metric", this->params.bg_experiment_min_probe_metric);
 		this->get_parameter("bg_experiment_random_search_budget", this->params.bg_experiment_random_search_budget);
+		this->get_parameter("bg_placement_experiment", this->params.bg_placement_experiment);
+		this->get_parameter("bg_placement_grid_n", this->params.bg_placement_grid_n);
+		this->get_parameter("bg_placement_grid_start", this->params.bg_placement_grid_start);
+		this->get_parameter("bg_placement_grid_count", this->params.bg_placement_grid_count);
+		this->get_parameter("bg_placement_reference_orders_file", this->params.bg_placement_reference_orders_file);
 		this->get_parameter("ik_timeout", this->params.ik_timeout);
 		this->get_parameter("random_seed", this->params.random_seed);
 		this->get_parameter("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -402,6 +424,26 @@ private:
 		bg.fd_epsilon = this->params.bg_fd_epsilon;
 		bg.progress_pub = this->progress_marker_pub;
 		bg.visualize_progress_delay_sec = this->params.visualize_progress_delay_sec;
+
+		if (this->params.bg_placement_experiment)
+		{
+			RCLCPP_INFO(
+				this->get_logger(),
+				"Placement/order experiment (seed %d): sweeping a %d^3 (x,y,z) grid, fixed-order vs free-routing "
+				"cost...",
+				this->params.random_seed, this->params.bg_placement_grid_n);
+			PlacementOrderExperimentResult pexp = RunPlacementOrderExperiment(
+				this->shared_from_this(), this->robot_model, local_scene, this->params.group_name,
+				object_translation_world, object_rotation_world, tour_tcp_poses, this->home_joint_values, bg,
+				this->params.bg_placement_grid_n, this->params.bg_placement_grid_start,
+				this->params.bg_placement_grid_count, this->params.bg_placement_reference_orders_file,
+				this->params.output_dir);
+			// grid_count == 0 is a routes-only prep run (writes the reference-routes file, no grid).
+			if (this->params.bg_placement_grid_count != 0)
+				ExportPlacementOrderExperimentResult(this->params.output_dir, pexp);
+			rclcpp::shutdown();
+			return;
+		}
 
 		if (this->params.bg_experiment_mode)
 		{

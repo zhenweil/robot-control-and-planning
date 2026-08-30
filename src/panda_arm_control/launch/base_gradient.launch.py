@@ -119,6 +119,66 @@ def generate_launch_description():
         LaunchConfiguration("experiment_random_search_budget"), value_type=int
     )
 
+    placement_experiment_arg = DeclareLaunchArgument(
+        "placement_experiment",
+        default_value="false",
+        description="Instead of the normal run: sweep a placement_grid_n^3 grid of (x,y,z) object "
+        "offsets (rotation held at 0), scoring each of several reference routes with a fixed-order "
+        "branch DP plus one free-routing GTSP per grid point. Answers whether position affects "
+        "cost, whether re-routing helps at the best position, and whether the best position moves "
+        "with the route. Writes placement_experiment_seed<seed>_g<grid_start>.json and exits. "
+        "scripts/run_placement_order_experiment.py drives + reports this.",
+    )
+    placement_experiment = ParameterValue(LaunchConfiguration("placement_experiment"), value_type=bool)
+
+    placement_grid_n_arg = DeclareLaunchArgument(
+        "placement_grid_n",
+        default_value="5",
+        description="placement_experiment: grid points per axis (grid_n^3 total). Odd values put "
+        "the nominal offset exactly on the grid.",
+    )
+    placement_grid_n = ParameterValue(LaunchConfiguration("placement_grid_n"), value_type=int)
+
+    placement_grid_start_arg = DeclareLaunchArgument(
+        "placement_grid_start",
+        default_value="0",
+        description="placement_experiment: flat index of the first grid point to evaluate -- for "
+        "sharding the sweep across processes.",
+    )
+    placement_grid_start = ParameterValue(LaunchConfiguration("placement_grid_start"), value_type=int)
+
+    placement_grid_count_arg = DeclareLaunchArgument(
+        "placement_grid_count",
+        default_value="-1",
+        description="placement_experiment: number of grid points to evaluate from placement_grid_start; "
+        "-1 = to the end of the grid, 0 = a routes-only prep run (write the reference-routes file, "
+        "no grid, no result JSON).",
+    )
+    placement_grid_count = ParameterValue(LaunchConfiguration("placement_grid_count"), value_type=int)
+
+    placement_reference_orders_file_arg = DeclareLaunchArgument(
+        "placement_reference_orders_file",
+        default_value="",
+        description="placement_experiment: path to a reference-routes JSON to score against. Empty "
+        "= solve the routes and write them to output_dir/placement_reference_orders_seed<seed>.json. "
+        "Set it on grid shards so every shard uses one identical route set.",
+    )
+    placement_reference_orders_file = LaunchConfiguration("placement_reference_orders_file")
+
+    # Object-offset translation bounds -- exposed so a run (esp. the placement sweep) can zoom in
+    # without a rebuild. Defaults are the full search box.
+    offset_bound_args = []
+    offset_bounds = {}
+    for _axis, _default in (("x", 0.3), ("y", 0.3), ("z", 0.2)):
+        for _side, _sign in (("min", -1.0), ("max", 1.0)):
+            _name = f"{_axis}_{_side}"
+            offset_bound_args.append(DeclareLaunchArgument(
+                _name, default_value=str(_sign * _default),
+                description=f"Object offset {_axis} {_side} bound (m).",
+            ))
+            offset_bounds[f"bg_{_name}"] = ParameterValue(
+                LaunchConfiguration(_name), value_type=float)
+
     output_dir_arg = DeclareLaunchArgument(
         "output_dir",
         default_value="/tmp/base_gradient_output",
@@ -157,12 +217,7 @@ def generate_launch_description():
         # Object offset search bounds in the robot base frame: translation (m) + tip roll / tilt
         # pitch (rad). Yaw is excluded (redundant with joint 1). Realized by re-fixturing the
         # object, not moving the arm.
-        "bg_x_min": -0.3,
-        "bg_x_max": 0.3,
-        "bg_y_min": -0.3,
-        "bg_y_max": 0.3,
-        "bg_z_min": -0.2,
-        "bg_z_max": 0.2,
+        **offset_bounds,
         "bg_roll_min": -0.35,
         "bg_roll_max": 0.35,
         "bg_pitch_min": -0.35,
@@ -212,6 +267,11 @@ def generate_launch_description():
         "bg_experiment_num_random_dirs": experiment_num_random_dirs,
         "bg_experiment_min_probe_metric": 0.01,
         "bg_experiment_random_search_budget": experiment_random_search_budget,
+        "bg_placement_experiment": placement_experiment,
+        "bg_placement_grid_n": placement_grid_n,
+        "bg_placement_grid_start": placement_grid_start,
+        "bg_placement_grid_count": placement_grid_count,
+        "bg_placement_reference_orders_file": placement_reference_orders_file,
         "ik_timeout": ik_timeout,
         "random_seed": ParameterValue(random_seed, value_type=int),
         "visualize_progress_delay_sec": visualize_progress_delay_sec,
@@ -264,6 +324,12 @@ def generate_launch_description():
             experiment_mode_arg,
             experiment_num_random_dirs_arg,
             experiment_random_search_budget_arg,
+            placement_experiment_arg,
+            placement_grid_n_arg,
+            placement_grid_start_arg,
+            placement_grid_count_arg,
+            placement_reference_orders_file_arg,
+            *offset_bound_args,
             output_dir_arg,
             tour_input_dir_arg,
             base_gradient_node,

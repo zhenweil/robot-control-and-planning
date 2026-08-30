@@ -16,6 +16,7 @@
 #include <json/json.h>
 #include <moveit/robot_state/robot_state.h>
 #include <moveit_msgs/msg/collision_object.hpp>
+#include <random_numbers/random_numbers.h>
 
 namespace
 {
@@ -180,7 +181,7 @@ std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
 	const std::vector<std::vector<double>>& seed_per_viewpoint, const BaseOffset& base, const BaseGradientParams& params,
-	int max_solutions)
+	int max_solutions, random_numbers::RandomNumberGenerator* rng = nullptr)
 {
 	Eigen::Isometry3d xform = MakeObjectOffset(base);
 	SetObjectPose(planning_scene_monitor, xform * object_pose_original);
@@ -208,7 +209,17 @@ std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 		for (int attempt = 0;
 			 attempt < max_sol * 3 + params.ik_retries_per_point && static_cast<int>(sols.size()) < max_sol; ++attempt)
 		{
-			state.setToRandomPositions(jmg);
+			// A pose still with zero solutions after this many random restarts (on top of the
+			// warm-started first attempt) is almost certainly out of reach at this offset -- stop
+			// before burning the rest of the attempt budget on it, since every miss costs a full
+			// ik_timeout. This is the dominant cost at reachability-breaking offsets; the later
+			// attempts only ever helped reachable-but-hard poses collect extra branches.
+			if (sols.empty() && attempt >= std::max(4, max_sol))
+				break;
+			if (rng)
+				state.setToRandomPositions(jmg, *rng);
+			else
+				state.setToRandomPositions(jmg);
 			if (!state.setFromIK(jmg, target_local, "tool0", params.ik_timeout, validity_callback))
 				continue;
 			std::vector<double> s;
@@ -553,6 +564,91 @@ InnerSolution BestOfNInnerSolve(
 			best = std::move(cand);
 	}
 	return best;
+}
+
+// Score a FIXED visiting order at `base`: walk `order` (viewpoint indices) and pick the cheapest
+// IK branch at each stop by exact DP (Viterbi over the branch layers) -- the "which arm config"
+// half of the inner problem with the route frozen, no reordering. Viewpoints with no branch at
+// this base are skipped and charged params.unreachable_penalty, exactly as RunGtsp scores a
+// partial tour. `order` may be any permutation; only its relative order of the reachable stops
+// matters.
+InnerSolution SolveFixedOrder(
+	const std::vector<std::vector<std::vector<double>>>& branches, const BaseOffset& base,
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& home_joints,
+	const Eigen::Vector3d& home_tcp_local, const BaseGradientParams& params, const std::vector<int>& order)
+{
+	const Eigen::Isometry3d xform = MakeObjectOffset(base);
+	const int num_total = static_cast<int>(tour_tcp_poses_original.size());
+
+	std::vector<int> vp;					  // viewpoint index per reachable layer, in visit order
+	std::vector<Eigen::Vector3d> pos;		  // its tool0 position in the base frame
+	for (int i : order)
+		if (i >= 0 && i < static_cast<int>(branches.size()) && !branches[i].empty())
+		{
+			vp.push_back(i);
+			pos.push_back((xform * tour_tcp_poses_original[i]).translation());
+		}
+
+	InnerSolution out;
+	out.num_total = num_total;
+	if (vp.empty())
+	{
+		out.weighted_cost = params.unreachable_penalty * num_total;
+		return out;
+	}
+
+	const size_t L = vp.size();
+	std::vector<std::vector<double>> dp(L);	 // dp[l][k] = min cost to reach branch k of layer l
+	std::vector<std::vector<int>> back(L);	 // predecessor branch index
+
+	dp[0].resize(branches[vp[0]].size());
+	back[0].assign(branches[vp[0]].size(), -1);
+	for (size_t k = 0; k < branches[vp[0]].size(); ++k)
+		dp[0][k] = WeightedEdgeCost(home_joints, branches[vp[0]][k], home_tcp_local, pos[0], params);
+
+	for (size_t l = 1; l < L; ++l)
+	{
+		const auto& cur = branches[vp[l]];
+		const auto& prev = branches[vp[l - 1]];
+		dp[l].assign(cur.size(), std::numeric_limits<double>::max());
+		back[l].assign(cur.size(), -1);
+		for (size_t k = 0; k < cur.size(); ++k)
+			for (size_t j = 0; j < prev.size(); ++j)
+			{
+				const double c = dp[l - 1][j] + WeightedEdgeCost(prev[j], cur[k], pos[l - 1], pos[l], params);
+				if (c < dp[l][k])
+				{
+					dp[l][k] = c;
+					back[l][k] = static_cast<int>(j);
+				}
+			}
+	}
+
+	size_t best_k = 0;
+	for (size_t k = 1; k < dp[L - 1].size(); ++k)
+		if (dp[L - 1][k] < dp[L - 1][best_k])
+			best_k = k;
+	const double tour_cost = dp[L - 1][best_k];
+
+	std::vector<int> chosen(L);
+	for (size_t l = L; l-- > 0;)
+	{
+		chosen[l] = static_cast<int>(best_k);
+		if (l > 0)
+			best_k = static_cast<size_t>(back[l][best_k]);
+	}
+
+	out.tour.resize(L);
+	out.joints.resize(L);
+	for (size_t l = 0; l < L; ++l)
+	{
+		out.tour[l] = vp[l];
+		out.joints[l] = branches[vp[l]][chosen[l]];
+	}
+	out.num_reachable = static_cast<int>(L);
+	out.all_reachable = (out.num_reachable == num_total);
+	out.weighted_cost = tour_cost + params.unreachable_penalty * (num_total - out.num_reachable);
+	return out;
 }
 
 // seed_per_viewpoint for the next solve: each viewpoint warm-started from its own current joints,
@@ -1460,6 +1556,392 @@ void ExportBaseGradientExperimentResult(const std::string& output_dir, const Bas
 	writer->write(root, &json_file);
 
 	printf("Saved base gradient experiment JSON: %s\n", json_path.c_str());
+}
+
+ObjectOffsetScore ScoreObjectOffset(
+	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
+	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& start_reference_joints,
+	const BaseGradientParams& params, const std::array<double, 5>& offset, const std::vector<int>& fixed_order)
+{
+	(void)node;
+	ObjectOffsetScore out;
+	const int n = static_cast<int>(tour_tcp_poses_original.size());
+	out.num_total = n;
+
+	moveit::core::RobotState state(robot_model);
+	state.setToDefaultValues();
+	const moveit::core::JointModelGroup* jmg = state.getJointModelGroup(group_name);
+	state.setJointGroupPositions(jmg, start_reference_joints);
+	state.update();
+	const Eigen::Vector3d home_tcp_local = state.getGlobalLinkTransform("tool0").translation();
+	const Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
+	const std::vector<double>& home = start_reference_joints;
+	const std::vector<std::vector<double>> cold_seeds(static_cast<size_t>(n), home);
+
+	const BaseOffset b = ProjectToBounds(
+		{offset[0], offset[1], offset[2], offset[3], offset[4]}, params.bounds);
+	const int R = std::max(1, params.solve_restarts);
+
+	double best_wc = std::numeric_limits<double>::max();
+	for (int r = 0; r < R; ++r)
+	{
+		const auto branches = CollectIkSolutions(
+			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cold_seeds, b, params,
+			params.max_solutions_per_candidate);
+
+		InnerSolution s;
+		if (!fixed_order.empty())
+		{
+			s = SolveFixedOrder(branches, b, tour_tcp_poses_original, home, home_tcp_local, params, fixed_order);
+		}
+		else
+		{
+			const GtspSolution g = RunGtsp(
+				branches, b, tour_tcp_poses_original, home, home_tcp_local, params, nullptr);
+			s.tour = g.tour_pose_indices;
+			s.joints = g.chosen_joints;
+			s.num_total = n;
+			s.num_reachable = static_cast<int>(s.tour.size());
+			s.all_reachable = (s.num_reachable == n);
+			s.weighted_cost =
+				TourWeightedCost(b, s.tour, s.joints, tour_tcp_poses_original, home, home_tcp_local, params) +
+				params.unreachable_penalty * (n - s.num_reachable);
+		}
+
+		if (s.weighted_cost < best_wc)
+		{
+			best_wc = s.weighted_cost;
+			out.weighted_cost = s.weighted_cost;
+			out.honest_cost = s.weighted_cost - params.unreachable_penalty * (n - s.num_reachable);
+			out.num_reachable = s.num_reachable;
+			out.all_reachable = s.all_reachable;
+			out.tour = s.tour;
+			out.joints = s.joints;
+		}
+	}
+
+	SetObjectPose(planning_scene_monitor, object_pose_original);  // leave the scene as we found it
+	return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Placement / order separability experiment (see base_gradient.hpp).
+// ---------------------------------------------------------------------------------------------
+namespace
+{
+
+// Grid coordinate i of n points spanning [mn, mx]; the midpoint for n == 1. With odd n and a
+// symmetric span the centre index lands exactly on 0, so the nominal offset is on the grid.
+double GridCoord(int i, int n, double mn, double mx)
+{
+	if (n <= 1)
+		return 0.5 * (mn + mx);
+	return mn + (mx - mn) * (static_cast<double>(i) / (n - 1));
+}
+
+// A solved tour (reachable viewpoints only) padded to a full permutation of 0..num_total-1 by
+// appending the missing indices in ascending order -- so a reference route always names every
+// viewpoint even if the offset it was solved at could not reach them all.
+std::vector<int> PadToFullPermutation(const std::vector<int>& tour, int num_total)
+{
+	std::vector<char> seen(num_total, 0);
+	std::vector<int> out;
+	out.reserve(num_total);
+	for (int v : tour)
+		if (v >= 0 && v < num_total && !seen[v])
+		{
+			seen[v] = 1;
+			out.push_back(v);
+		}
+	for (int v = 0; v < num_total; ++v)
+		if (!seen[v])
+			out.push_back(v);
+	return out;
+}
+
+}  // namespace
+
+PlacementOrderExperimentResult RunPlacementOrderExperiment(
+	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
+	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& start_reference_joints,
+	const BaseGradientParams& params, int grid_n, int grid_start, int grid_count,
+	const std::string& reference_orders_file, const std::string& output_dir)
+{
+	PlacementOrderExperimentResult out;
+	const int n = static_cast<int>(tour_tcp_poses_original.size());
+	out.seed = params.random_seed;
+	out.num_total = n;
+	out.unreachable_penalty = params.unreachable_penalty;
+
+	grid_n = std::max(1, grid_n);
+	out.grid_shape = {grid_n, grid_n, grid_n};
+	out.grid_min = {params.bounds.x_min, params.bounds.y_min, params.bounds.z_min};
+	out.grid_max = {params.bounds.x_max, params.bounds.y_max, params.bounds.z_max};
+
+	// Solve setup (mirrors SolveBaseGradient / RunBaseGradientExperiment).
+	moveit::core::RobotState state(robot_model);
+	state.setToDefaultValues();
+	const moveit::core::JointModelGroup* jmg = state.getJointModelGroup(group_name);
+	state.setJointGroupPositions(jmg, start_reference_joints);
+	state.update();
+	const Eigen::Vector3d home_tcp_local = state.getGlobalLinkTransform("tool0").translation();
+	const Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
+	const std::vector<double>& home = start_reference_joints;
+	const std::vector<std::vector<double>> cold_seeds(static_cast<size_t>(n), home);
+	const int R = std::max(1, params.solve_restarts);
+
+	// ---- reference routes -----------------------------------------------------------------
+	// Load from file when given (so every shard scores against an identical set); otherwise
+	// solve them -- full GTSP at the nominal offset + 6 spread offsets -- and write them out.
+	if (!reference_orders_file.empty())
+	{
+		std::ifstream rf(reference_orders_file);
+		Json::Value root;
+		Json::CharReaderBuilder rb;
+		std::string errs;
+		if (!rf.is_open() || !Json::parseFromStream(rb, rf, &root, &errs))
+		{
+			RCLCPP_ERROR(
+				node->get_logger(), "[placement] cannot read reference routes from %s (%s) -- aborting",
+				reference_orders_file.c_str(), errs.c_str());
+			return out;
+		}
+		for (const auto& l : root["order_labels"])
+			out.order_labels.push_back(l.asString());
+		for (const auto& ord : root["reference_orders"])
+		{
+			std::vector<int> v;
+			for (const auto& e : ord)
+				v.push_back(e.asInt());
+			out.reference_orders.push_back(PadToFullPermutation(v, n));
+		}
+		RCLCPP_INFO(
+			node->get_logger(), "[placement] loaded %zu reference routes from %s", out.reference_orders.size(),
+			reference_orders_file.c_str());
+	}
+	else
+	{
+		const double sx = 0.7 * std::max(std::abs(params.bounds.x_min), std::abs(params.bounds.x_max));
+		const double sy = 0.7 * std::max(std::abs(params.bounds.y_min), std::abs(params.bounds.y_max));
+		const double sz = 0.7 * std::max(std::abs(params.bounds.z_min), std::abs(params.bounds.z_max));
+		const std::vector<std::pair<std::string, BaseOffset>> seed_offsets = {
+			{"gtsp@nominal", {0, 0, 0, 0, 0}}, {"gtsp@+x", {sx, 0, 0, 0, 0}},   {"gtsp@-x", {-sx, 0, 0, 0, 0}},
+			{"gtsp@+y", {0, sy, 0, 0, 0}},	  {"gtsp@-y", {0, -sy, 0, 0, 0}},  {"gtsp@+z", {0, 0, sz, 0, 0}},
+			{"gtsp@-z", {0, 0, -sz, 0, 0}},
+		};
+		for (const auto& [label, off] : seed_offsets)
+		{
+			if (!rclcpp::ok())
+				break;
+			const InnerSolution s = BestOfNInnerSolve(
+				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cold_seeds, home,
+				home_tcp_local, off, params, nullptr, params.max_solutions_per_candidate);
+			out.order_labels.push_back(label);
+			out.reference_orders.push_back(PadToFullPermutation(s.tour, n));
+			RCLCPP_INFO(
+				node->get_logger(), "[placement] reference route %s: full GTSP reaches %d/%d, honest cost %.3f",
+				label.c_str(), s.num_reachable, n, s.weighted_cost - params.unreachable_penalty * (n - s.num_reachable));
+		}
+
+		Json::Value root;
+		Json::Value labels(Json::arrayValue), orders(Json::arrayValue);
+		for (const auto& l : out.order_labels)
+			labels.append(l);
+		for (const auto& ord : out.reference_orders)
+		{
+			Json::Value a(Json::arrayValue);
+			for (int v : ord)
+				a.append(v);
+			orders.append(a);
+		}
+		root["order_labels"] = labels;
+		root["reference_orders"] = orders;
+		root["seed"] = params.random_seed;
+		std::filesystem::create_directories(output_dir);
+		const std::string rpath =
+			output_dir + "/placement_reference_orders_seed" + std::to_string(params.random_seed) + ".json";
+		std::ofstream rout(rpath);
+		Json::StreamWriterBuilder wb;
+		wb["indentation"] = "";
+		std::unique_ptr<Json::StreamWriter>(wb.newStreamWriter())->write(root, &rout);
+		RCLCPP_INFO(node->get_logger(), "[placement] wrote reference routes to %s", rpath.c_str());
+	}
+	const int K = static_cast<int>(out.reference_orders.size());
+	if (K == 0)
+	{
+		RCLCPP_ERROR(node->get_logger(), "[placement] no reference routes available -- aborting");
+		return out;
+	}
+
+	// ---- grid sweep (this shard's slice) ---------------------------------------------------
+	const int P = grid_n * grid_n * grid_n;
+	const int lo = std::clamp(grid_start, 0, P);
+	const int hi = grid_count < 0 ? P : std::min(P, lo + grid_count);
+	out.grid_start = lo;
+	out.grid_count = std::max(0, hi - lo);
+	RCLCPP_INFO(
+		node->get_logger(), "[placement] seed %d: sweeping grid points [%d, %d) of %d (%d^3), %d routes, min-of-%d",
+		params.random_seed, lo, hi, P, grid_n, K, R);
+
+	for (int idx = lo; idx < hi && rclcpp::ok(); ++idx)
+	{
+		const int ix = idx / (grid_n * grid_n);
+		const int iy = (idx / grid_n) % grid_n;
+		const int iz = idx % grid_n;
+		const BaseOffset b{
+			GridCoord(ix, grid_n, params.bounds.x_min, params.bounds.x_max),
+			GridCoord(iy, grid_n, params.bounds.y_min, params.bounds.y_max),
+			GridCoord(iz, grid_n, params.bounds.z_min, params.bounds.z_max), 0.0, 0.0};
+
+		PlacementGridPoint gp;
+		gp.offset = {b.x, b.y, b.z};
+		gp.order_weighted_cost.assign(K, std::numeric_limits<double>::max());
+		gp.order_honest_cost.assign(K, std::numeric_limits<double>::max());
+		gp.order_num_reachable.assign(K, 0);
+		double full_wc = std::numeric_limits<double>::max();
+
+		// Per-grid-point seed-pose RNG: keeps the bulk of a point's IK-seed variation independent of
+		// the shard layout (MoveIt's own IK RNG still advances globally, so shards are not bit-exact).
+		random_numbers::RandomNumberGenerator gp_rng(
+			static_cast<unsigned int>(params.random_seed) * 1000003u + static_cast<unsigned int>(idx));
+
+		for (int r = 0; r < R && rclcpp::ok(); ++r)
+		{
+			const auto branches = CollectIkSolutions(
+				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cold_seeds, b, params,
+				params.max_solutions_per_candidate, &gp_rng);
+
+			int ik_reachable = 0;
+			for (const auto& br : branches)
+				ik_reachable += !br.empty();
+			gp.num_ik_reachable = std::max(gp.num_ik_reachable, ik_reachable);
+
+			for (int k = 0; k < K; ++k)
+			{
+				const InnerSolution s = SolveFixedOrder(
+					branches, b, tour_tcp_poses_original, home, home_tcp_local, params, out.reference_orders[k]);
+				if (s.weighted_cost < gp.order_weighted_cost[k])
+				{
+					gp.order_weighted_cost[k] = s.weighted_cost;
+					gp.order_honest_cost[k] = s.weighted_cost - params.unreachable_penalty * (n - s.num_reachable);
+					gp.order_num_reachable[k] = s.num_reachable;
+				}
+			}
+
+			const GtspSolution g = RunGtsp(
+				branches, b, tour_tcp_poses_original, home, home_tcp_local, params, nullptr);
+			const int g_reach = static_cast<int>(g.tour_pose_indices.size());
+			const double g_wc =
+				TourWeightedCost(
+					b, g.tour_pose_indices, g.chosen_joints, tour_tcp_poses_original, home, home_tcp_local, params) +
+				params.unreachable_penalty * (n - g_reach);
+			if (g_wc < full_wc)
+			{
+				full_wc = g_wc;
+				gp.full_weighted_cost = g_wc;
+				gp.full_honest_cost = g_wc - params.unreachable_penalty * (n - g_reach);
+				gp.full_num_reachable = g_reach;
+				gp.full_tour = g.tour_pose_indices;
+			}
+		}
+
+		if ((idx - lo) % 10 == 0 || idx + 1 == hi)
+			RCLCPP_INFO(
+				node->get_logger(),
+				"[placement] %d/%d  offset (%.3f, %.3f, %.3f)  ik %d/%d  %s wc %.2f (%d/%d)  full wc %.2f (%d/%d)",
+				idx - lo + 1, hi - lo, b.x, b.y, b.z, gp.num_ik_reachable, n, out.order_labels[0].c_str(),
+				gp.order_weighted_cost[0], gp.order_num_reachable[0], n, gp.full_weighted_cost, gp.full_num_reachable, n);
+
+		out.grid.push_back(std::move(gp));
+	}
+
+	SetObjectPose(planning_scene_monitor, object_pose_original);  // leave the scene as we found it
+	return out;
+}
+
+void ExportPlacementOrderExperimentResult(const std::string& output_dir, const PlacementOrderExperimentResult& result)
+{
+	std::filesystem::create_directories(output_dir);
+
+	Json::Value root;
+	root["seed"] = result.seed;
+	root["num_total"] = result.num_total;
+	root["unreachable_penalty"] = result.unreachable_penalty;
+
+	Json::Value shape(Json::arrayValue), gmin(Json::arrayValue), gmax(Json::arrayValue);
+	for (int v : result.grid_shape)
+		shape.append(v);
+	for (double v : result.grid_min)
+		gmin.append(v);
+	for (double v : result.grid_max)
+		gmax.append(v);
+	root["grid_shape"] = shape;
+	root["grid_min"] = gmin;
+	root["grid_max"] = gmax;
+	root["grid_start"] = result.grid_start;
+	root["grid_count"] = result.grid_count;
+
+	Json::Value labels(Json::arrayValue);
+	for (const auto& l : result.order_labels)
+		labels.append(l);
+	root["order_labels"] = labels;
+
+	Json::Value orders(Json::arrayValue);
+	for (const auto& ord : result.reference_orders)
+	{
+		Json::Value a(Json::arrayValue);
+		for (int v : ord)
+			a.append(v);
+		orders.append(a);
+	}
+	root["reference_orders"] = orders;
+
+	Json::Value grid(Json::arrayValue);
+	for (const auto& gp : result.grid)
+	{
+		Json::Value j;
+		Json::Value off(Json::arrayValue);
+		for (double v : gp.offset)
+			off.append(v);
+		j["offset"] = off;
+		j["num_ik_reachable"] = gp.num_ik_reachable;
+
+		Json::Value owc(Json::arrayValue), ohc(Json::arrayValue), onr(Json::arrayValue);
+		for (double v : gp.order_weighted_cost)
+			owc.append(v);
+		for (double v : gp.order_honest_cost)
+			ohc.append(v);
+		for (int v : gp.order_num_reachable)
+			onr.append(v);
+		j["order_weighted_cost"] = owc;
+		j["order_honest_cost"] = ohc;
+		j["order_num_reachable"] = onr;
+
+		j["full_weighted_cost"] = gp.full_weighted_cost;
+		j["full_honest_cost"] = gp.full_honest_cost;
+		j["full_num_reachable"] = gp.full_num_reachable;
+		Json::Value ft(Json::arrayValue);
+		for (int v : gp.full_tour)
+			ft.append(v);
+		j["full_tour"] = ft;
+
+		grid.append(j);
+	}
+	root["grid"] = grid;
+
+	const std::string json_path = output_dir + "/placement_experiment_seed" + std::to_string(result.seed) + "_g" +
+		std::to_string(result.grid_start) + ".json";
+	std::ofstream json_file(json_path);
+	Json::StreamWriterBuilder writer_builder;
+	writer_builder["indentation"] = "    ";
+	std::unique_ptr<Json::StreamWriter> writer(writer_builder.newStreamWriter());
+	writer->write(root, &json_file);
+
+	printf("Saved placement/order experiment JSON: %s\n", json_path.c_str());
 }
 
 void ApplyObjectOffsetToScene(
