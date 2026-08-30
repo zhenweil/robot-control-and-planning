@@ -155,85 +155,103 @@ def report(results):
     print(f" {'mean':>4}  {'':>9}  {'':>9}  {m:>+8.3f}  {mp:>+6.1f}%")
     print(f" -> Copt < C0 in {n_better}/{len(results)} seeds; mean dPhi {m:+.3f} ({mp:+.1f}%), sd {sd:.3f}")
 
+    have_placebo = any(r["exp3_cold_placebo"] for r in results)
+
     # ---- exp 3 -------------------------------------------------------------------------
-    print("\nEXP 3 -- cold placebo (does the optimized direction beat random ones of size |b_opt|?)")
-    print(f" {'seed':>4}  {'Copt_cold':>9}  {'rand mean':>9}  {'rand min':>9}  {'rand max':>9}  "
-          f"{'#rand<opt':>9}")
-    pooled_better, pooled_total = 0, 0
-    gap_mean, gap_best = [], []
-    for r in results:
-        co = r["exp1_cold_endpoints"]["copt_cold"]["honest_cost"]
-        rand = [e["honest_cost"] for e in r["exp3_cold_placebo"]]
-        rm, _ = mean_sd(rand)
-        better = sum(x < co for x in rand)
-        pooled_better += better
-        pooled_total += len(rand)
-        gap_mean.append(co - rm)
-        gap_best.append(co - min(rand))
-        print(f" {r['seed']:>4}  {co:>9.3f}  {rm:>9.3f}  {min(rand):>9.3f}  {max(rand):>9.3f}  "
-              f"{better:>4}/{len(rand):<4}")
-    gm, _ = mean_sd(gap_mean)
-    gb, _ = mean_sd(gap_best)
-    print(f" -> optimized beats {pooled_total - pooled_better}/{pooled_total} random directions")
-    print(f"    mean(Copt - rand_mean) = {gm:+.3f}   mean(Copt - rand_best) = {gb:+.3f}")
+    gm = gb = float("nan")
+    pooled_better = pooled_total = 0
+    if have_placebo:
+        print("\nEXP 3 -- cold placebo (does the optimized direction beat random ones of size |b_opt|?)")
+        print(f" {'seed':>4}  {'Copt_cold':>9}  {'rand mean':>9}  {'rand min':>9}  {'rand max':>9}  "
+              f"{'#rand<opt':>9}")
+        gap_mean, gap_best = [], []
+        for r in results:
+            rand = [e["honest_cost"] for e in r["exp3_cold_placebo"]]
+            if not rand:
+                continue
+            co = r["exp1_cold_endpoints"]["copt_cold"]["honest_cost"]
+            rm, _ = mean_sd(rand)
+            better = sum(x < co for x in rand)
+            pooled_better += better
+            pooled_total += len(rand)
+            gap_mean.append(co - rm)
+            gap_best.append(co - min(rand))
+            print(f" {r['seed']:>4}  {co:>9.3f}  {rm:>9.3f}  {min(rand):>9.3f}  {max(rand):>9.3f}  "
+                  f"{better:>4}/{len(rand):<4}")
+        gm, _ = mean_sd(gap_mean)
+        gb, _ = mean_sd(gap_best)
+        print(f" -> optimized beats {pooled_total - pooled_better}/{pooled_total} random directions")
+        print(f"    mean(Copt - rand_mean) = {gm:+.3f}   mean(Copt - rand_best) = {gb:+.3f}")
+    else:
+        print("\nEXP 3/4 -- skipped (num_random_dirs = 0)")
 
     # ---- exp 4 -------------------------------------------------------------------------
-    print("\nEXP 4 -- warm placebo (how much is warm-starting, and does the gap survive it?)")
-    opt_disc, rand_disc, pooled_better_w, pooled_total_w = [], [], 0, 0
-    gap_warp = []
-    for r in results:
-        co_cold = r["exp1_cold_endpoints"]["copt_cold"]["honest_cost"]
-        co_warm = r["exp4_warm_placebo"]["copt_warm"]["honest_cost"]
-        opt_disc.append(co_warm - co_cold)
-        rc = [e["honest_cost"] for e in r["exp3_cold_placebo"]]
-        rw = [e["honest_cost"] for e in r["exp4_warm_placebo"]["random"]]
-        rand_disc.extend(w - c for c, w in zip(rc, rw))
-        better = sum(x < co_warm for x in rw)
-        pooled_better_w += better
-        pooled_total_w += len(rw)
-        rwm, _ = mean_sd(rw)
-        gap_warp.append(co_warm - rwm)
-    od, ods = mean_sd(opt_disc)
-    rd, rds = mean_sd(rand_disc)
-    gw, _ = mean_sd(gap_warp)
-    print(f" warm-start discount at b_opt:      mean(Copt_warm - Copt_cold)   = {od:+.3f}  (sd {ods:.3f})")
-    print(f" warm-start discount at random:  mean(Crand_warm - Crand_cold) = {rd:+.3f}  (sd {rds:.3f}, paired)")
-    print(f" -> optimized beats {pooled_total_w - pooled_better_w}/{pooled_total_w} random dirs even warm;"
-          f"  mean(Copt_warm - rand_warm_mean) = {gw:+.3f}")
+    od = rd = gw = float("nan")
+    pooled_better_w = pooled_total_w = 0
+    opt_disc, rand_disc, gap_warp = [], [], []
+    if have_placebo:
+        print("\nEXP 4 -- warm placebo (how much is warm-starting, and does the gap survive it?)")
+        for r in results:
+            rw = [e["honest_cost"] for e in r["exp4_warm_placebo"]["random"]]
+            if not rw:
+                continue
+            co_cold = r["exp1_cold_endpoints"]["copt_cold"]["honest_cost"]
+            co_warm = r["exp4_warm_placebo"]["copt_warm"]["honest_cost"]
+            rc = [e["honest_cost"] for e in r["exp3_cold_placebo"]]
+            opt_disc.append(co_warm - co_cold)
+            rand_disc.extend(w - c for c, w in zip(rc, rw))
+            pooled_better_w += sum(x < co_warm for x in rw)
+            pooled_total_w += len(rw)
+            rwm, _ = mean_sd(rw)
+            gap_warp.append(co_warm - rwm)
+        od, ods = mean_sd(opt_disc)
+        rd, rds = mean_sd(rand_disc)
+        gw, _ = mean_sd(gap_warp)
+        print(f" warm-start discount at b_opt:    mean(Copt_warm - Copt_cold)   = {od:+.3f}  (sd {ods:.3f})")
+        print(f" warm-start discount at random:   mean(Crand_warm - Crand_cold) = {rd:+.3f}  (sd {rds:.3f}, paired)")
+        print(f" -> optimized beats {pooled_total_w - pooled_better_w}/{pooled_total_w} random dirs even warm;"
+              f"  mean(Copt_warm - rand_warm_mean) = {gw:+.3f}")
 
     # ---- exp 5 -------------------------------------------------------------------------
+    # Rank on weighted_cost (penalty-inclusive), same objective the descent minimizes -- an offset
+    # that drops viewpoints has a huge weighted_cost even though its honest_cost (reachable edges
+    # only) looks small. "rs best" is the honest cost of the min-weighted-cost random point.
     print("\nEXP 5 -- equal-budget random search (does the descent beat plain random search?)")
-    print(f" {'seed':>4}  {'Copt_cold':>9}  {'budget':>6}  {'rs best':>9}  {'rs mean':>9}  "
-          f"{'descent - rs_best':>16}  descent wins")
+    print(f" {'seed':>4}  {'Copt_cold':>9}  {'budget':>6}  {'#allreach':>9}  {'rs best':>9}  "
+          f"{'rs reach':>8}  {'descent-rs':>10}  wins")
     rs_gap, rs_wins = [], 0
     for r in results:
-        co = r["exp1_cold_endpoints"]["copt_cold"]["honest_cost"]
-        rs = [e["honest_cost"] for e in r.get("exp5_random_search", [])]
+        co = r["exp1_cold_endpoints"]["copt_cold"]
+        rs = r.get("exp5_random_search", [])
         if not rs:
             print(f" {r['seed']:>4}  (no exp5 data)")
             continue
-        rsm, _ = mean_sd(rs)
-        gap = co - min(rs)  # <0 => descent better than best random-search point
+        n_all = sum(e["all_reachable"] for e in rs)
+        best = min(rs, key=lambda e: e["weighted_cost"])
+        # compare like-for-like on weighted_cost
+        gap = co["weighted_cost"] - best["weighted_cost"]  # <0 => descent better
         rs_gap.append(gap)
         win = gap < 0
         rs_wins += win
-        print(f" {r['seed']:>4}  {co:>9.3f}  {len(rs):>6}  {min(rs):>9.3f}  {rsm:>9.3f}  "
-              f"{gap:>+16.3f}  {'yes' if win else 'no'}")
+        print(f" {r['seed']:>4}  {co['honest_cost']:>9.3f}  {len(rs):>6}  {n_all:>4}/{len(rs):<4}  "
+              f"{best['honest_cost']:>9.3f}  {best['num_reachable']:>4}/{r['num_total']:<3}  "
+              f"{gap:>+10.2f}  {'yes' if win else 'NO'}")
     if rs_gap:
         rg, _ = mean_sd(rs_gap)
-        print(f" -> descent beats equal-budget random search in {rs_wins}/{len(rs_gap)} seeds; "
-              f"mean(Copt - rs_best) = {rg:+.3f}  (negative = descent better)")
+        print(f" -> descent beats equal-budget random search (on penalized cost) in "
+              f"{rs_wins}/{len(rs_gap)} seeds; mean gap {rg:+.2f}  (negative = descent better)")
 
     # ---- one-line verdict ----------------------------------------------------------------
     print("\nSUMMARY")
     print(f"  move effect (exp1):        mean cold dPhi {m:+.3f}  ({n_better}/{len(results)} seeds improve)")
-    print(f"  direction quality (exp3):  optimized < random in "
-          f"{pooled_total - pooled_better}/{pooled_total}; edge {gm:+.3f} vs mean / {gb:+.3f} vs best")
-    print(f"  warm-start confound (exp4): ~{od:+.3f} at b_opt vs ~{rd:+.3f} at random -- "
-          f"{'roughly uniform, gap survives' if abs(od - rd) < abs(gw) else 'direction-dependent, inspect'}")
+    if have_placebo and pooled_total:
+        print(f"  direction quality (exp3):  optimized < random in "
+              f"{pooled_total - pooled_better}/{pooled_total}; edge {gm:+.3f} vs mean / {gb:+.3f} vs best")
+        print(f"  warm-start confound (exp4): ~{od:+.3f} at b_opt vs ~{rd:+.3f} at random -- "
+              f"{'roughly uniform, gap survives' if abs(od - rd) < abs(gw) else 'direction-dependent, inspect'}")
     if rs_gap:
-        print(f"  vs random search (exp5):   descent wins {rs_wins}/{len(rs_gap)}; "
-              f"mean edge {rg:+.3f}  "
+        print(f"  vs random search (exp5):   descent wins {rs_wins}/{len(rs_gap)} on penalized cost; "
+              f"mean gap {rg:+.2f}  "
               f"{'<- descent earns its complexity' if rg < 0 else '<- descent does NOT beat random search'}")
     print("=" * 78)
 
