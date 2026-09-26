@@ -1,5 +1,6 @@
 build
 install
 log
+experiments
 __pycache__/
 *.pyc

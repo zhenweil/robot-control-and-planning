@@ -21,6 +21,7 @@
   <depend>random_numbers</depend>
   <depend>libvtk9-dev</depend>
   <depend>libjsoncpp-dev</depend>
+  <depend>osqp_vendor</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

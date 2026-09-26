@@ -35,22 +35,36 @@ struct Params
 	std::string tour_input_dir = "/tmp/viewpoint_planner_output";
 	std::string output_dir = "/tmp/base_placement_output";
 
-	// Object-offset search box (m), relative to the object's nominal pose. Rotation held at 0.
+	// Base-offset search box (x, y meters; theta radians), relative to the object's nominal pose.
 	double bp_x_min = -0.15, bp_x_max = 0.15;
 	double bp_y_min = -0.15, bp_y_max = 0.15;
-	double bp_z_min = -0.15, bp_z_max = 0.15;
+	double bp_theta_min = -0.35, bp_theta_max = 0.35;
 	int bp_num_restarts = 3;
-	int bp_max_outer_iterations = 10;
-	int bp_candidates_per_point = 16;
-	int bp_ik_retries_per_point = 4;
-	double bp_initial_step = 0.06;
-	double bp_step_shrink = 0.5;
-	double bp_min_step = 0.005;
-	double bp_convergence_tolerance_cost = 1e-2;
-	// solve_restarts for the ScoreObjectOffset cost -- 1 (default) trades some noise for speed;
-	// 2 matches the placement experiment's careful runs.
-	int bp_score_solve_restarts = 1;
-	double ik_timeout = 0.15;
+	int bp_num_init_retries = 20;
+	int bp_joint_ik_max_iterations = 300;
+	double bp_joint_ik_damping = 1e-3;
+	int bp_joint_ik_lm_max_escalations = 20;
+
+	double bp_mu_initial = 1.0;
+	double bp_mu_growth_factor = 2.0;
+	int bp_max_outer_iterations = 12;
+	double bp_outer_convergence_tolerance = 0.005;
+	double bp_rot_metric_scale = 0.3;
+
+	int bp_max_inner_iterations = 25;
+	double bp_trust_region_initial = 0.1;
+	double bp_trust_region_shrink = 0.5;
+	double bp_trust_region_expand = 1.5;
+	double bp_trust_region_min = 1e-4;
+	double bp_trust_region_reg = 1e-6;
+
+	double bp_collision_distance_threshold = 0.1;
+	double bp_min_clearance = 0.01;
+	double bp_fk_residual_tolerance = 1e-3;
+
+	bool bp_fd_jacobian_check = false;
+
+	double ik_timeout = 3.0;
 	int random_seed = 42;
 	// Seconds to pause after each refinement-loop iteration's progress publish, so the
 	// convergence can actually be watched in RViz on /base_placement_progress_markers. 0.0
@@ -190,17 +204,28 @@ private:
 		this->declareIfNeeded("bp_x_max", this->params.bp_x_max);
 		this->declareIfNeeded("bp_y_min", this->params.bp_y_min);
 		this->declareIfNeeded("bp_y_max", this->params.bp_y_max);
-		this->declareIfNeeded("bp_z_min", this->params.bp_z_min);
-		this->declareIfNeeded("bp_z_max", this->params.bp_z_max);
+		this->declareIfNeeded("bp_theta_min", this->params.bp_theta_min);
+		this->declareIfNeeded("bp_theta_max", this->params.bp_theta_max);
 		this->declareIfNeeded("bp_num_restarts", this->params.bp_num_restarts);
+		this->declareIfNeeded("bp_num_init_retries", this->params.bp_num_init_retries);
+		this->declareIfNeeded("bp_joint_ik_max_iterations", this->params.bp_joint_ik_max_iterations);
+		this->declareIfNeeded("bp_joint_ik_damping", this->params.bp_joint_ik_damping);
+		this->declareIfNeeded("bp_joint_ik_lm_max_escalations", this->params.bp_joint_ik_lm_max_escalations);
+		this->declareIfNeeded("bp_mu_initial", this->params.bp_mu_initial);
+		this->declareIfNeeded("bp_mu_growth_factor", this->params.bp_mu_growth_factor);
 		this->declareIfNeeded("bp_max_outer_iterations", this->params.bp_max_outer_iterations);
-		this->declareIfNeeded("bp_candidates_per_point", this->params.bp_candidates_per_point);
-		this->declareIfNeeded("bp_ik_retries_per_point", this->params.bp_ik_retries_per_point);
-		this->declareIfNeeded("bp_initial_step", this->params.bp_initial_step);
-		this->declareIfNeeded("bp_step_shrink", this->params.bp_step_shrink);
-		this->declareIfNeeded("bp_min_step", this->params.bp_min_step);
-		this->declareIfNeeded("bp_convergence_tolerance_cost", this->params.bp_convergence_tolerance_cost);
-		this->declareIfNeeded("bp_score_solve_restarts", this->params.bp_score_solve_restarts);
+		this->declareIfNeeded("bp_outer_convergence_tolerance", this->params.bp_outer_convergence_tolerance);
+		this->declareIfNeeded("bp_rot_metric_scale", this->params.bp_rot_metric_scale);
+		this->declareIfNeeded("bp_max_inner_iterations", this->params.bp_max_inner_iterations);
+		this->declareIfNeeded("bp_trust_region_initial", this->params.bp_trust_region_initial);
+		this->declareIfNeeded("bp_trust_region_shrink", this->params.bp_trust_region_shrink);
+		this->declareIfNeeded("bp_trust_region_expand", this->params.bp_trust_region_expand);
+		this->declareIfNeeded("bp_trust_region_min", this->params.bp_trust_region_min);
+		this->declareIfNeeded("bp_trust_region_reg", this->params.bp_trust_region_reg);
+		this->declareIfNeeded("bp_collision_distance_threshold", this->params.bp_collision_distance_threshold);
+		this->declareIfNeeded("bp_min_clearance", this->params.bp_min_clearance);
+		this->declareIfNeeded("bp_fk_residual_tolerance", this->params.bp_fk_residual_tolerance);
+		this->declareIfNeeded("bp_fd_jacobian_check", this->params.bp_fd_jacobian_check);
 		this->declareIfNeeded("ik_timeout", this->params.ik_timeout);
 		this->declareIfNeeded("random_seed", this->params.random_seed);
 		this->declareIfNeeded("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -223,17 +248,28 @@ private:
 		this->get_parameter("bp_x_max", this->params.bp_x_max);
 		this->get_parameter("bp_y_min", this->params.bp_y_min);
 		this->get_parameter("bp_y_max", this->params.bp_y_max);
-		this->get_parameter("bp_z_min", this->params.bp_z_min);
-		this->get_parameter("bp_z_max", this->params.bp_z_max);
+		this->get_parameter("bp_theta_min", this->params.bp_theta_min);
+		this->get_parameter("bp_theta_max", this->params.bp_theta_max);
 		this->get_parameter("bp_num_restarts", this->params.bp_num_restarts);
+		this->get_parameter("bp_num_init_retries", this->params.bp_num_init_retries);
+		this->get_parameter("bp_joint_ik_max_iterations", this->params.bp_joint_ik_max_iterations);
+		this->get_parameter("bp_joint_ik_damping", this->params.bp_joint_ik_damping);
+		this->get_parameter("bp_joint_ik_lm_max_escalations", this->params.bp_joint_ik_lm_max_escalations);
+		this->get_parameter("bp_mu_initial", this->params.bp_mu_initial);
+		this->get_parameter("bp_mu_growth_factor", this->params.bp_mu_growth_factor);
 		this->get_parameter("bp_max_outer_iterations", this->params.bp_max_outer_iterations);
-		this->get_parameter("bp_candidates_per_point", this->params.bp_candidates_per_point);
-		this->get_parameter("bp_ik_retries_per_point", this->params.bp_ik_retries_per_point);
-		this->get_parameter("bp_initial_step", this->params.bp_initial_step);
-		this->get_parameter("bp_step_shrink", this->params.bp_step_shrink);
-		this->get_parameter("bp_min_step", this->params.bp_min_step);
-		this->get_parameter("bp_convergence_tolerance_cost", this->params.bp_convergence_tolerance_cost);
-		this->get_parameter("bp_score_solve_restarts", this->params.bp_score_solve_restarts);
+		this->get_parameter("bp_outer_convergence_tolerance", this->params.bp_outer_convergence_tolerance);
+		this->get_parameter("bp_rot_metric_scale", this->params.bp_rot_metric_scale);
+		this->get_parameter("bp_max_inner_iterations", this->params.bp_max_inner_iterations);
+		this->get_parameter("bp_trust_region_initial", this->params.bp_trust_region_initial);
+		this->get_parameter("bp_trust_region_shrink", this->params.bp_trust_region_shrink);
+		this->get_parameter("bp_trust_region_expand", this->params.bp_trust_region_expand);
+		this->get_parameter("bp_trust_region_min", this->params.bp_trust_region_min);
+		this->get_parameter("bp_trust_region_reg", this->params.bp_trust_region_reg);
+		this->get_parameter("bp_collision_distance_threshold", this->params.bp_collision_distance_threshold);
+		this->get_parameter("bp_min_clearance", this->params.bp_min_clearance);
+		this->get_parameter("bp_fk_residual_tolerance", this->params.bp_fk_residual_tolerance);
+		this->get_parameter("bp_fd_jacobian_check", this->params.bp_fd_jacobian_check);
 		this->get_parameter("ik_timeout", this->params.ik_timeout);
 		this->get_parameter("random_seed", this->params.random_seed);
 		this->get_parameter("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -276,45 +312,40 @@ private:
 		bp_params.bounds.x_max = this->params.bp_x_max;
 		bp_params.bounds.y_min = this->params.bp_y_min;
 		bp_params.bounds.y_max = this->params.bp_y_max;
-		bp_params.bounds.z_min = this->params.bp_z_min;
-		bp_params.bounds.z_max = this->params.bp_z_max;
+		bp_params.bounds.theta_min = this->params.bp_theta_min;
+		bp_params.bounds.theta_max = this->params.bp_theta_max;
 		bp_params.num_restarts = this->params.bp_num_restarts;
-		bp_params.max_outer_iterations = this->params.bp_max_outer_iterations;
-		bp_params.candidates_per_point = this->params.bp_candidates_per_point;
-		bp_params.ik_retries_per_point = this->params.bp_ik_retries_per_point;
-		bp_params.ik_timeout = this->params.ik_timeout;
-		bp_params.initial_step = this->params.bp_initial_step;
-		bp_params.step_shrink = this->params.bp_step_shrink;
-		bp_params.min_step = this->params.bp_min_step;
-		bp_params.convergence_tolerance_cost = this->params.bp_convergence_tolerance_cost;
 		bp_params.random_seed = this->params.random_seed;
+		bp_params.ik_timeout = this->params.ik_timeout;
+		bp_params.num_init_retries = this->params.bp_num_init_retries;
+		bp_params.joint_ik_max_iterations = this->params.bp_joint_ik_max_iterations;
+		bp_params.joint_ik_damping = this->params.bp_joint_ik_damping;
+		bp_params.joint_ik_lm_max_escalations = this->params.bp_joint_ik_lm_max_escalations;
+		bp_params.mu_initial = this->params.bp_mu_initial;
+		bp_params.mu_growth_factor = this->params.bp_mu_growth_factor;
+		bp_params.max_outer_iterations = this->params.bp_max_outer_iterations;
+		bp_params.outer_convergence_tolerance = this->params.bp_outer_convergence_tolerance;
+		bp_params.rot_metric_scale = this->params.bp_rot_metric_scale;
+		bp_params.max_inner_iterations = this->params.bp_max_inner_iterations;
+		bp_params.trust_region_initial = this->params.bp_trust_region_initial;
+		bp_params.trust_region_shrink = this->params.bp_trust_region_shrink;
+		bp_params.trust_region_expand = this->params.bp_trust_region_expand;
+		bp_params.trust_region_min = this->params.bp_trust_region_min;
+		bp_params.trust_region_reg = this->params.bp_trust_region_reg;
+		bp_params.collision_distance_threshold = this->params.bp_collision_distance_threshold;
+		bp_params.min_clearance = this->params.bp_min_clearance;
+		bp_params.fk_residual_tolerance = this->params.bp_fk_residual_tolerance;
+		bp_params.fd_jacobian_check = this->params.bp_fd_jacobian_check;
 		bp_params.progress_pub = this->progress_marker_pub;
 		bp_params.visualize_progress_delay_sec = this->params.visualize_progress_delay_sec;
 
-		// The cost every candidate offset is scored with -- identical to the base_gradient
-		// placement experiment: struct defaults are the retuned IK / weight / penalty values;
-		// only the offset bounds and (optionally) solve_restarts / ik_timeout differ.
-		BaseGradientParams score_params;
-		score_params.bounds.x_min = this->params.bp_x_min;
-		score_params.bounds.x_max = this->params.bp_x_max;
-		score_params.bounds.y_min = this->params.bp_y_min;
-		score_params.bounds.y_max = this->params.bp_y_max;
-		score_params.bounds.z_min = this->params.bp_z_min;
-		score_params.bounds.z_max = this->params.bp_z_max;
-		score_params.bounds.roll_min = score_params.bounds.roll_max = 0.0;
-		score_params.bounds.pitch_min = score_params.bounds.pitch_max = 0.0;
-		score_params.solve_restarts = this->params.bp_score_solve_restarts;
-		score_params.ik_timeout = this->params.ik_timeout;
-		score_params.random_seed = this->params.random_seed;
-
 		RCLCPP_INFO(
-			this->get_logger(), "B* baseline: optimizing the object offset (x,y,z) over %zu viewpoints...",
+			this->get_logger(), "B*: optimizing the base offset (x,y,theta) over %zu viewpoints...",
 			tour_tcp_poses.size());
 
 		BasePlacementResult result = SolveBasePlacement(
 			this->shared_from_this(), this->robot_model, local_scene, this->params.group_name,
-			object_translation_world, object_rotation_world, tour_tcp_poses, this->home_joint_values, bp_params,
-			score_params);
+			object_translation_world, object_rotation_world, tour_tcp_poses, this->home_joint_values, bp_params);
 
 		ExportBasePlacementResult(this->params.output_dir, result);
 
@@ -337,15 +368,16 @@ private:
 		{
 			RCLCPP_WARN(
 				this->get_logger(),
-				"execute_on_robot: driving the REAL robot against the object moved by (%.4f, %.4f, %.4f) m in "
+				"execute_on_robot: driving the REAL robot against the object moved by (%.4f, %.4f, %.4f rad) in "
 				"software -- only correct if the physical object has actually been re-fixtured to match.",
-				result.x, result.y, result.z);
+				result.x, result.y, result.theta);
 
 			ApplyBasePlacementToScene(
-				local_scene, object_translation_world, object_rotation_world, result.x, result.y, result.z);
+				local_scene, object_translation_world, object_rotation_world, result.x, result.y, result.theta);
 
 			Eigen::Isometry3d object_offset = Eigen::Isometry3d::Identity();
-			object_offset.translation() = Eigen::Vector3d(result.x, result.y, result.z);
+			object_offset.translation() = Eigen::Vector3d(result.x, result.y, 0.0);
+			object_offset.linear() = Eigen::AngleAxisd(result.theta, Eigen::Vector3d::UnitZ()).toRotationMatrix();
 
 			std::vector<ViewpointCandidate> owned(result.tour_order.size());
 			std::vector<const ViewpointCandidate*> selected;

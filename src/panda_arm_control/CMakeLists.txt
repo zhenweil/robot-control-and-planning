@@ -23,6 +23,8 @@ find_package(visualization_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(random_numbers REQUIRED)
 find_package(jsoncpp REQUIRED)
+# osqp_vendor (ros-humble-osqp-vendor) makes upstream OSQP's own CMake package findable.
+find_package(osqp REQUIRED)
 find_package(VTK 9.1 REQUIRED COMPONENTS
 	CommonCore
 	CommonDataModel
@@ -74,7 +76,6 @@ add_executable(viewpoint_planner_hgtsp
 
 add_executable(base_placement
 	src/base_placement.cpp
-	src/base_gradient.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
 	src/base_placement_node.cpp
@@ -115,6 +116,9 @@ foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt
 		MODULES ${VTK_LIBRARIES}
 		)
 endforeach()
+
+# base_placement's B* implementation solves a sequence of linear programs with OSQP.
+target_link_libraries(base_placement osqp::osqp)
 
 install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}

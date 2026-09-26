@@ -48,28 +48,50 @@ def generate_launch_description():
     )
     random_seed = LaunchConfiguration("random_seed")
 
-    score_solve_restarts_arg = DeclareLaunchArgument(
-        "score_solve_restarts",
-        default_value="1",
-        description="min-of-N IK collections per candidate score. 1 = fast (some noise); 2 "
-        "matches the experiment's careful runs.",
-    )
-    score_solve_restarts = ParameterValue(LaunchConfiguration("score_solve_restarts"), value_type=int)
-
     num_restarts_arg = DeclareLaunchArgument("num_restarts", default_value="3")
     num_restarts = ParameterValue(LaunchConfiguration("num_restarts"), value_type=int)
 
-    offset_bound_args = []
-    offset_bounds = {}
-    for _axis in ("x", "y", "z"):
-        for _side, _default in (("min", "-0.15"), ("max", "0.15")):
+    fd_jacobian_check_arg = DeclareLaunchArgument(
+        "fd_jacobian_check",
+        default_value="false",
+        description="Log a finite-difference check of the hand-derived FK Jacobians on restart "
+        "1 -- turn on when validating a change to the linearization math.",
+    )
+    fd_jacobian_check = ParameterValue(LaunchConfiguration("fd_jacobian_check"), value_type=bool)
+
+    bound_args = []
+    bounds = {}
+    for _axis, _default_min, _default_max, _unit in (
+        ("x", "-0.15", "0.15", "m"),
+        ("y", "-0.15", "0.15", "m"),
+        ("theta", "-0.35", "0.35", "rad"),
+    ):
+        for _side, _default in (("min", _default_min), ("max", _default_max)):
             _name = f"{_axis}_{_side}"
-            offset_bound_args.append(DeclareLaunchArgument(
+            bound_args.append(DeclareLaunchArgument(
                 _name, default_value=_default,
-                description=f"Object offset {_axis} {_side} bound (m).",
+                description=f"Base offset {_axis} {_side} bound ({_unit}).",
             ))
-            offset_bounds[f"bp_{_name}"] = ParameterValue(
-                LaunchConfiguration(_name), value_type=float)
+            bounds[f"bp_{_name}"] = ParameterValue(LaunchConfiguration(_name), value_type=float)
+
+    outer_inner_args = []
+    outer_inner = {}
+    for _name, _default, _type in (
+        ("mu_initial", "1.0", float),
+        ("mu_growth_factor", "2.0", float),
+        ("max_outer_iterations", "12", int),
+        ("max_inner_iterations", "25", int),
+        ("trust_region_initial", "0.1", float),
+        ("trust_region_reg", "1e-6", float),
+        ("collision_distance_threshold", "0.1", float),
+        ("min_clearance", "0.01", float),
+        ("num_init_retries", "20", int),
+        ("joint_ik_max_iterations", "300", int),
+        ("joint_ik_damping", "0.001", float),
+        ("joint_ik_lm_max_escalations", "20", int),
+    ):
+        outer_inner_args.append(DeclareLaunchArgument(f"bp_{_name}", default_value=_default))
+        outer_inner[f"bp_{_name}"] = ParameterValue(LaunchConfiguration(f"bp_{_name}"), value_type=_type)
 
     moveit_config = (
         MoveItConfigsBuilder("panda", package_name="panda_arm_moveit")
@@ -90,18 +112,18 @@ def generate_launch_description():
         # ordered tour's selected_robot_poses.json -- this node's input.
         "tour_input_dir": "/tmp/viewpoint_planner_output",
         "output_dir": "/tmp/base_placement_output",
-        # Object-offset search box (m) + search-strategy knobs -- see base_placement.hpp.
-        **offset_bounds,
+        # Base-offset search box + two-layer B* search-strategy knobs -- see base_placement.hpp.
+        **bounds,
         "bp_num_restarts": num_restarts,
-        "bp_max_outer_iterations": 10,
-        "bp_candidates_per_point": 16,
-        "bp_ik_retries_per_point": 4,
-        "bp_initial_step": 0.06,
-        "bp_step_shrink": 0.5,
-        "bp_min_step": 0.005,
-        "bp_convergence_tolerance_cost": 0.01,
-        "bp_score_solve_restarts": score_solve_restarts,
-        "ik_timeout": 0.15,
+        **outer_inner,
+        "bp_trust_region_shrink": 0.5,
+        "bp_trust_region_expand": 1.5,
+        "bp_trust_region_min": 1e-4,
+        "bp_outer_convergence_tolerance": 0.005,
+        "bp_rot_metric_scale": 0.3,
+        "bp_fk_residual_tolerance": 1e-3,
+        "bp_fd_jacobian_check": fd_jacobian_check,
+        "ik_timeout": 3.0,
         "random_seed": ParameterValue(random_seed, value_type=int),
         "visualize_progress_delay_sec": visualize_progress_delay_sec,
         "execute_on_robot": execute_on_robot,
@@ -144,9 +166,10 @@ def generate_launch_description():
             execute_on_robot_arg,
             visualize_progress_delay_sec_arg,
             random_seed_arg,
-            score_solve_restarts_arg,
             num_restarts_arg,
-            *offset_bound_args,
+            fd_jacobian_check_arg,
+            *bound_args,
+            *outer_inner_args,
             base_placement_node,
             rviz_node,
         ]
