@@ -39,7 +39,7 @@ struct BasePlacementParams
 
 	// Outer layer (Eq. 9): mu(j) = mu_initial * mu_growth_factor^j penalizes per-point base poses
 	// away from their mean, pulling them to one shared value.
-	double mu_initial = 1.0;
+	double mu_initial = 0.1;
 	double mu_growth_factor = 2.0;
 	int max_outer_iterations = 12;
 	double outer_convergence_tolerance = 0.005;  // meters

@@ -76,7 +76,7 @@ def generate_launch_description():
     outer_inner_args = []
     outer_inner = {}
     for _name, _default, _type in (
-        ("mu_initial", "1.0", float),
+        ("mu_initial", "0.1", float),
         ("mu_growth_factor", "2.0", float),
         ("max_outer_iterations", "12", int),
         ("max_inner_iterations", "25", int),

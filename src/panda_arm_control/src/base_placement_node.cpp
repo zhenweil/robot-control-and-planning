@@ -44,7 +44,7 @@ struct Params
 	double bp_joint_ik_damping = 1e-3;
 	int bp_joint_ik_lm_max_escalations = 20;
 
-	double bp_mu_initial = 1.0;
+	double bp_mu_initial = 0.1;
 	double bp_mu_growth_factor = 2.0;
 	int bp_max_outer_iterations = 12;
 	double bp_outer_convergence_tolerance = 0.005;

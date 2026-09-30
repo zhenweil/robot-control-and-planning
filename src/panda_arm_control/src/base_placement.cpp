@@ -597,16 +597,17 @@ LpStep SolveTrustRegionLp(
 		const std::array<double, 2> off0 = {xy_offset0[i].x - mean0.x, xy_offset0[i].y - mean0.y};
 		for (int c = 0; c < 2; ++c)
 		{
+			// Variables move to the left side negated, as in the edge rows above.
 			int row = A.add_row(off0[c], inf);
-			A.put(row, idx_zpen(i, c), 1.0);
-			A.put(row, idx_db(i, c), 1.0);
-			for (int j = 0; j < n; ++j)
-				A.put(row, idx_db(j, c), -1.0 / n);
-			row = A.add_row(-off0[c], inf);
 			A.put(row, idx_zpen(i, c), 1.0);
 			A.put(row, idx_db(i, c), -1.0);
 			for (int j = 0; j < n; ++j)
 				A.put(row, idx_db(j, c), 1.0 / n);
+			row = A.add_row(-off0[c], inf);
+			A.put(row, idx_zpen(i, c), 1.0);
+			A.put(row, idx_db(i, c), 1.0);
+			for (int j = 0; j < n; ++j)
+				A.put(row, idx_db(j, c), -1.0 / n);
 		}
 	}
 
@@ -647,6 +648,9 @@ LpStep SolveTrustRegionLp(
 	settings.verbose = 0;
 	settings.polish = 1;
 	settings.max_iter = 20000;	// diagnostic: was hitting the 4000 default every call at reg=1e-6
+	// Accuracy relative to step size: fixed 1e-3 overshoots small trust regions; fixed 1e-6 hits max_iter.
+	settings.eps_abs = 0.01 * trust_region;
+	settings.eps_rel = 0.01 * trust_region;
 
 	OSQPWorkspace* work = nullptr;
 	const c_int exit_flag = osqp_setup(&work, &data, &settings);
@@ -806,6 +810,19 @@ InnerResult RunInnerSlp(
 				break;
 			continue;
 		}
+
+		// Diagnostic: a correct LP step never exceeds the trust region.
+		double max_abs_step = 0.0;
+		for (int i = 0; i < n; ++i)
+		{
+			for (double d : step.dq[i])
+				max_abs_step = std::max(max_abs_step, std::abs(d));
+			max_abs_step = std::max({max_abs_step, std::abs(step.db[i].x), std::abs(step.db[i].y)});
+		}
+		RCLCPP_INFO(
+			node->get_logger(), "[diag] inner iter %d: max|step|=%.2e trust_region=%.2e (%s) status='%s'", iter,
+			max_abs_step, trust_region, max_abs_step > trust_region * 1.01 ? "VIOLATED" : "ok",
+			step.diag_status_str.c_str());
 
 		std::vector<std::vector<double>> q_new = q;
 		std::vector<XYOffset> xy_offset_new = xy_offset;
@@ -1081,8 +1098,9 @@ BasePlacementResult SolveBasePlacement(
 		RestartResult c = RunOuterRelaxation(
 			node, r + 1, robot_model, planning_scene_monitor, group_name, object_translation_original,
 			object_rotation_original, tour_tcp_poses_original, start_reference_joints, params, rng);
-		const bool better = !have_best || (c.ok && !best.ok) ||
-			(c.ok == best.ok && c.total_joint_path_length < best.total_joint_path_length);
+		// Reach count first, so a 33/38 restart beats a 28/38 one with a shorter path.
+		const bool better = !have_best || c.num_reachable > best.num_reachable ||
+			(c.num_reachable == best.num_reachable && c.total_joint_path_length < best.total_joint_path_length);
 		RCLCPP_INFO(
 			node->get_logger(), "[restart %d/%d] done: xy_offset (%.4f, %.4f)  reach %d/%d  path_length %.3f%s",
 			r + 1, params.num_restarts, c.xy_offset.x, c.xy_offset.y, c.num_reachable, n,
