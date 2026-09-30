@@ -10,12 +10,12 @@
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-// Base pose search bounds (x, y, theta=yaw), applied as an object offset (object-offset duality).
+// Base pose search bounds (x, y only -- no rotation search), applied as an object offset
+// (object-offset duality).
 struct BasePlacementBounds
 {
 	double x_min = -0.15, x_max = 0.15;
 	double y_min = -0.15, y_max = 0.15;
-	double theta_min = -0.35, theta_max = 0.35;  // radians (~20 deg)
 };
 
 // Search-strategy knobs for the two-layer B* algorithm (Zhao et al., arXiv:2504.12719).
@@ -42,7 +42,9 @@ struct BasePlacementParams
 	double mu_initial = 1.0;
 	double mu_growth_factor = 2.0;
 	int max_outer_iterations = 12;
-	double outer_convergence_tolerance = 0.005;  // meters (theta blended via rot_metric_scale)
+	double outer_convergence_tolerance = 0.005;  // meters
+	// Blends the end-effector's own orientation error into the FK residual tolerance below --
+	// unrelated to object rotation, which isn't searched at all.
 	double rot_metric_scale = 0.3;				  // meters per radian
 
 	// Inner layer (Eq. 11): trust-region SLP, re-linearizing FK + collision each iteration.
@@ -81,7 +83,7 @@ struct BasePlacementResult
 	bool ok = false;
 	int num_reachable = 0;
 	int num_total = 0;
-	double x = 0.0, y = 0.0, theta = 0.0;  // T(x,y,0) * Rz(theta), object frame
+	double x = 0.0, y = 0.0;  // T(x,y,0), object frame
 
 	std::vector<int> tour_order;
 	std::vector<std::vector<double>> joint_solutions;
@@ -108,14 +110,13 @@ BasePlacementResult SolveBasePlacement(
 // Writes base_placement_result.json to output_dir.
 void ExportBasePlacementResult(const std::string& output_dir, const BasePlacementResult& result);
 
-// Moves the registered "object" to its nominal pose adjusted by T(x, y, 0) * Rz(theta).
+// Moves the registered "object" to its nominal pose adjusted by T(x, y, 0).
 void ApplyBasePlacementToScene(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Vector3d& object_translation_original,
 	const Eigen::Matrix3d& object_rotation_original,
 	double x,
-	double y,
-	double theta);
+	double y);
 
 // Object mesh + tour polyline/waypoints re-expressed at the recommended offset. frame_id "world".
 visualization_msgs::msg::MarkerArray BuildBasePlacementMarkerArray(

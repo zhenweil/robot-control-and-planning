@@ -35,10 +35,9 @@ struct Params
 	std::string tour_input_dir = "/tmp/viewpoint_planner_output";
 	std::string output_dir = "/tmp/base_placement_output";
 
-	// Base-offset search box (x, y meters; theta radians), relative to the object's nominal pose.
+	// Base-offset search box (x, y meters -- no rotation search), relative to the object's nominal pose.
 	double bp_x_min = -0.15, bp_x_max = 0.15;
 	double bp_y_min = -0.15, bp_y_max = 0.15;
-	double bp_theta_min = -0.35, bp_theta_max = 0.35;
 	int bp_num_restarts = 3;
 	int bp_num_init_retries = 20;
 	int bp_joint_ik_max_iterations = 300;
@@ -205,8 +204,6 @@ private:
 		this->declareIfNeeded("bp_x_max", this->params.bp_x_max);
 		this->declareIfNeeded("bp_y_min", this->params.bp_y_min);
 		this->declareIfNeeded("bp_y_max", this->params.bp_y_max);
-		this->declareIfNeeded("bp_theta_min", this->params.bp_theta_min);
-		this->declareIfNeeded("bp_theta_max", this->params.bp_theta_max);
 		this->declareIfNeeded("bp_num_restarts", this->params.bp_num_restarts);
 		this->declareIfNeeded("bp_num_init_retries", this->params.bp_num_init_retries);
 		this->declareIfNeeded("bp_joint_ik_max_iterations", this->params.bp_joint_ik_max_iterations);
@@ -250,8 +247,6 @@ private:
 		this->get_parameter("bp_x_max", this->params.bp_x_max);
 		this->get_parameter("bp_y_min", this->params.bp_y_min);
 		this->get_parameter("bp_y_max", this->params.bp_y_max);
-		this->get_parameter("bp_theta_min", this->params.bp_theta_min);
-		this->get_parameter("bp_theta_max", this->params.bp_theta_max);
 		this->get_parameter("bp_num_restarts", this->params.bp_num_restarts);
 		this->get_parameter("bp_num_init_retries", this->params.bp_num_init_retries);
 		this->get_parameter("bp_joint_ik_max_iterations", this->params.bp_joint_ik_max_iterations);
@@ -315,8 +310,6 @@ private:
 		bp_params.bounds.x_max = this->params.bp_x_max;
 		bp_params.bounds.y_min = this->params.bp_y_min;
 		bp_params.bounds.y_max = this->params.bp_y_max;
-		bp_params.bounds.theta_min = this->params.bp_theta_min;
-		bp_params.bounds.theta_max = this->params.bp_theta_max;
 		bp_params.num_restarts = this->params.bp_num_restarts;
 		bp_params.random_seed = this->params.random_seed;
 		bp_params.ik_timeout = this->params.ik_timeout;
@@ -344,8 +337,7 @@ private:
 		bp_params.visualize_progress_delay_sec = this->params.visualize_progress_delay_sec;
 
 		RCLCPP_INFO(
-			this->get_logger(), "B*: optimizing the base offset (x,y,theta) over %zu viewpoints...",
-			tour_tcp_poses.size());
+			this->get_logger(), "B*: optimizing the base offset (x,y) over %zu viewpoints...", tour_tcp_poses.size());
 
 		BasePlacementResult result = SolveBasePlacement(
 			this->shared_from_this(), this->robot_model, local_scene, this->params.group_name,
@@ -372,16 +364,14 @@ private:
 		{
 			RCLCPP_WARN(
 				this->get_logger(),
-				"execute_on_robot: driving the REAL robot against the object moved by (%.4f, %.4f, %.4f rad) in "
+				"execute_on_robot: driving the REAL robot against the object moved by (%.4f, %.4f) in "
 				"software -- only correct if the physical object has actually been re-fixtured to match.",
-				result.x, result.y, result.theta);
+				result.x, result.y);
 
-			ApplyBasePlacementToScene(
-				local_scene, object_translation_world, object_rotation_world, result.x, result.y, result.theta);
+			ApplyBasePlacementToScene(local_scene, object_translation_world, object_rotation_world, result.x, result.y);
 
 			Eigen::Isometry3d object_offset = Eigen::Isometry3d::Identity();
 			object_offset.translation() = Eigen::Vector3d(result.x, result.y, 0.0);
-			object_offset.linear() = Eigen::AngleAxisd(result.theta, Eigen::Vector3d::UnitZ()).toRotationMatrix();
 
 			std::vector<ViewpointCandidate> owned(result.tour_order.size());
 			std::vector<const ViewpointCandidate*> selected;

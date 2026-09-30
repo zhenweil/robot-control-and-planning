@@ -64,7 +64,6 @@ def generate_launch_description():
     for _axis, _default_min, _default_max, _unit in (
         ("x", "-0.15", "0.15", "m"),
         ("y", "-0.15", "0.15", "m"),
-        ("theta", "-0.35", "0.35", "rad"),
     ):
         for _side, _default in (("min", _default_min), ("max", _default_max)):
             _name = f"{_axis}_{_side}"
