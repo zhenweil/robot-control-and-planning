@@ -56,6 +56,9 @@ struct BasePlacementParams
 	double trust_region_good_ratio = 0.75;
 	// Small quadratic cost on dq/db so the LP's solver has a unique minimum to converge to.
 	double trust_region_reg = 1e-3;
+	// FK error (Eq. 5) is a minimized L1 cost, not a hard equality -- so the outer loop's
+	// mu-pulling can never make one point's error infeasible for the whole combined LP.
+	double fk_penalty_weight = 50.0;
 
 	// Collision (Eq. 8): linearized signed-distance constraint for pairs within this threshold.
 	double collision_distance_threshold = 0.1;

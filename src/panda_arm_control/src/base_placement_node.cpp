@@ -56,7 +56,8 @@ struct Params
 	double bp_trust_region_shrink = 0.5;
 	double bp_trust_region_expand = 1.5;
 	double bp_trust_region_min = 1e-4;
-	double bp_trust_region_reg = 1e-6;
+	double bp_trust_region_reg = 1e-3;
+	double bp_fk_penalty_weight = 50.0;
 
 	double bp_collision_distance_threshold = 0.1;
 	double bp_min_clearance = 0.01;
@@ -222,6 +223,7 @@ private:
 		this->declareIfNeeded("bp_trust_region_expand", this->params.bp_trust_region_expand);
 		this->declareIfNeeded("bp_trust_region_min", this->params.bp_trust_region_min);
 		this->declareIfNeeded("bp_trust_region_reg", this->params.bp_trust_region_reg);
+		this->declareIfNeeded("bp_fk_penalty_weight", this->params.bp_fk_penalty_weight);
 		this->declareIfNeeded("bp_collision_distance_threshold", this->params.bp_collision_distance_threshold);
 		this->declareIfNeeded("bp_min_clearance", this->params.bp_min_clearance);
 		this->declareIfNeeded("bp_fk_residual_tolerance", this->params.bp_fk_residual_tolerance);
@@ -266,6 +268,7 @@ private:
 		this->get_parameter("bp_trust_region_expand", this->params.bp_trust_region_expand);
 		this->get_parameter("bp_trust_region_min", this->params.bp_trust_region_min);
 		this->get_parameter("bp_trust_region_reg", this->params.bp_trust_region_reg);
+		this->get_parameter("bp_fk_penalty_weight", this->params.bp_fk_penalty_weight);
 		this->get_parameter("bp_collision_distance_threshold", this->params.bp_collision_distance_threshold);
 		this->get_parameter("bp_min_clearance", this->params.bp_min_clearance);
 		this->get_parameter("bp_fk_residual_tolerance", this->params.bp_fk_residual_tolerance);
@@ -332,6 +335,7 @@ private:
 		bp_params.trust_region_expand = this->params.bp_trust_region_expand;
 		bp_params.trust_region_min = this->params.bp_trust_region_min;
 		bp_params.trust_region_reg = this->params.bp_trust_region_reg;
+		bp_params.fk_penalty_weight = this->params.bp_fk_penalty_weight;
 		bp_params.collision_distance_threshold = this->params.bp_collision_distance_threshold;
 		bp_params.min_clearance = this->params.bp_min_clearance;
 		bp_params.fk_residual_tolerance = this->params.bp_fk_residual_tolerance;

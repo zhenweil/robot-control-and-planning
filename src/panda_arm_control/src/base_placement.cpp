@@ -88,18 +88,18 @@ double RandomUniform(std::mt19937& rng, double lo, double hi)
 	return dist(rng);
 }
 
-struct BaseOffset3
+struct ObjectOffset3
 {
 	double x = 0.0, y = 0.0, theta = 0.0;
 };
 
-BaseOffset3 RandomInBounds(const BasePlacementBounds& b, std::mt19937& rng)
+ObjectOffset3 RandomInBounds(const BasePlacementBounds& b, std::mt19937& rng)
 {
 	return {RandomUniform(rng, b.x_min, b.x_max), RandomUniform(rng, b.y_min, b.y_max),
 			RandomUniform(rng, b.theta_min, b.theta_max)};
 }
 
-BaseOffset3 ClampToBounds(BaseOffset3 o, const BasePlacementBounds& b)
+ObjectOffset3 ClampToBounds(ObjectOffset3 o, const BasePlacementBounds& b)
 {
 	o.x = std::clamp(o.x, b.x_min, b.x_max);
 	o.y = std::clamp(o.y, b.y_min, b.y_max);
@@ -131,12 +131,12 @@ Eigen::Vector3d OrientationError(const Eigen::Matrix3d& target, const Eigen::Mat
 
 // ---------------------------------------------------------------------------------------------
 // Step-1 relaxation: for one viewpoint, find a collision-free (q, x, y, theta) that reaches it,
-// solving the arm joints and the base offset jointly (defined below LinearizeFk, which it uses).
+// solving the arm joints and the object offset jointly (defined below LinearizeFk, which it uses).
 // ---------------------------------------------------------------------------------------------
 
 void PublishRelaxationProgress(
-	const rclcpp::Node::SharedPtr& node, const BasePlacementParams& params, const std::vector<BaseOffset3>& offsets,
-	const std::vector<bool>& placed, const BaseOffset3& mean)
+	const rclcpp::Node::SharedPtr& node, const BasePlacementParams& params, const std::vector<ObjectOffset3>& offsets,
+	const std::vector<bool>& placed, const ObjectOffset3& mean)
 {
 	if (!params.progress_pub)
 		return;
@@ -192,7 +192,7 @@ void PublishRelaxationProgress(
 // One viewpoint's linearized FK equality: J*dq - S*db = residual (6 rows: [pos; rot_vec]).
 struct FkLinearization
 {
-	Eigen::MatrixXd J;				// 6 x dof, [linear; angular], base frame
+	Eigen::MatrixXd J;				// 6 x dof, [linear; angular], base_link frame
 	Eigen::Matrix<double, 6, 3> S;	// 6 x 3, columns x, y, theta
 	Eigen::Matrix<double, 6, 1> residual;
 };
@@ -200,13 +200,13 @@ struct FkLinearization
 FkLinearization LinearizeFk(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const moveit::core::LinkModel* tool0_link, const Eigen::Isometry3d& target_pose_original,
-	const std::vector<double>& q0, const BaseOffset3& base0)
+	const std::vector<double>& q0, const ObjectOffset3& object_offset0)
 {
 	FkLinearization out;
 
-	const Eigen::Isometry3d xform = MakeObjectOffsetXform(base0.x, base0.y, base0.theta);
+	const Eigen::Isometry3d xform = MakeObjectOffsetXform(object_offset0.x, object_offset0.y, object_offset0.theta);
 	const Eigen::Isometry3d target_moved = xform * target_pose_original;
-	const Eigen::Vector3d c(base0.x, base0.y, 0.0);
+	const Eigen::Vector3d c(object_offset0.x, object_offset0.y, 0.0);
 	const Eigen::Vector3d r = target_moved.translation() - c;
 
 	out.S.setZero();
@@ -225,21 +225,21 @@ FkLinearization LinearizeFk(
 	return out;
 }
 
-// Numerically perturbs q0/base0 and compares against LinearizeFk's analytic J/S; logs a warning
+// Numerically perturbs q0/object_offset0 and compares against LinearizeFk's analytic J/S; logs a warning
 // on disagreement since the whole SLP is only as correct as this derivative.
 void CheckFkJacobian(
 	const rclcpp::Node::SharedPtr& node, moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const moveit::core::LinkModel* tool0_link, const Eigen::Isometry3d& target_pose_original,
-	const std::vector<double>& q0, const BaseOffset3& base0, double eps)
+	const std::vector<double>& q0, const ObjectOffset3& object_offset0, double eps)
 {
-	const FkLinearization at0 = LinearizeFk(state, jmg, tool0_link, target_pose_original, q0, base0);
+	const FkLinearization at0 = LinearizeFk(state, jmg, tool0_link, target_pose_original, q0, object_offset0);
 	const int dof = static_cast<int>(q0.size());
 	Eigen::MatrixXd J_fd(6, dof);
 	for (int k = 0; k < dof; ++k)
 	{
 		std::vector<double> q_plus = q0;
 		q_plus[k] += eps;
-		const FkLinearization at_plus = LinearizeFk(state, jmg, tool0_link, target_pose_original, q_plus, base0);
+		const FkLinearization at_plus = LinearizeFk(state, jmg, tool0_link, target_pose_original, q_plus, object_offset0);
 		J_fd.col(k) = (at0.residual - at_plus.residual) / eps;  // d(residual)/dq = -J
 	}
 	const double j_err = (J_fd - at0.J).norm() / std::max(1e-9, at0.J.norm());
@@ -248,7 +248,7 @@ void CheckFkJacobian(
 	const std::array<double, 3> eps3 = {eps, eps, eps};
 	for (int c = 0; c < 3; ++c)
 	{
-		BaseOffset3 b_plus = base0;
+		ObjectOffset3 b_plus = object_offset0;
 		(c == 0 ? b_plus.x : c == 1 ? b_plus.y : b_plus.theta) += eps3[c];
 		const FkLinearization at_plus = LinearizeFk(state, jmg, tool0_link, target_pose_original, q0, b_plus);
 		S_fd.col(c) = (at_plus.residual - at0.residual) / eps3[c];  // d(residual)/dbase = +S
@@ -268,13 +268,13 @@ bool TryReachPointJointIk(
 	const moveit::core::JointModelGroup* jmg, const moveit::core::LinkModel* tool0_link,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Isometry3d& object_pose_original, const Eigen::Isometry3d& target_pose_original,
-	const std::vector<double>& seed_joints, const BaseOffset3& seed_base, const BasePlacementBounds& bounds,
-	const BasePlacementParams& params, std::vector<double>* out_joints, BaseOffset3* out_base,
+	const std::vector<double>& seed_joints, const ObjectOffset3& seed_object_offset, const BasePlacementBounds& bounds,
+	const BasePlacementParams& params, std::vector<double>* out_joints, ObjectOffset3* out_object_offset,
 	double* out_best_residual = nullptr, std::string* out_stop_reason = nullptr, int* out_iters_used = nullptr)
 {
 	const int dof = static_cast<int>(jmg->getVariableCount());
 	std::vector<double> q = seed_joints;
-	BaseOffset3 base = ClampToBounds(seed_base, bounds);
+	ObjectOffset3 object_offset = ClampToBounds(seed_object_offset, bounds);
 	double damping = params.joint_ik_damping;
 
 	auto clamped_step = [&](const Eigen::VectorXd& delta) {
@@ -284,14 +284,14 @@ bool TryReachPointJointIk(
 			const auto& bnd = robot_model->getVariableBounds(jmg->getVariableNames()[k]);
 			q_try[k] = std::clamp(q[k] + delta(k), bnd.min_position_, bnd.max_position_);
 		}
-		BaseOffset3 base_try;
-		base_try.x = std::clamp(base.x + delta(dof), bounds.x_min, bounds.x_max);
-		base_try.y = std::clamp(base.y + delta(dof + 1), bounds.y_min, bounds.y_max);
-		base_try.theta = std::clamp(base.theta + delta(dof + 2), bounds.theta_min, bounds.theta_max);
-		return std::make_pair(q_try, base_try);
+		ObjectOffset3 object_offset_try;
+		object_offset_try.x = std::clamp(object_offset.x + delta(dof), bounds.x_min, bounds.x_max);
+		object_offset_try.y = std::clamp(object_offset.y + delta(dof + 1), bounds.y_min, bounds.y_max);
+		object_offset_try.theta = std::clamp(object_offset.theta + delta(dof + 2), bounds.theta_min, bounds.theta_max);
+		return std::make_pair(q_try, object_offset_try);
 	};
 
-	auto blended_residual = [&](const std::vector<double>& qq, const BaseOffset3& bb) {
+	auto blended_residual = [&](const std::vector<double>& qq, const ObjectOffset3& bb) {
 		SetObjectPose(planning_scene_monitor, MakeObjectOffsetXform(bb.x, bb.y, bb.theta) * object_pose_original);
 		const FkLinearization fk = LinearizeFk(state, jmg, tool0_link, target_pose_original, qq, bb);
 		return std::max(fk.residual.head<3>().norm(), params.rot_metric_scale * fk.residual.tail<3>().norm());
@@ -311,8 +311,8 @@ bool TryReachPointJointIk(
 		}
 
 		SetObjectPose(
-			planning_scene_monitor, MakeObjectOffsetXform(base.x, base.y, base.theta) * object_pose_original);
-		const FkLinearization fk = LinearizeFk(state, jmg, tool0_link, target_pose_original, q, base);
+			planning_scene_monitor, MakeObjectOffsetXform(object_offset.x, object_offset.y, object_offset.theta) * object_pose_original);
+		const FkLinearization fk = LinearizeFk(state, jmg, tool0_link, target_pose_original, q, object_offset);
 
 		const double blended =
 			std::max(fk.residual.head<3>().norm(), params.rot_metric_scale * fk.residual.tail<3>().norm());
@@ -327,7 +327,7 @@ bool TryReachPointJointIk(
 				return false;
 			}
 			*out_joints = q;
-			*out_base = base;
+			*out_object_offset = object_offset;
 			return true;
 		}
 
@@ -344,15 +344,15 @@ bool TryReachPointJointIk(
 			GtG.diagonal().array() += damping;
 			const Eigen::VectorXd delta = GtG.ldlt().solve(G.transpose() * fk.residual);
 
-			const auto [q_try, base_try] = clamped_step(delta);
-			const double blended_try = blended_residual(q_try, base_try);
+			const auto [q_try, object_offset_try] = clamped_step(delta);
+			const double blended_try = blended_residual(q_try, object_offset_try);
 			if (out_best_residual && blended_try < *out_best_residual)
 				*out_best_residual = blended_try;
 
 			if (blended_try < blended)
 			{
 				q = q_try;
-				base = base_try;
+				object_offset = object_offset_try;
 				damping = std::max(damping / 3.0, 1e-8);
 				improved = true;
 			}
@@ -375,7 +375,7 @@ bool TryReachPointJointIk(
 	return false;
 }
 
-// One linearized collision row: row * dq_i >= rhs. Object re-placed at base0 for this evaluation,
+// One linearized collision row: row * dq_i >= rhs. Object re-placed at object_offset0 for this evaluation,
 // so only the robot-link side(s) of a pair contribute a Jacobian.
 struct CollisionRow
 {
@@ -452,7 +452,7 @@ struct LpStep
 {
 	bool ok = false;
 	std::vector<std::vector<double>> dq;	// n x dof
-	std::vector<BaseOffset3> db;			// n
+	std::vector<ObjectOffset3> db;			// n
 	double predicted_cost = 0.0;
 	c_int diag_setup_exit_flag = -999;
 	c_int diag_status_val = 0;
@@ -477,22 +477,25 @@ struct CooBuilder
 
 LpStep SolveTrustRegionLp(
 	const moveit::core::RobotModelConstPtr& robot_model, const moveit::core::JointModelGroup* jmg,
-	const std::vector<std::vector<double>>& q0, const std::vector<BaseOffset3>& base0,
+	const std::vector<std::vector<double>>& q0, const std::vector<ObjectOffset3>& object_offset0,
 	const std::vector<FkLinearization>& fk, const std::vector<std::vector<CollisionRow>>& collision,
 	const BasePlacementBounds& bounds, double mu, double trust_region, double rot_metric_scale,
-	double trust_region_reg)
+	double trust_region_reg, double fk_penalty_weight)
 {
 	const int n = static_cast<int>(q0.size());
 	const int dof = static_cast<int>(jmg->getVariableCount());
 	const int n_dq = n * dof;
 	const int n_db = n * 3;
 	const int n_zedge = std::max(0, n - 1) * dof;
-	const int num_vars = n_dq + n_db + n_zedge + n * 3;
+	const int n_zpen = n * 3;
+	const int n_zfk = n * 6;
+	const int num_vars = n_dq + n_db + n_zedge + n_zpen + n_zfk;
 
 	auto idx_dq = [&](int i, int k) { return i * dof + k; };
 	auto idx_db = [&](int i, int c) { return n_dq + i * 3 + c; };
 	auto idx_zedge = [&](int i, int k) { return n_dq + n_db + i * dof + k; };
 	auto idx_zpen = [&](int i, int c) { return n_dq + n_db + n_zedge + i * 3 + c; };
+	auto idx_zfk = [&](int i, int r) { return n_dq + n_db + n_zedge + n_zpen + i * 6 + r; };
 
 	std::vector<double> q_lin(num_vars, 0.0);
 	for (int i = 0; i < n; ++i)
@@ -501,18 +504,32 @@ LpStep SolveTrustRegionLp(
 	for (int e = 0; e < n - 1; ++e)
 		for (int k = 0; k < dof; ++k)
 			q_lin[idx_zedge(e, k)] = 1.0;
+	for (int i = 0; i < n; ++i)
+		for (int r = 0; r < 6; ++r)
+			q_lin[idx_zfk(i, r)] = fk_penalty_weight;
 
 	CooBuilder A;
 	const double inf = std::numeric_limits<double>::infinity();
 
-	// FK equality, softened by a small slack so a tight trust region can't make an unconverged
-	// residual infeasible for this one LP: J_i*dq_i - S_i*db_i = residual_i (+- fk_slack).
-	const double fk_slack = 1e-4;
+	// FK error (paper Eq. 5/11, per point i) as a minimized L1 cost instead of a hard equality:
+	// z_fk_i_r >= |J_i*dq_i - S_i*db_i - residual_i(r)|. The outer loop's mu-pulling (Eq. 9) can
+	// legitimately drag a point's residual around; a penalized error can never make the combined
+	// LP infeasible the way a hard equality band could.
 	for (int i = 0; i < n; ++i)
 	{
 		for (int r = 0; r < 6; ++r)
 		{
-			const int row = A.add_row(fk[i].residual(r) - fk_slack, fk[i].residual(r) + fk_slack);
+			int row = A.add_row(-fk[i].residual(r), inf);
+			A.put(row, idx_zfk(i, r), 1.0);
+			for (int k = 0; k < dof; ++k)
+				if (fk[i].J(r, k) != 0.0)
+					A.put(row, idx_dq(i, k), -fk[i].J(r, k));
+			for (int c = 0; c < 3; ++c)
+				if (fk[i].S(r, c) != 0.0)
+					A.put(row, idx_db(i, c), fk[i].S(r, c));
+
+			row = A.add_row(fk[i].residual(r), inf);
+			A.put(row, idx_zfk(i, r), 1.0);
 			for (int k = 0; k < dof; ++k)
 				if (fk[i].J(r, k) != 0.0)
 					A.put(row, idx_dq(i, k), fk[i].J(r, k));
@@ -536,12 +553,12 @@ LpStep SolveTrustRegionLp(
 	const double theta_trust = trust_region / std::max(1e-9, rot_metric_scale);
 	for (int i = 0; i < n; ++i)
 	{
-		const double xlo = std::max(bounds.x_min - base0[i].x, -trust_region);
-		const double xhi = std::min(bounds.x_max - base0[i].x, trust_region);
-		const double ylo = std::max(bounds.y_min - base0[i].y, -trust_region);
-		const double yhi = std::min(bounds.y_max - base0[i].y, trust_region);
-		const double tlo = std::max(bounds.theta_min - base0[i].theta, -theta_trust);
-		const double thi = std::min(bounds.theta_max - base0[i].theta, theta_trust);
+		const double xlo = std::max(bounds.x_min - object_offset0[i].x, -trust_region);
+		const double xhi = std::min(bounds.x_max - object_offset0[i].x, trust_region);
+		const double ylo = std::max(bounds.y_min - object_offset0[i].y, -trust_region);
+		const double yhi = std::min(bounds.y_max - object_offset0[i].y, trust_region);
+		const double tlo = std::max(bounds.theta_min - object_offset0[i].theta, -theta_trust);
+		const double thi = std::min(bounds.theta_max - object_offset0[i].theta, theta_trust);
 		int row = A.add_row(xlo, xhi);
 		A.put(row, idx_db(i, 0), 1.0);
 		row = A.add_row(ylo, yhi);
@@ -576,17 +593,17 @@ LpStep SolveTrustRegionLp(
 			A.put(row, idx_dq(e, k), -1.0);
 		}
 
-	// L1 epigraph for the outer-layer penalty: z_pen_i >= |(base0_i - mean0) + db_i - mean(db)|.
-	BaseOffset3 mean0{0.0, 0.0, 0.0};
+	// L1 epigraph for the outer-layer penalty: z_pen_i >= |(object_offset0_i - mean0) + db_i - mean(db)|.
+	ObjectOffset3 mean0{0.0, 0.0, 0.0};
 	for (int i = 0; i < n; ++i)
 	{
-		mean0.x += base0[i].x / n;
-		mean0.y += base0[i].y / n;
-		mean0.theta += base0[i].theta / n;
+		mean0.x += object_offset0[i].x / n;
+		mean0.y += object_offset0[i].y / n;
+		mean0.theta += object_offset0[i].theta / n;
 	}
 	for (int i = 0; i < n; ++i)
 	{
-		const std::array<double, 3> off0 = {base0[i].x - mean0.x, base0[i].y - mean0.y, base0[i].theta - mean0.theta};
+		const std::array<double, 3> off0 = {object_offset0[i].x - mean0.x, object_offset0[i].y - mean0.y, object_offset0[i].theta - mean0.theta};
 		for (int c = 0; c < 3; ++c)
 		{
 			int row = A.add_row(off0[c], inf);
@@ -655,7 +672,7 @@ LpStep SolveTrustRegionLp(
 			step.ok = true;
 			step.predicted_cost = work->info->obj_val;
 			step.dq.assign(n, std::vector<double>(dof, 0.0));
-			step.db.assign(n, BaseOffset3{});
+			step.db.assign(n, ObjectOffset3{});
 			for (int i = 0; i < n; ++i)
 			{
 				for (int k = 0; k < dof; ++k)
@@ -678,22 +695,46 @@ LpStep SolveTrustRegionLp(
 // real progress on the true (non-linearized) cost, else shrinks the trust region and retries.
 // ---------------------------------------------------------------------------------------------
 
-double TrueCost(const std::vector<std::vector<double>>& q, const std::vector<BaseOffset3>& base, double mu)
+// Diagnostic breakdown of TrueCost's three components, so a predicted-vs-actual mismatch can be
+// traced to which term is responsible instead of guessing from the aggregate number.
+struct CostBreakdown
 {
-	double cost = 0.0;
-	for (size_t i = 0; i + 1 < q.size(); ++i)
-		cost += JointL1Distance(q[i], q[i + 1]);
+	double path_length = 0.0;
+	double spread = 0.0;
+	double fk = 0.0;
+};
 
-	BaseOffset3 mean{0.0, 0.0, 0.0};
-	for (const auto& b : base)
+double TrueCost(
+	const std::vector<std::vector<double>>& q, const std::vector<ObjectOffset3>& object_offset, double mu,
+	const std::vector<Eigen::Matrix<double, 6, 1>>& residuals, double fk_penalty_weight,
+	CostBreakdown* out_breakdown = nullptr)
+{
+	double path_length = 0.0;
+	for (size_t i = 0; i + 1 < q.size(); ++i)
+		path_length += JointL1Distance(q[i], q[i + 1]);
+
+	ObjectOffset3 mean{0.0, 0.0, 0.0};
+	for (const auto& b : object_offset)
 	{
-		mean.x += b.x / base.size();
-		mean.y += b.y / base.size();
-		mean.theta += b.theta / base.size();
+		mean.x += b.x / object_offset.size();
+		mean.y += b.y / object_offset.size();
+		mean.theta += b.theta / object_offset.size();
 	}
-	for (const auto& b : base)
-		cost += mu * (std::abs(b.x - mean.x) + std::abs(b.y - mean.y) + std::abs(b.theta - mean.theta));
-	return cost;
+	double spread = 0.0;
+	for (const auto& b : object_offset)
+		spread += mu * (std::abs(b.x - mean.x) + std::abs(b.y - mean.y) + std::abs(b.theta - mean.theta));
+
+	double fk_cost = 0.0;
+	for (const auto& r : residuals)
+		fk_cost += fk_penalty_weight * r.lpNorm<1>();
+
+	if (out_breakdown)
+	{
+		out_breakdown->path_length = path_length;
+		out_breakdown->spread = spread;
+		out_breakdown->fk = fk_cost;
+	}
+	return path_length + spread + fk_cost;
 }
 
 double MaxResidualNorm(const std::vector<FkLinearization>& fk, double rot_metric_scale)
@@ -711,7 +752,7 @@ double MaxResidualNorm(const std::vector<FkLinearization>& fk, double rot_metric
 struct InnerResult
 {
 	std::vector<std::vector<double>> q;
-	std::vector<BaseOffset3> base;
+	std::vector<ObjectOffset3> object_offset;
 	double fk_residual_max = 0.0;
 };
 
@@ -720,7 +761,7 @@ InnerResult RunInnerSlp(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
 	const moveit::core::JointModelGroup* jmg, const moveit::core::LinkModel* tool0_link,
 	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& targets,
-	std::vector<std::vector<double>> q, std::vector<BaseOffset3> base, double mu, const BasePlacementParams& params)
+	std::vector<std::vector<double>> q, std::vector<ObjectOffset3> object_offset, double mu, const BasePlacementParams& params)
 {
 	moveit::core::RobotState state(robot_model);
 	const int n = static_cast<int>(targets.size());
@@ -734,14 +775,22 @@ InnerResult RunInnerSlp(
 		{
 			SetObjectPose(
 				planning_scene_monitor,
-				MakeObjectOffsetXform(base[i].x, base[i].y, base[i].theta) * object_pose_original);
-			fk[i] = LinearizeFk(state, jmg, tool0_link, targets[i], q[i], base[i]);
+				MakeObjectOffsetXform(object_offset[i].x, object_offset[i].y, object_offset[i].theta) * object_pose_original);
+			fk[i] = LinearizeFk(state, jmg, tool0_link, targets[i], q[i], object_offset[i]);
 			collision[i] = LinearizeCollisionConstraints(
 				planning_scene_monitor, robot_model, state, jmg, group_name, params.collision_distance_threshold,
 				params.min_clearance);
 		}
 
-		if (iter == 0)
+		std::vector<Eigen::Matrix<double, 6, 1>> residuals(n);
+		for (int i = 0; i < n; ++i)
+			residuals[i] = fk[i].residual;
+		CostBreakdown breakdown0;
+		const double cost0 = TrueCost(q, object_offset, mu, residuals, params.fk_penalty_weight, &breakdown0);
+		LpStep step = SolveTrustRegionLp(
+			robot_model, jmg, q, object_offset, fk, collision, params.bounds, mu, trust_region, params.rot_metric_scale,
+			params.trust_region_reg, params.fk_penalty_weight);
+		if (!step.ok)
 		{
 			int total_rows = 0;
 			double max_rhs = -std::numeric_limits<double>::infinity();
@@ -756,24 +805,13 @@ InnerResult RunInnerSlp(
 						max_rhs_point = i;
 					}
 			}
-			RCLCPP_INFO(
-				node->get_logger(),
-				"[diag] inner iter 0: %d collision rows total, worst rhs=%.4f at point %d (rhs>0 means the LP "
-				"needs to separate that pair by more than the trust region can supply)",
-				total_rows, max_rhs, max_rhs_point);
-		}
-
-		const double cost0 = TrueCost(q, base, mu);
-		LpStep step = SolveTrustRegionLp(
-			robot_model, jmg, q, base, fk, collision, params.bounds, mu, trust_region, params.rot_metric_scale,
-			params.trust_region_reg);
-		if (!step.ok)
-		{
 			RCLCPP_WARN(
 				node->get_logger(),
-				"[diag] inner iter %d: LP failed, trust_region=%.2e setup_exit_flag=%d status_val=%d status='%s'",
+				"[diag] inner iter %d: LP failed, trust_region=%.2e setup_exit_flag=%d status_val=%d status='%s' "
+				"collision_rows=%d worst_rhs=%.4f at point %d",
 				iter, trust_region, static_cast<int>(step.diag_setup_exit_flag),
-				static_cast<int>(step.diag_status_val), step.diag_status_str.c_str());
+				static_cast<int>(step.diag_status_val), step.diag_status_str.c_str(), total_rows, max_rhs,
+				max_rhs_point);
 			trust_region *= params.trust_region_shrink;
 			if (trust_region < params.trust_region_min)
 				break;
@@ -781,16 +819,31 @@ InnerResult RunInnerSlp(
 		}
 
 		std::vector<std::vector<double>> q_new = q;
-		std::vector<BaseOffset3> base_new = base;
+		std::vector<ObjectOffset3> object_offset_new = object_offset;
+		// Clamp defensively: OSQP's own solver tolerance can let a step overshoot its box by a
+		// hair, and that drift compounds over outer iterations until a later, shrunk trust region
+		// box becomes invalid (lo > hi), which OSQP's setup then rejects for the whole batch.
 		for (int i = 0; i < n; ++i)
 		{
 			for (size_t k = 0; k < q[i].size(); ++k)
-				q_new[i][k] += step.dq[i][k];
-			base_new[i].x += step.db[i].x;
-			base_new[i].y += step.db[i].y;
-			base_new[i].theta += step.db[i].theta;
+			{
+				const auto& bnd = robot_model->getVariableBounds(jmg->getVariableNames()[k]);
+				q_new[i][k] = std::clamp(q[i][k] + step.dq[i][k], bnd.min_position_, bnd.max_position_);
+			}
+			object_offset_new[i] = ClampToBounds(
+				ObjectOffset3{object_offset[i].x + step.db[i].x, object_offset[i].y + step.db[i].y, object_offset[i].theta + step.db[i].theta},
+				params.bounds);
 		}
-		const double cost_new = TrueCost(q_new, base_new, mu);
+		std::vector<Eigen::Matrix<double, 6, 1>> residuals_new(n);
+		for (int i = 0; i < n; ++i)
+		{
+			SetObjectPose(
+				planning_scene_monitor,
+				MakeObjectOffsetXform(object_offset_new[i].x, object_offset_new[i].y, object_offset_new[i].theta) * object_pose_original);
+			residuals_new[i] = LinearizeFk(state, jmg, tool0_link, targets[i], q_new[i], object_offset_new[i]).residual;
+		}
+		CostBreakdown breakdown_new;
+		const double cost_new = TrueCost(q_new, object_offset_new, mu, residuals_new, params.fk_penalty_weight, &breakdown_new);
 		const double predicted_gain = cost0 - step.predicted_cost;
 		const double actual_gain = cost0 - cost_new;
 		const double ratio = predicted_gain > 1e-12 ? actual_gain / predicted_gain : 0.0;
@@ -798,13 +851,25 @@ InnerResult RunInnerSlp(
 		if (ratio > params.trust_region_accept_ratio)
 		{
 			q = q_new;
-			base = base_new;
+			object_offset = object_offset_new;
 			if (ratio > params.trust_region_good_ratio)
 				trust_region *= params.trust_region_expand;
+			RCLCPP_INFO(
+				node->get_logger(),
+				"[diag] inner iter %d: accepted, ratio=%.3f cost %.4f->%.4f trust_region=%.2e "
+				"[path %.3f->%.3f, spread %.3f->%.3f, fk %.3f->%.3f]",
+				iter, ratio, cost0, cost_new, trust_region, breakdown0.path_length, breakdown_new.path_length,
+				breakdown0.spread, breakdown_new.spread, breakdown0.fk, breakdown_new.fk);
 		}
 		else
 		{
 			trust_region *= params.trust_region_shrink;
+			RCLCPP_INFO(
+				node->get_logger(),
+				"[diag] inner iter %d: rejected, ratio=%.3f cost0=%.4f cost_new=%.4f trust_region=%.2e "
+				"[path %.3f->%.3f, spread %.3f->%.3f, fk %.3f->%.3f]",
+				iter, ratio, cost0, cost_new, trust_region, breakdown0.path_length, breakdown_new.path_length,
+				breakdown0.spread, breakdown_new.spread, breakdown0.fk, breakdown_new.fk);
 		}
 		if (trust_region < params.trust_region_min)
 			break;
@@ -812,13 +877,13 @@ InnerResult RunInnerSlp(
 
 	InnerResult out;
 	out.q = q;
-	out.base = base;
+	out.object_offset = object_offset;
 	std::vector<FkLinearization> final_fk(n);
 	for (int i = 0; i < n; ++i)
 	{
 		SetObjectPose(
-			planning_scene_monitor, MakeObjectOffsetXform(base[i].x, base[i].y, base[i].theta) * object_pose_original);
-		final_fk[i] = LinearizeFk(state, jmg, tool0_link, targets[i], q[i], base[i]);
+			planning_scene_monitor, MakeObjectOffsetXform(object_offset[i].x, object_offset[i].y, object_offset[i].theta) * object_pose_original);
+		final_fk[i] = LinearizeFk(state, jmg, tool0_link, targets[i], q[i], object_offset[i]);
 	}
 	out.fk_residual_max = MaxResidualNorm(final_fk, params.rot_metric_scale);
 	return out;
@@ -831,7 +896,7 @@ InnerResult RunInnerSlp(
 struct RestartResult
 {
 	bool ok = false;
-	BaseOffset3 base;
+	ObjectOffset3 object_offset;
 	std::vector<std::vector<double>> joints;
 	double total_joint_path_length = 0.0;
 	double fk_residual_max = 0.0;
@@ -855,7 +920,7 @@ RestartResult RunOuterRelaxation(
 	const moveit::core::LinkModel* tool0_link = robot_model->getLinkModel("tool0");
 
 	// Point 1 seeds randomly; later points seed from the preceding point's solution (paper Sec. IV-A).
-	std::vector<BaseOffset3> per_point(n);
+	std::vector<ObjectOffset3> per_point(n);
 	std::vector<bool> placed(n, false);
 	std::vector<std::vector<double>> joints(n, start_reference_joints);
 
@@ -865,12 +930,12 @@ RestartResult RunOuterRelaxation(
 	std::vector<double> seed_q(start_reference_joints.size());
 	state.setToRandomPositions(jmg, joint_rng);
 	state.copyJointGroupPositions(jmg, seed_q);
-	BaseOffset3 seed_base = RandomInBounds(params.bounds, rng);
+	ObjectOffset3 seed_object_offset = RandomInBounds(params.bounds, rng);
 
 	for (int i = 0; i < n; ++i)
 	{
 		std::vector<double> sol_q;
-		BaseOffset3 sol_base;
+		ObjectOffset3 sol_object_offset;
 		double best_residual = std::numeric_limits<double>::infinity();
 		std::string best_stop_reason;
 		int best_iters_used = 0;
@@ -883,7 +948,7 @@ RestartResult RunOuterRelaxation(
 			int local_iters = 0;
 			const bool ok = TryReachPointJointIk(
 				robot_model, state, jmg, tool0_link, planning_scene_monitor, object_pose_original, targets[i],
-				seed_q, seed_base, params.bounds, params, &sol_q, &sol_base, &local_residual, &local_reason,
+				seed_q, seed_object_offset, params.bounds, params, &sol_q, &sol_object_offset, &local_residual, &local_reason,
 				&local_iters);
 			if (local_residual < best_residual)
 			{
@@ -899,16 +964,16 @@ RestartResult RunOuterRelaxation(
 		{
 			state.setToRandomPositions(jmg, joint_rng);
 			state.copyJointGroupPositions(jmg, seed_q);
-			seed_base = RandomInBounds(params.bounds, rng);
+			seed_object_offset = RandomInBounds(params.bounds, rng);
 			ok = try_attempt();
 		}
 		if (ok)
 		{
-			per_point[i] = sol_base;
+			per_point[i] = sol_object_offset;
 			placed[i] = true;
 			joints[i] = sol_q;
 			seed_q = sol_q;
-			seed_base = sol_base;
+			seed_object_offset = sol_object_offset;
 		}
 		else
 		{
@@ -918,11 +983,11 @@ RestartResult RunOuterRelaxation(
 				"(tolerance=%.4f), that attempt: stop_reason='%s' iters_used=%d",
 				i, params.num_init_retries, best_residual, params.fk_residual_tolerance,
 				best_stop_reason.c_str(), best_iters_used);
-			seed_base = RandomInBounds(params.bounds, rng);
+			seed_object_offset = RandomInBounds(params.bounds, rng);
 		}
 	}
 	const int num_placed = std::count(placed.begin(), placed.end(), true);
-	BaseOffset3 mean{0.0, 0.0, 0.0};
+	ObjectOffset3 mean{0.0, 0.0, 0.0};
 	for (int i = 0; i < n; ++i)
 		if (placed[i])
 		{
@@ -947,42 +1012,42 @@ RestartResult RunOuterRelaxation(
 			params.fd_epsilon);
 	}
 
-	std::vector<BaseOffset3> base = per_point;
+	std::vector<ObjectOffset3> object_offset = per_point;
 	double mu = params.mu_initial;
 	for (int j = 0; j < params.max_outer_iterations && rclcpp::ok(); ++j)
 	{
 		InnerResult inner = RunInnerSlp(
 			node, robot_model, planning_scene_monitor, group_name, jmg, tool0_link, object_pose_original, targets,
-			joints, base, mu, params);
+			joints, object_offset, mu, params);
 		joints = inner.q;
-		base = inner.base;
+		object_offset = inner.object_offset;
 
-		BaseOffset3 m{0.0, 0.0, 0.0};
-		for (const auto& b : base)
+		ObjectOffset3 m{0.0, 0.0, 0.0};
+		for (const auto& b : object_offset)
 		{
 			m.x += b.x / n;
 			m.y += b.y / n;
 			m.theta += b.theta / n;
 		}
 		double spread = 0.0;
-		for (const auto& b : base)
+		for (const auto& b : object_offset)
 			spread = std::max(spread, BlendedNorm(b.x - m.x, b.y - m.y, b.theta - m.theta, params.rot_metric_scale));
 
 		RCLCPP_INFO(
 			node->get_logger(),
-			"[restart %d] outer %d/%d: mu=%.3g mean base (%.4f, %.4f, %.4f)  spread=%.4f  fk_residual=%.4f",
+			"[restart %d] outer %d/%d: mu=%.3g mean object_offset (%.4f, %.4f, %.4f)  spread=%.4f  fk_residual=%.4f",
 			restart_number, j + 1, params.max_outer_iterations, mu, m.x, m.y, m.theta, spread, inner.fk_residual_max);
 
 		if (spread < params.outer_convergence_tolerance)
 		{
-			base.assign(n, m);
+			object_offset.assign(n, m);
 			break;
 		}
 		mu *= params.mu_growth_factor;
 	}
 
 	RestartResult result;
-	result.base = base.empty() ? BaseOffset3{} : base.front();
+	result.object_offset = object_offset.empty() ? ObjectOffset3{} : object_offset.front();
 	result.joints = joints;
 	for (int i = 0; i + 1 < n; ++i)
 		result.total_joint_path_length += JointL1Distance(joints[i], joints[i + 1]);
@@ -995,8 +1060,8 @@ RestartResult RunOuterRelaxation(
 	{
 		SetObjectPose(
 			planning_scene_monitor,
-			MakeObjectOffsetXform(result.base.x, result.base.y, result.base.theta) * object_pose_original);
-		FkLinearization f = LinearizeFk(check_state, jmg, tool0_link, targets[i], joints[i], result.base);
+			MakeObjectOffsetXform(result.object_offset.x, result.object_offset.y, result.object_offset.theta) * object_pose_original);
+		FkLinearization f = LinearizeFk(check_state, jmg, tool0_link, targets[i], joints[i], result.object_offset);
 		const double blended = std::max(f.residual.head<3>().norm(), params.rot_metric_scale * f.residual.tail<3>().norm());
 		worst = std::max(worst, blended);
 		if (blended < params.fk_residual_tolerance)
@@ -1034,8 +1099,8 @@ BasePlacementResult SolveBasePlacement(
 		const bool better = !have_best || (c.ok && !best.ok) ||
 			(c.ok == best.ok && c.total_joint_path_length < best.total_joint_path_length);
 		RCLCPP_INFO(
-			node->get_logger(), "[restart %d/%d] done: base (%.4f, %.4f, %.4f)  reach %d/%d  path_length %.3f%s",
-			r + 1, params.num_restarts, c.base.x, c.base.y, c.base.theta, c.num_reachable, n,
+			node->get_logger(), "[restart %d/%d] done: object_offset (%.4f, %.4f, %.4f)  reach %d/%d  path_length %.3f%s",
+			r + 1, params.num_restarts, c.object_offset.x, c.object_offset.y, c.object_offset.theta, c.num_reachable, n,
 			c.total_joint_path_length, better ? "  <-- new best" : "");
 		if (better)
 		{
@@ -1050,9 +1115,9 @@ BasePlacementResult SolveBasePlacement(
 	result.num_total = n;
 	if (have_best)
 	{
-		result.x = best.base.x;
-		result.y = best.base.y;
-		result.theta = best.base.theta;
+		result.x = best.object_offset.x;
+		result.y = best.object_offset.y;
+		result.theta = best.object_offset.theta;
 		result.joint_solutions = best.joints;
 		result.num_reachable = best.num_reachable;
 		result.ok = best.ok;
