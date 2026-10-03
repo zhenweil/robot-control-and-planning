@@ -4,10 +4,12 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <random>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -730,6 +732,21 @@ double TrueCost(
 	return path_length + spread + fk_cost;
 }
 
+// Farthest base offset from the mean, in meters.
+double MaxSpread(const std::vector<XYOffset>& xy_offset)
+{
+	XYOffset m{0.0, 0.0};
+	for (const auto& b : xy_offset)
+	{
+		m.x += b.x / xy_offset.size();
+		m.y += b.y / xy_offset.size();
+	}
+	double spread = 0.0;
+	for (const auto& b : xy_offset)
+		spread = std::max(spread, std::hypot(b.x - m.x, b.y - m.y));
+	return spread;
+}
+
 double MaxResidualNorm(const std::vector<Eigen::Matrix<double, 6, 1>>& residuals, double rot_metric_scale)
 {
 	double worst = 0.0;
@@ -740,6 +757,17 @@ double MaxResidualNorm(const std::vector<Eigen::Matrix<double, 6, 1>>& residuals
 		worst = std::max(worst, std::max(pos_norm, rot_metric_scale * rot_norm));
 	}
 	return worst;
+}
+
+// Fixed-width progress tag so log columns stay aligned; pass -1 for a level that isn't running.
+std::string ProgressTag(int restart, int num_restarts, int outer, int max_outer, int inner, int max_inner)
+{
+	auto count = [](int k) { return k < 0 ? std::string("--") : std::to_string(k); };
+	char buf[96];
+	std::snprintf(
+		buf, sizeof(buf), "[restart %2s/%-2d | outer %2s/%-2d | inner %2s/%-2d]", count(restart).c_str(), num_restarts,
+		count(outer).c_str(), max_outer, count(inner).c_str(), max_inner);
+	return buf;
 }
 
 struct InnerResult
@@ -754,7 +782,8 @@ InnerResult RunInnerSlp(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
 	const moveit::core::JointModelGroup* jmg, const moveit::core::LinkModel* tool0_link,
 	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& targets,
-	std::vector<std::vector<double>> q, std::vector<XYOffset> xy_offset, double mu, const BasePlacementParams& params)
+	std::vector<std::vector<double>> q, std::vector<XYOffset> xy_offset, double mu, const BasePlacementParams& params,
+	int restart_number, int outer_number)
 {
 	moveit::core::RobotState state(robot_model);
 	const int n = static_cast<int>(targets.size());
@@ -762,6 +791,9 @@ InnerResult RunInnerSlp(
 
 	for (int iter = 0; iter < params.max_inner_iterations && rclcpp::ok(); ++iter)
 	{
+		const std::string tag = ProgressTag(
+			restart_number, std::max(1, params.num_restarts), outer_number, params.max_outer_iterations, iter + 1,
+			params.max_inner_iterations);
 		std::vector<FkLinearization> fk(n);
 		std::vector<std::vector<CollisionRow>> collision(n);
 		for (int i = 0; i < n; ++i)
@@ -785,44 +817,11 @@ InnerResult RunInnerSlp(
 			params.fk_penalty_weight);
 		if (!step.ok)
 		{
-			int total_rows = 0;
-			double max_rhs = -std::numeric_limits<double>::infinity();
-			int max_rhs_point = -1;
-			for (int i = 0; i < n; ++i)
-			{
-				total_rows += static_cast<int>(collision[i].size());
-				for (const auto& cr : collision[i])
-					if (cr.rhs > max_rhs)
-					{
-						max_rhs = cr.rhs;
-						max_rhs_point = i;
-					}
-			}
-			RCLCPP_WARN(
-				node->get_logger(),
-				"[diag] inner iter %d: LP failed, trust_region=%.2e setup_exit_flag=%d status_val=%d status='%s' "
-				"collision_rows=%d worst_rhs=%.4f at point %d",
-				iter, trust_region, static_cast<int>(step.diag_setup_exit_flag),
-				static_cast<int>(step.diag_status_val), step.diag_status_str.c_str(), total_rows, max_rhs,
-				max_rhs_point);
 			trust_region *= params.trust_region_shrink;
 			if (trust_region < params.trust_region_min)
 				break;
 			continue;
 		}
-
-		// Diagnostic: a correct LP step never exceeds the trust region.
-		double max_abs_step = 0.0;
-		for (int i = 0; i < n; ++i)
-		{
-			for (double d : step.dq[i])
-				max_abs_step = std::max(max_abs_step, std::abs(d));
-			max_abs_step = std::max({max_abs_step, std::abs(step.db[i].x), std::abs(step.db[i].y)});
-		}
-		RCLCPP_INFO(
-			node->get_logger(), "[diag] inner iter %d: max|step|=%.2e trust_region=%.2e (%s) status='%s'", iter,
-			max_abs_step, trust_region, max_abs_step > trust_region * 1.01 ? "VIOLATED" : "ok",
-			step.diag_status_str.c_str());
 
 		std::vector<std::vector<double>> q_new = q;
 		std::vector<XYOffset> xy_offset_new = xy_offset;
@@ -855,26 +854,30 @@ InnerResult RunInnerSlp(
 
 		if (ratio > params.trust_region_accept_ratio)
 		{
+			const double spread_m_before = MaxSpread(xy_offset);
 			q = q_new;
 			xy_offset = xy_offset_new;
 			if (ratio > params.trust_region_good_ratio)
 				trust_region *= params.trust_region_expand;
 			RCLCPP_INFO(
 				node->get_logger(),
-				"[diag] inner iter %d: accepted, ratio=%.3f cost %.4f->%.4f trust_region=%.2e "
-				"[path %.3f->%.3f, spread %.3f->%.3f, fk %.3f->%.3f]",
-				iter, ratio, cost0, cost_new, trust_region, breakdown0.path_length, breakdown_new.path_length,
-				breakdown0.spread, breakdown_new.spread, breakdown0.fk, breakdown_new.fk);
+				"%s %-12s ratio %+8.3f  cost %10.4f -> %10.4f  trust_region %.2e  "
+				"path %9.3f -> %9.3f  spread(m) %7.4f -> %7.4f  fk %8.3f -> %8.3f",
+				tag.c_str(), "accepted", ratio, cost0, cost_new, trust_region, breakdown0.path_length,
+				breakdown_new.path_length,
+				spread_m_before, MaxSpread(xy_offset), breakdown0.fk, breakdown_new.fk);
+			// Early stop: further accepted steps barely change the cost.
+			if (actual_gain < params.inner_stop_rel_improvement * std::abs(cost0))
+			{
+				RCLCPP_INFO(
+					node->get_logger(), "%s %-12s relative gain %.2e < %.2e", tag.c_str(), "early stop",
+					actual_gain / std::max(1e-12, std::abs(cost0)), params.inner_stop_rel_improvement);
+				break;
+			}
 		}
 		else
 		{
 			trust_region *= params.trust_region_shrink;
-			RCLCPP_INFO(
-				node->get_logger(),
-				"[diag] inner iter %d: rejected, ratio=%.3f cost0=%.4f cost_new=%.4f trust_region=%.2e "
-				"[path %.3f->%.3f, spread %.3f->%.3f, fk %.3f->%.3f]",
-				iter, ratio, cost0, cost_new, trust_region, breakdown0.path_length, breakdown_new.path_length,
-				breakdown0.spread, breakdown_new.spread, breakdown0.fk, breakdown_new.fk);
 		}
 		if (trust_region < params.trust_region_min)
 			break;
@@ -984,9 +987,13 @@ RestartResult RunOuterRelaxation(
 		{
 			RCLCPP_WARN(
 				node->get_logger(),
-				"[diag] point %d: warm-start failed after %d retries, best residual reached=%.4f "
-				"(tolerance=%.4f), that attempt: stop_reason='%s' iters_used=%d",
-				i, params.num_init_retries, best_residual, params.fk_residual_tolerance,
+				"%s %-12s point %2d failed after %d retries  best residual %.4f  (tolerance %.4f)  "
+				"stop_reason '%s'  iters_used %d",
+				ProgressTag(
+					restart_number, std::max(1, params.num_restarts), -1, params.max_outer_iterations, -1,
+					params.max_inner_iterations)
+					.c_str(),
+				"warm start", i, params.num_init_retries, best_residual, params.fk_residual_tolerance,
 				best_stop_reason.c_str(), best_iters_used);
 			seed_xy_offset = RandomInBounds(params.bounds, rng);
 		}
@@ -1004,8 +1011,12 @@ RestartResult RunOuterRelaxation(
 			per_point[i] = mean;
 	PublishRelaxationProgress(node, params, per_point, placed, mean);
 	RCLCPP_INFO(
-		node->get_logger(), "[restart %d] relaxation: %d/%d points found a feasible offset; mean start (%.3f, %.3f)",
-		restart_number, num_placed, n, mean.x, mean.y);
+		node->get_logger(), "%s %-12s %d/%d points found a feasible offset  mean start (%+.4f, %+.4f)",
+		ProgressTag(
+			restart_number, std::max(1, params.num_restarts), -1, params.max_outer_iterations, -1,
+			params.max_inner_iterations)
+			.c_str(),
+		"relaxation", num_placed, n, mean.x, mean.y);
 
 	if (restart_number == 1 && params.fd_jacobian_check && num_placed > 0)
 	{
@@ -1021,7 +1032,7 @@ RestartResult RunOuterRelaxation(
 	{
 		InnerResult inner = RunInnerSlp(
 			node, robot_model, planning_scene_monitor, group_name, jmg, tool0_link, object_pose_original, targets,
-			joints, xy_offset, mu, params);
+			joints, xy_offset, mu, params, restart_number, j + 1);
 		joints = inner.q;
 		xy_offset = inner.xy_offset;
 
@@ -1031,14 +1042,16 @@ RestartResult RunOuterRelaxation(
 			m.x += b.x / n;
 			m.y += b.y / n;
 		}
-		double spread = 0.0;
-		for (const auto& b : xy_offset)
-			spread = std::max(spread, std::hypot(b.x - m.x, b.y - m.y));
+		const double spread = MaxSpread(xy_offset);
 
 		RCLCPP_INFO(
 			node->get_logger(),
-			"[restart %d] outer %d/%d: mu=%.3g mean xy_offset (%.4f, %.4f)  spread=%.4f  fk_residual=%.4f",
-			restart_number, j + 1, params.max_outer_iterations, mu, m.x, m.y, spread, inner.fk_residual_max);
+			"%s %-12s mu %9.3g  mean xy_offset (%+.4f, %+.4f)  spread(m) %7.4f  fk_residual %.4f",
+			ProgressTag(
+				restart_number, std::max(1, params.num_restarts), j + 1, params.max_outer_iterations, -1,
+				params.max_inner_iterations)
+				.c_str(),
+			"outer done", mu, m.x, m.y, spread, inner.fk_residual_max);
 
 		if (spread < params.outer_convergence_tolerance)
 		{
@@ -1102,8 +1115,12 @@ BasePlacementResult SolveBasePlacement(
 		const bool better = !have_best || c.num_reachable > best.num_reachable ||
 			(c.num_reachable == best.num_reachable && c.total_joint_path_length < best.total_joint_path_length);
 		RCLCPP_INFO(
-			node->get_logger(), "[restart %d/%d] done: xy_offset (%.4f, %.4f)  reach %d/%d  path_length %.3f%s",
-			r + 1, params.num_restarts, c.xy_offset.x, c.xy_offset.y, c.num_reachable, n,
+			node->get_logger(), "%s %-12s xy_offset (%+.4f, %+.4f)  reach %2d/%-2d  path_length %9.3f%s",
+			ProgressTag(
+				r + 1, std::max(1, params.num_restarts), -1, params.max_outer_iterations, -1,
+				params.max_inner_iterations)
+				.c_str(),
+			"restart done", c.xy_offset.x, c.xy_offset.y, c.num_reachable, n,
 			c.total_joint_path_length, better ? "  <-- new best" : "");
 		if (better)
 		{

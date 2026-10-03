@@ -49,6 +49,8 @@ struct BasePlacementParams
 
 	// Inner layer (Eq. 11): trust-region SLP, re-linearizing FK + collision each iteration.
 	int max_inner_iterations = 25;
+	// Stop the inner loop once an accepted step lowers the cost by less than this fraction.
+	double inner_stop_rel_improvement = 1e-3;
 	// Caps each step's size since the FK/collision model is only a local linear approximation.
 	double trust_region_initial = 0.1;
 	double trust_region_shrink = 0.5;

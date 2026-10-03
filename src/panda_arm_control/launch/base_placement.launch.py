@@ -80,6 +80,7 @@ def generate_launch_description():
         ("mu_growth_factor", "2.0", float),
         ("max_outer_iterations", "12", int),
         ("max_inner_iterations", "25", int),
+        ("inner_stop_rel_improvement", "1e-3", float),
         ("trust_region_initial", "0.1", float),
         ("trust_region_reg", "1e-3", float),
         ("fk_penalty_weight", "50.0", float),

@@ -51,6 +51,7 @@ struct Params
 	double bp_rot_metric_scale = 0.3;
 
 	int bp_max_inner_iterations = 25;
+	double bp_inner_stop_rel_improvement = 1e-3;
 	double bp_trust_region_initial = 0.1;
 	double bp_trust_region_shrink = 0.5;
 	double bp_trust_region_expand = 1.5;
@@ -215,6 +216,8 @@ private:
 		this->declareIfNeeded("bp_outer_convergence_tolerance", this->params.bp_outer_convergence_tolerance);
 		this->declareIfNeeded("bp_rot_metric_scale", this->params.bp_rot_metric_scale);
 		this->declareIfNeeded("bp_max_inner_iterations", this->params.bp_max_inner_iterations);
+		this->declareIfNeeded(
+			"bp_inner_stop_rel_improvement", this->params.bp_inner_stop_rel_improvement);
 		this->declareIfNeeded("bp_trust_region_initial", this->params.bp_trust_region_initial);
 		this->declareIfNeeded("bp_trust_region_shrink", this->params.bp_trust_region_shrink);
 		this->declareIfNeeded("bp_trust_region_expand", this->params.bp_trust_region_expand);
@@ -258,6 +261,7 @@ private:
 		this->get_parameter("bp_outer_convergence_tolerance", this->params.bp_outer_convergence_tolerance);
 		this->get_parameter("bp_rot_metric_scale", this->params.bp_rot_metric_scale);
 		this->get_parameter("bp_max_inner_iterations", this->params.bp_max_inner_iterations);
+		this->get_parameter("bp_inner_stop_rel_improvement", this->params.bp_inner_stop_rel_improvement);
 		this->get_parameter("bp_trust_region_initial", this->params.bp_trust_region_initial);
 		this->get_parameter("bp_trust_region_shrink", this->params.bp_trust_region_shrink);
 		this->get_parameter("bp_trust_region_expand", this->params.bp_trust_region_expand);
@@ -323,6 +327,7 @@ private:
 		bp_params.outer_convergence_tolerance = this->params.bp_outer_convergence_tolerance;
 		bp_params.rot_metric_scale = this->params.bp_rot_metric_scale;
 		bp_params.max_inner_iterations = this->params.bp_max_inner_iterations;
+		bp_params.inner_stop_rel_improvement = this->params.bp_inner_stop_rel_improvement;
 		bp_params.trust_region_initial = this->params.bp_trust_region_initial;
 		bp_params.trust_region_shrink = this->params.bp_trust_region_shrink;
 		bp_params.trust_region_expand = this->params.bp_trust_region_expand;
