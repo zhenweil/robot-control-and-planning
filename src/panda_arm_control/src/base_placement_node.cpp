@@ -38,26 +38,26 @@ struct Params
 	// Base-offset search box (x, y meters -- no rotation search), relative to the object's nominal pose.
 	double bp_x_min = -0.15, bp_x_max = 0.15;
 	double bp_y_min = -0.15, bp_y_max = 0.15;
-	int bp_num_restarts = 3;
+	int bp_num_restarts = 1;
 	int bp_num_init_retries = 20;
 	int bp_joint_ik_max_iterations = 300;
 	double bp_joint_ik_damping = 1e-3;
 	int bp_joint_ik_lm_max_escalations = 20;
 
 	double bp_mu_initial = 0.1;
-	double bp_mu_growth_factor = 2.0;
-	int bp_max_outer_iterations = 12;
+	double bp_mu_growth_factor = 1.2;
+	int bp_max_outer_iterations = 50;
 	double bp_outer_convergence_tolerance = 0.005;
 	double bp_rot_metric_scale = 0.3;
 
-	int bp_max_inner_iterations = 25;
+	int bp_max_inner_iterations = 50;
 	double bp_inner_stop_rel_improvement = 1e-3;
 	double bp_trust_region_initial = 0.1;
 	double bp_trust_region_shrink = 0.5;
 	double bp_trust_region_expand = 1.5;
 	double bp_trust_region_min = 1e-4;
 	double bp_trust_region_reg = 1e-3;
-	double bp_fk_penalty_weight = 50.0;
+	double bp_fk_penalty_weight = 200.0;
 
 	double bp_collision_distance_threshold = 0.1;
 	double bp_min_clearance = 0.01;
@@ -355,15 +355,13 @@ private:
 			object_rotation_world, tour_tcp_poses, result);
 		this->marker_pub->publish(this->marker_array);
 
+		// Execute anyway: missed viewpoints still get their optimizer joint solution, just off-target.
 		if (!result.ok)
-		{
 			RCLCPP_WARN(
 				this->get_logger(),
-				"Best base placement found only reaches %d/%d tour poses -- not executing even if "
-				"execute_on_robot is set",
+				"Best base placement found only reaches %d/%d tour poses -- executing all of them anyway "
+				"if execute_on_robot is set",
 				result.num_reachable, result.num_total);
-			return;
-		}
 
 		if (this->params.execute_on_robot)
 		{

@@ -23,7 +23,7 @@ struct BasePlacementParams
 {
 	BasePlacementBounds bounds;
 
-	int num_restarts = 3;
+	int num_restarts = 1;
 	int random_seed = 42;
 
 	// Step-1 relaxation (Sec. IV-A): joint IK over (arm dof, base x/y/theta) together via damped
@@ -40,15 +40,15 @@ struct BasePlacementParams
 	// Outer layer (Eq. 9): mu(j) = mu_initial * mu_growth_factor^j penalizes per-point base poses
 	// away from their mean, pulling them to one shared value.
 	double mu_initial = 0.1;
-	double mu_growth_factor = 2.0;
-	int max_outer_iterations = 12;
+	double mu_growth_factor = 1.2;
+	int max_outer_iterations = 50;
 	double outer_convergence_tolerance = 0.005;  // meters
 	// Blends the end-effector's own orientation error into the FK residual tolerance below --
 	// unrelated to object rotation, which isn't searched at all.
 	double rot_metric_scale = 0.3;				  // meters per radian
 
 	// Inner layer (Eq. 11): trust-region SLP, re-linearizing FK + collision each iteration.
-	int max_inner_iterations = 25;
+	int max_inner_iterations = 50;
 	// Stop the inner loop once an accepted step lowers the cost by less than this fraction.
 	double inner_stop_rel_improvement = 1e-3;
 	// Caps each step's size since the FK/collision model is only a local linear approximation.
@@ -62,7 +62,8 @@ struct BasePlacementParams
 	double trust_region_reg = 1e-3;
 	// FK error (Eq. 5) is a minimized L1 cost, not a hard equality -- so the outer loop's
 	// mu-pulling can never make one point's error infeasible for the whole combined LP.
-	double fk_penalty_weight = 50.0;
+	// Must exceed the final mu, else missing viewpoints costs less than keeping offsets apart.
+	double fk_penalty_weight = 200.0;
 
 	// Collision (Eq. 8): linearized signed-distance constraint for pairs within this threshold.
 	double collision_distance_threshold = 0.1;

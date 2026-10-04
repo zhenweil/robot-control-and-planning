@@ -48,7 +48,7 @@ def generate_launch_description():
     )
     random_seed = LaunchConfiguration("random_seed")
 
-    num_restarts_arg = DeclareLaunchArgument("num_restarts", default_value="3")
+    num_restarts_arg = DeclareLaunchArgument("num_restarts", default_value="1")
     num_restarts = ParameterValue(LaunchConfiguration("num_restarts"), value_type=int)
 
     fd_jacobian_check_arg = DeclareLaunchArgument(
@@ -77,13 +77,13 @@ def generate_launch_description():
     outer_inner = {}
     for _name, _default, _type in (
         ("mu_initial", "0.1", float),
-        ("mu_growth_factor", "2.0", float),
-        ("max_outer_iterations", "12", int),
-        ("max_inner_iterations", "25", int),
+        ("mu_growth_factor", "1.2", float),
+        ("max_outer_iterations", "50", int),
+        ("max_inner_iterations", "50", int),
         ("inner_stop_rel_improvement", "1e-3", float),
         ("trust_region_initial", "0.1", float),
         ("trust_region_reg", "1e-3", float),
-        ("fk_penalty_weight", "50.0", float),
+        ("fk_penalty_weight", "200.0", float),
         ("collision_distance_threshold", "0.1", float),
         ("min_clearance", "0.01", float),
         ("num_init_retries", "20", int),
