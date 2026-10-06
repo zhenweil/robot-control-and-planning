@@ -169,7 +169,7 @@ def generate_launch_description():
     # without a rebuild. Defaults are the full search box.
     offset_bound_args = []
     offset_bounds = {}
-    for _axis, _default in (("x", 0.3), ("y", 0.3), ("z", 0.2)):
+    for _axis, _default in (("x", 0.6), ("y", 0.6), ("z", 0.0)):
         for _side, _sign in (("min", -1.0), ("max", 1.0)):
             _name = f"{_axis}_{_side}"
             offset_bound_args.append(DeclareLaunchArgument(
@@ -178,6 +178,16 @@ def generate_launch_description():
             ))
             offset_bounds[f"bg_{_name}"] = ParameterValue(
                 LaunchConfiguration(_name), value_type=float)
+
+    # Descent start offset (m, relative to the nominal object pose), settable without a rebuild.
+    initial_offset_args = []
+    initial_offset = {}
+    for _axis in ("x", "y", "z"):
+        _name = f"initial_{_axis}"
+        initial_offset_args.append(DeclareLaunchArgument(
+            _name, default_value="0.0", description=f"Descent start offset {_axis} (m, rel to nominal).",
+        ))
+        initial_offset[f"bg_{_name}"] = ParameterValue(LaunchConfiguration(_name), value_type=float)
 
     output_dir_arg = DeclareLaunchArgument(
         "output_dir",
@@ -218,14 +228,13 @@ def generate_launch_description():
         # pitch (rad). Yaw is excluded (redundant with joint 1). Realized by re-fixturing the
         # object, not moving the arm.
         **offset_bounds,
-        "bg_roll_min": -0.35,
-        "bg_roll_max": 0.35,
-        "bg_pitch_min": -0.35,
-        "bg_pitch_max": 0.35,
+        # z/roll/pitch locked at 0: x-y only search for now.
+        "bg_roll_min": 0.0,
+        "bg_roll_max": 0.0,
+        "bg_pitch_min": 0.0,
+        "bg_pitch_max": 0.0,
         # Where the descent starts (0 = object's nominal pose).
-        "bg_initial_x": 0.0,
-        "bg_initial_y": 0.0,
-        "bg_initial_z": 0.0,
+        **initial_offset,
         "bg_initial_roll": 0.0,
         "bg_initial_pitch": 0.0,
         # Meters per radian: how tip/tilt trades off against translation in the descent step.
@@ -235,6 +244,14 @@ def generate_launch_description():
         "bg_joint_distance_weight": 1.0,
         "bg_cartesian_distance_weight": 0.0,
         "bg_max_joint_deviation_weight": 1.0,
+        # Objective = travel cost - this * sum of manipulability (sum is ~2.8 for 38 viewpoints).
+        "bg_manipulability_weight": 0.0,
+        # Start each descent at this weight and multiply by the decay per outer iteration down to the
+        # value above (400 * 0.8^k, snapped to it once within 5%: ~14 iterations to reach 0).
+        "bg_manipulability_weight_initial": 400.0,
+        "bg_manipulability_weight_decay": 0.8,
+        # Reach-margin barrier: objective also subtracts this * sum of log(manipulability).
+        "bg_log_manipulability_weight": 2.0,
         # Cost added per viewpoint left unreachable -- keeps a partial solution from looking cheap.
         "bg_unreachable_penalty": 50.0,
         # Raised from 2/8/0.1 + min-of-N committed solves: thin IK branch coverage made the tour
@@ -247,15 +264,15 @@ def generate_launch_description():
         # looks multi-basin; each restart after the first descends from the best offset so far
         # kicked by a Gaussian of std-dev restart_perturbation (m).
         "bg_num_restarts": 1,
-        "bg_restart_perturbation": 0.08,
+        "bg_restart_perturbation": 0.05,
         "bg_restart_patience": 2,
         "bg_min_restarts": 3,
-        "bg_max_outer_iterations": 15,
-        "bg_initial_step": 0.05,
-        "bg_step_shrink": 0.5,
+        "bg_max_outer_iterations": 50,
+        "bg_initial_step": 0.02,
+        "bg_step_shrink": 0.25,
         "bg_armijo_c": 1e-4,
         "bg_min_step": 1e-4,
-        "bg_max_line_search_iters": 8,
+        "bg_max_line_search_iters": 4,
         "bg_jacobian_damping": 1e-3,
         "bg_convergence_tolerance_offset": 0.002,
         "bg_convergence_tolerance_cost": 1e-3,
@@ -330,6 +347,7 @@ def generate_launch_description():
             placement_grid_count_arg,
             placement_reference_orders_file_arg,
             *offset_bound_args,
+            *initial_offset_args,
             output_dir_arg,
             tour_input_dir_arg,
             base_gradient_node,

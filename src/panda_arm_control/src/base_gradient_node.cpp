@@ -34,8 +34,8 @@ struct Params
 	std::string tour_input_dir = "/tmp/viewpoint_planner_output";
 	std::string output_dir = "/tmp/base_gradient_output";
 
-	double bg_x_min = -0.3, bg_x_max = 0.3;
-	double bg_y_min = -0.3, bg_y_max = 0.3;
+	double bg_x_min = -0.6, bg_x_max = 0.6;
+	double bg_y_min = -0.6, bg_y_max = 0.6;
 	double bg_z_min = -0.2, bg_z_max = 0.2;
 	double bg_roll_min = -0.35, bg_roll_max = 0.35;	  // rad (~20 deg) -- object tip
 	double bg_pitch_min = -0.35, bg_pitch_max = 0.35;  // rad -- object tilt
@@ -46,6 +46,10 @@ struct Params
 	double bg_joint_distance_weight = 1.0;
 	double bg_cartesian_distance_weight = 0.0;
 	double bg_max_joint_deviation_weight = 1.0;
+	double bg_manipulability_weight = 0.0;
+	double bg_manipulability_weight_initial = 400.0;
+	double bg_manipulability_weight_decay = 0.8;
+	double bg_log_manipulability_weight = 2.0;
 	double bg_unreachable_penalty = 50.0;
 
 	int bg_max_solutions_per_candidate = 4;
@@ -54,15 +58,15 @@ struct Params
 	int bg_solve_restarts = 2;  // min-of-N inner solves wherever a committed cost matters
 
 	int bg_num_restarts = 1;
-	double bg_restart_perturbation = 0.08;
+	double bg_restart_perturbation = 0.05;
 	int bg_restart_patience = 2;
 	int bg_min_restarts = 3;
-	int bg_max_outer_iterations = 15;
-	double bg_initial_step = 0.05;
-	double bg_step_shrink = 0.5;
+	int bg_max_outer_iterations = 50;
+	double bg_initial_step = 0.02;
+	double bg_step_shrink = 0.25;
 	double bg_armijo_c = 1e-4;
 	double bg_min_step = 1e-4;
-	int bg_max_line_search_iters = 8;
+	int bg_max_line_search_iters = 4;
 	double bg_jacobian_damping = 1e-3;
 
 	double bg_convergence_tolerance_offset = 0.002;
@@ -247,6 +251,11 @@ private:
 		this->declareIfNeeded("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->declareIfNeeded("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->declareIfNeeded("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
+		this->declareIfNeeded("bg_manipulability_weight", this->params.bg_manipulability_weight);
+		this->declareIfNeeded(
+			"bg_manipulability_weight_initial", this->params.bg_manipulability_weight_initial);
+		this->declareIfNeeded("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
+		this->declareIfNeeded("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
 		this->declareIfNeeded("bg_unreachable_penalty", this->params.bg_unreachable_penalty);
 		this->declareIfNeeded("bg_max_solutions_per_candidate", this->params.bg_max_solutions_per_candidate);
 		this->declareIfNeeded("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
@@ -314,6 +323,10 @@ private:
 		this->get_parameter("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->get_parameter("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->get_parameter("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
+		this->get_parameter("bg_manipulability_weight", this->params.bg_manipulability_weight);
+		this->get_parameter("bg_manipulability_weight_initial", this->params.bg_manipulability_weight_initial);
+		this->get_parameter("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
+		this->get_parameter("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
 		this->get_parameter("bg_unreachable_penalty", this->params.bg_unreachable_penalty);
 		this->get_parameter("bg_max_solutions_per_candidate", this->params.bg_max_solutions_per_candidate);
 		this->get_parameter("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
@@ -399,6 +412,10 @@ private:
 		bg.joint_distance_weight = this->params.bg_joint_distance_weight;
 		bg.cartesian_distance_weight = this->params.bg_cartesian_distance_weight;
 		bg.max_joint_deviation_weight = this->params.bg_max_joint_deviation_weight;
+		bg.manipulability_weight = this->params.bg_manipulability_weight;
+		bg.manipulability_weight_initial = this->params.bg_manipulability_weight_initial;
+		bg.manipulability_weight_decay = this->params.bg_manipulability_weight_decay;
+		bg.log_manipulability_weight = this->params.bg_log_manipulability_weight;
 		bg.unreachable_penalty = this->params.bg_unreachable_penalty;
 		bg.max_solutions_per_candidate = this->params.bg_max_solutions_per_candidate;
 		bg.ik_timeout = this->params.ik_timeout;

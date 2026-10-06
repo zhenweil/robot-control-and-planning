@@ -19,8 +19,8 @@
 // about that axis, so it leaves the joint-travel objective unchanged.
 struct BaseGradientBounds
 {
-	double x_min = -0.3, x_max = 0.3;
-	double y_min = -0.3, y_max = 0.3;
+	double x_min = -0.6, x_max = 0.6;
+	double y_min = -0.6, y_max = 0.6;
 	double z_min = -0.2, z_max = 0.2;
 	double roll_min = -0.35, roll_max = 0.35;	// radians (~20 deg)
 	double pitch_min = -0.35, pitch_max = 0.35;  // radians
@@ -39,6 +39,15 @@ struct BaseGradientParams
 	double joint_distance_weight = 1.0;
 	double cartesian_distance_weight = 0.0;
 	double max_joint_deviation_weight = 1.0;
+	// Objective subtracts this times the sum of Yoshikawa manipulability over visited viewpoints.
+	double manipulability_weight = 0.0;
+	// Each descent starts the weight here and multiplies it by the decay every outer iteration until it
+	// reaches manipulability_weight: high early weight steers toward well-conditioned, reachable placements.
+	double manipulability_weight_initial = 400.0;
+	double manipulability_weight_decay = 0.8;
+	// Barrier: objective subtracts this times sum of log(w). Near zero effect mid-workspace, rises
+	// sharply as a viewpoint nears the reach edge (w -> 0), so descent stops before losing it.
+	double log_manipulability_weight = 2.0;
 	// Added to weighted_cost for every viewpoint left unreachable at an offset. Without it a
 	// partial solution looks cheap only because it visits fewer poses; make it dominate any
 	// plausible tour cost so full reachability always wins.
@@ -64,7 +73,7 @@ struct BaseGradientParams
 	// descent reliably finds the one good basin near initial_*, and small kicks just re-descend
 	// to it. Raise num_restarts only if a problem looks genuinely multi-basin.
 	int num_restarts = 1;
-	double restart_perturbation = 0.08;
+	double restart_perturbation = 0.05;
 	// Stop launching restarts once there is a fully-reachable result and this many consecutive
 	// restarts failed to beat it -- but never before min_restarts have run. 0 patience disables
 	// early stopping (always run all num_restarts).
@@ -74,12 +83,12 @@ struct BaseGradientParams
 	// Gradient descent on the object offset. The descent direction is the unit-normalized negative
 	// gradient in a mixed metric where 1 rad of tip/tilt counts as `rot_metric_scale` meters, so
 	// `initial_step` / `min_step` are that blended displacement, not scaled by the raw gradient.
-	int max_outer_iterations = 15;
-	double initial_step = 0.05;
-	double step_shrink = 0.5;
+	int max_outer_iterations = 50;
+	double initial_step = 0.02;
+	double step_shrink = 0.25;
 	double armijo_c = 1e-4;
 	double min_step = 1e-4;
-	int max_line_search_iters = 8;
+	int max_line_search_iters = 4;
 	double jacobian_damping = 1e-3;  // lambda in the damped pseudo-inverse J^T (J J^T + lambda^2 I)^-1
 	double rot_metric_scale = 0.3;   // meters per radian, for blending translation & tip/tilt steps
 
