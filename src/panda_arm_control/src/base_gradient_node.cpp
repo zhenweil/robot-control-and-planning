@@ -47,9 +47,14 @@ struct Params
 	double bg_cartesian_distance_weight = 0.0;
 	double bg_max_joint_deviation_weight = 1.0;
 	double bg_manipulability_weight = 0.0;
-	double bg_manipulability_weight_initial = 400.0;
+	double bg_manipulability_weight_initial = 40.0;
 	double bg_manipulability_weight_decay = 0.8;
 	double bg_log_manipulability_weight = 2.0;
+	double bg_miss_gap_weight = 5000.0;
+	double bg_miss_gap_cap = 0.15;
+	double bg_closest_ik_margin = 0.02;
+	int bg_closest_ik_iters = 60;
+	int bg_closest_ik_starts = 5;
 	double bg_unreachable_penalty = 50.0;
 
 	int bg_max_solutions_per_candidate = 4;
@@ -57,9 +62,9 @@ struct Params
 	int bg_gtsp_two_opt_rounds = 5;
 	int bg_solve_restarts = 2;  // min-of-N inner solves wherever a committed cost matters
 
-	int bg_num_restarts = 1;
+	int bg_num_restarts = 6;
 	double bg_restart_perturbation = 0.05;
-	int bg_restart_patience = 2;
+	int bg_restart_patience = 6;
 	int bg_min_restarts = 3;
 	int bg_max_outer_iterations = 50;
 	double bg_initial_step = 0.02;
@@ -256,6 +261,11 @@ private:
 			"bg_manipulability_weight_initial", this->params.bg_manipulability_weight_initial);
 		this->declareIfNeeded("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->declareIfNeeded("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
+		this->declareIfNeeded("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
+		this->declareIfNeeded("bg_miss_gap_cap", this->params.bg_miss_gap_cap);
+		this->declareIfNeeded("bg_closest_ik_margin", this->params.bg_closest_ik_margin);
+		this->declareIfNeeded("bg_closest_ik_iters", this->params.bg_closest_ik_iters);
+		this->declareIfNeeded("bg_closest_ik_starts", this->params.bg_closest_ik_starts);
 		this->declareIfNeeded("bg_unreachable_penalty", this->params.bg_unreachable_penalty);
 		this->declareIfNeeded("bg_max_solutions_per_candidate", this->params.bg_max_solutions_per_candidate);
 		this->declareIfNeeded("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
@@ -327,6 +337,11 @@ private:
 		this->get_parameter("bg_manipulability_weight_initial", this->params.bg_manipulability_weight_initial);
 		this->get_parameter("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->get_parameter("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
+		this->get_parameter("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
+		this->get_parameter("bg_miss_gap_cap", this->params.bg_miss_gap_cap);
+		this->get_parameter("bg_closest_ik_margin", this->params.bg_closest_ik_margin);
+		this->get_parameter("bg_closest_ik_iters", this->params.bg_closest_ik_iters);
+		this->get_parameter("bg_closest_ik_starts", this->params.bg_closest_ik_starts);
 		this->get_parameter("bg_unreachable_penalty", this->params.bg_unreachable_penalty);
 		this->get_parameter("bg_max_solutions_per_candidate", this->params.bg_max_solutions_per_candidate);
 		this->get_parameter("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
@@ -416,6 +431,11 @@ private:
 		bg.manipulability_weight_initial = this->params.bg_manipulability_weight_initial;
 		bg.manipulability_weight_decay = this->params.bg_manipulability_weight_decay;
 		bg.log_manipulability_weight = this->params.bg_log_manipulability_weight;
+		bg.miss_gap_weight = this->params.bg_miss_gap_weight;
+		bg.miss_gap_cap = this->params.bg_miss_gap_cap;
+		bg.closest_ik_margin = this->params.bg_closest_ik_margin;
+		bg.closest_ik_iters = this->params.bg_closest_ik_iters;
+		bg.closest_ik_starts = this->params.bg_closest_ik_starts;
 		bg.unreachable_penalty = this->params.bg_unreachable_penalty;
 		bg.max_solutions_per_candidate = this->params.bg_max_solutions_per_candidate;
 		bg.ik_timeout = this->params.ik_timeout;

@@ -247,11 +247,18 @@ def generate_launch_description():
         # Objective = travel cost - this * sum of manipulability (sum is ~2.8 for 38 viewpoints).
         "bg_manipulability_weight": 0.0,
         # Start each descent at this weight and multiply by the decay per outer iteration down to the
-        # value above (400 * 0.8^k, snapped to it once within 5%: ~14 iterations to reach 0).
-        "bg_manipulability_weight_initial": 400.0,
+        # value above (40 * 0.8^k, snapped to it once within 5%: ~14 iterations to reach 0).
+        "bg_manipulability_weight_initial": 40.0,
         "bg_manipulability_weight_decay": 0.8,
         # Reach-margin barrier: objective also subtracts this * sum of log(manipulability).
         "bg_log_manipulability_weight": 2.0,
+        # A missed viewpoint costs the penalty + this * its closest-IK pose gap (m), capped at the cap.
+        "bg_miss_gap_weight": 5000.0,
+        "bg_miss_gap_cap": 0.15,
+        # Collision-aware closest IK for missed viewpoints: clearance margin (m), iterations, starts.
+        "bg_closest_ik_margin": 0.02,
+        "bg_closest_ik_iters": 60,
+        "bg_closest_ik_starts": 5,
         # Cost added per viewpoint left unreachable -- keeps a partial solution from looking cheap.
         "bg_unreachable_penalty": 50.0,
         # Raised from 2/8/0.1 + min-of-N committed solves: thin IK branch coverage made the tour
@@ -260,12 +267,11 @@ def generate_launch_description():
         "bg_ik_retries_per_point": ik_retries_per_point,
         "bg_solve_restarts": solve_restarts,
         "bg_gtsp_two_opt_rounds": 5,
-        # Optional basin hopping (1 = single descent, the default). Raise only for a problem that
-        # looks multi-basin; each restart after the first descends from the best offset so far
-        # kicked by a Gaussian of std-dev restart_perturbation (m).
-        "bg_num_restarts": 1,
+        # Basin hopping (1 = single descent). Each restart after the first descends from the best
+        # offset so far kicked by a Gaussian of std-dev restart_perturbation (m).
+        "bg_num_restarts": 6,
         "bg_restart_perturbation": 0.05,
-        "bg_restart_patience": 2,
+        "bg_restart_patience": 6,
         "bg_min_restarts": 3,
         "bg_max_outer_iterations": 50,
         "bg_initial_step": 0.02,

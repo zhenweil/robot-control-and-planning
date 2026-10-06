@@ -43,11 +43,20 @@ struct BaseGradientParams
 	double manipulability_weight = 0.0;
 	// Each descent starts the weight here and multiplies it by the decay every outer iteration until it
 	// reaches manipulability_weight: high early weight steers toward well-conditioned, reachable placements.
-	double manipulability_weight_initial = 400.0;
+	double manipulability_weight_initial = 40.0;
 	double manipulability_weight_decay = 0.8;
 	// Barrier: objective subtracts this times sum of log(w). Near zero effect mid-workspace, rises
 	// sharply as a viewpoint nears the reach edge (w -> 0), so descent stops before losing it.
 	double log_manipulability_weight = 2.0;
+	// A missed viewpoint costs unreachable_penalty + miss_gap_weight * min(gap, miss_gap_cap), where gap
+	// is its closest-IK pose gap (m, rotation scaled by rot_metric_scale): gives misses a gradient.
+	double miss_gap_weight = 5000.0;
+	double miss_gap_cap = 0.15;
+	// Collision-aware closest IK for missed viewpoints: keeps arm-arm and arm-object pairs at least
+	// closest_ik_margin apart; iterations per start, and starts (warm seed + random) per viewpoint.
+	double closest_ik_margin = 0.02;
+	int closest_ik_iters = 60;
+	int closest_ik_starts = 5;
 	// Added to weighted_cost for every viewpoint left unreachable at an offset. Without it a
 	// partial solution looks cheap only because it visits fewer poses; make it dominate any
 	// plausible tour cost so full reachability always wins.
@@ -72,12 +81,12 @@ struct BaseGradientParams
 	// tip/tilt kick is that over rot_metric_scale). Off by default -- with deterministic IK the
 	// descent reliably finds the one good basin near initial_*, and small kicks just re-descend
 	// to it. Raise num_restarts only if a problem looks genuinely multi-basin.
-	int num_restarts = 1;
+	int num_restarts = 6;
 	double restart_perturbation = 0.05;
 	// Stop launching restarts once there is a fully-reachable result and this many consecutive
 	// restarts failed to beat it -- but never before min_restarts have run. 0 patience disables
 	// early stopping (always run all num_restarts).
-	int restart_patience = 2;
+	int restart_patience = 6;
 	int min_restarts = 3;
 
 	// Gradient descent on the object offset. The descent direction is the unit-normalized negative
