@@ -13,8 +13,8 @@ def generate_launch_description():
     use_rviz_arg = DeclareLaunchArgument(
         "use_rviz",
         default_value="false",
-        description="Launch RViz. Set to true if no other launch file is already "
-        "providing it (panda.rviz shows /base_gradient_markers too).",
+        description="Launch RViz with the robot (also starts robot_state_publisher). Leave false "
+        "when panda_arm.launch.py is running -- its panda.rviz shows the same markers.",
     )
     use_rviz = LaunchConfiguration("use_rviz")
 
@@ -59,13 +59,13 @@ def generate_launch_description():
     random_seed = LaunchConfiguration("random_seed")
 
     # Inner-solve tuning -- exposed so speed vs. IK-seed noise can be traded without a rebuild.
-    solve_restarts_arg = DeclareLaunchArgument(
-        "solve_restarts",
+    gtsp_num_restart_arg = DeclareLaunchArgument(
+        "gtsp_num_restart",
         default_value="2",
         description="Min-of-N inner solves wherever a committed cost matters (descent iter-0 + each "
         "accepted step, and every experiment cold/warm solve). 1 = fastest.",
     )
-    solve_restarts = ParameterValue(LaunchConfiguration("solve_restarts"), value_type=int)
+    gtsp_num_restart = ParameterValue(LaunchConfiguration("gtsp_num_restart"), value_type=int)
 
     max_solutions_per_candidate_arg = DeclareLaunchArgument(
         "max_solutions_per_candidate", default_value="4",
@@ -265,19 +265,15 @@ def generate_launch_description():
         # cost at a fixed offset swing ~5% on the seed alone. All four are launch args.
         "bg_max_solutions_per_candidate": max_solutions_per_candidate,
         "bg_ik_retries_per_point": ik_retries_per_point,
-        "bg_solve_restarts": solve_restarts,
+        "bg_gtsp_num_restart": gtsp_num_restart,
         "bg_gtsp_two_opt_rounds": 5,
         # Basin hopping (1 = single descent). Each restart after the first descends from the best
-        # offset so far kicked by a Gaussian of std-dev restart_perturbation (m).
-        "bg_num_restarts": 6,
-        "bg_restart_perturbation": 0.05,
-        "bg_restart_patience": 6,
-        "bg_min_restarts": 3,
+        # offset so far kicked by a Gaussian of std-dev descent_restart_perturbation (m).
+        "bg_descent_num_restart": 6,
+        "bg_descent_restart_perturbation": 0.05,
         "bg_max_outer_iterations": 50,
         "bg_initial_step": 0.02,
         "bg_step_shrink": 0.25,
-        "bg_armijo_c": 1e-4,
-        "bg_min_step": 1e-4,
         "bg_max_line_search_iters": 4,
         "bg_jacobian_damping": 1e-3,
         "bg_convergence_tolerance_offset": 0.002,
@@ -333,6 +329,43 @@ def generate_launch_description():
         condition=IfCondition(use_rviz),
     )
 
+    # With use_rviz, publish the robot itself so RViz shows it without the MoveIt launch. Don't
+    # combine with panda_arm.launch.py, which already publishes these.
+    robot_state_publisher_node = Node(
+        package="robot_state_publisher",
+        executable="robot_state_publisher",
+        output="log",
+        parameters=[moveit_config.robot_description],
+        condition=IfCondition(use_rviz),
+    )
+    # Holds the arm at initial_joints (object_pose.yaml), the tour's start pose.
+    joint_state_publisher_node = Node(
+        package="joint_state_publisher",
+        executable="joint_state_publisher",
+        output="log",
+        parameters=[
+            {
+                "zeros": {
+                    "panda_joint1": 0.0,
+                    "panda_joint2": -0.8745,
+                    "panda_joint3": 0.0,
+                    "panda_joint4": -2.356,
+                    "panda_joint5": 0.0,
+                    "panda_joint6": 1.571,
+                    "panda_joint7": 0.785,
+                }
+            }
+        ],
+        condition=IfCondition(use_rviz),
+    )
+    world_tf_node = Node(
+        package="tf2_ros",
+        executable="static_transform_publisher",
+        output="log",
+        arguments=["0", "0", "0", "0", "0", "0", "world", "panda_link0"],
+        condition=IfCondition(use_rviz),
+    )
+
     return LaunchDescription(
         [
             use_rviz_arg,
@@ -340,7 +373,7 @@ def generate_launch_description():
             visualize_progress_delay_sec_arg,
             fd_gradient_check_arg,
             random_seed_arg,
-            solve_restarts_arg,
+            gtsp_num_restart_arg,
             max_solutions_per_candidate_arg,
             ik_retries_per_point_arg,
             ik_timeout_arg,
@@ -357,6 +390,9 @@ def generate_launch_description():
             output_dir_arg,
             tour_input_dir_arg,
             base_gradient_node,
+            robot_state_publisher_node,
+            joint_state_publisher_node,
+            world_tf_node,
             rviz_node,
         ]
     )

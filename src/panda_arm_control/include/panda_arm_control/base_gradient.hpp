@@ -11,12 +11,6 @@
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-// What is optimized is the rigid pose adjustment applied to the OBJECT (and, rigidly with it, its
-// viewpoints) expressed in the robot base frame (panda_link0): translation (x, y, z) plus tip
-// (roll, about base x) and tilt (pitch, about base y). Physically realized by re-fixturing the
-// object on a tip/tilt stage -- equivalent to, and easier than, repositioning/re-tilting the arm
-// base. Yaw (about base z) is excluded: it is redundant with joint 1, which rotates the whole arm
-// about that axis, so it leaves the joint-travel objective unchanged.
 struct BaseGradientBounds
 {
 	double x_min = -0.6, x_max = 0.6;
@@ -32,80 +26,49 @@ struct BaseGradientParams
 	// Where the descent starts, relative to the object's nominal pose (default 0 = nominal).
 	double initial_x = 0.0, initial_y = 0.0, initial_z = 0.0, initial_roll = 0.0, initial_pitch = 0.0;
 
-	// Objective weights (mirrors HierarchicalTourParams): total tour cost is
-	//   sum_edges [ w_cart*||dp|| + w_joint*||dq||_2 + w_maxdev*max_k|dq_k| ].
-	// The Cartesian term is invariant to the base pose, so it never affects the gradient -- it is
-	// kept only so the inner GTSP orders the tour the same way the rest of the pipeline does.
+	// Weights for GTSP
 	double joint_distance_weight = 1.0;
 	double cartesian_distance_weight = 0.0;
 	double max_joint_deviation_weight = 1.0;
-	// Objective subtracts this times the sum of Yoshikawa manipulability over visited viewpoints.
+
+	// Manupulability: sqrt(J*J^T)
 	double manipulability_weight = 0.0;
-	// Each descent starts the weight here and multiplies it by the decay every outer iteration until it
-	// reaches manipulability_weight: high early weight steers toward well-conditioned, reachable placements.
 	double manipulability_weight_initial = 40.0;
 	double manipulability_weight_decay = 0.8;
-	// Barrier: objective subtracts this times sum of log(w). Near zero effect mid-workspace, rises
-	// sharply as a viewpoint nears the reach edge (w -> 0), so descent stops before losing it.
 	double log_manipulability_weight = 2.0;
 	// A missed viewpoint costs unreachable_penalty + miss_gap_weight * min(gap, miss_gap_cap), where gap
 	// is its closest-IK pose gap (m, rotation scaled by rot_metric_scale): gives misses a gradient.
 	double miss_gap_weight = 5000.0;
 	double miss_gap_cap = 0.15;
+
 	// Collision-aware closest IK for missed viewpoints: keeps arm-arm and arm-object pairs at least
 	// closest_ik_margin apart; iterations per start, and starts (warm seed + random) per viewpoint.
 	double closest_ik_margin = 0.02;
 	int closest_ik_iters = 60;
 	int closest_ik_starts = 5;
-	// Added to weighted_cost for every viewpoint left unreachable at an offset. Without it a
-	// partial solution looks cheap only because it visits fewer poses; make it dominate any
-	// plausible tour cost so full reachability always wins.
+
 	double unreachable_penalty = 50.0;
 
-	// Inner GTSP (redundant-IK generalized TSP): each viewpoint offers up to this many distinct IK
-	// branches and the solver picks whichever ordering + branch minimizes reconfiguration. Used
-	// only for the committed solve each iteration; line-search probes always use 1 (cheap).
-	// Raised from 2/8/0.1 -- with thin branch coverage the tour cost at a fixed offset swings ~5%
-	// on the IK seed alone, which swamped the object-move effect in the attribution experiment.
-	int max_solutions_per_candidate = 4;
+	// Parameters for GTSP
+	int max_solutions_per_candidate = 4; // number of IK solutions per viewpoint
 	double ik_timeout = 0.15;
-	int ik_retries_per_point = 14;
+	int ik_retries_per_point = 10;
 	int gtsp_two_opt_rounds = 5;
-	// Take the cheapest of this many independent inner solves wherever a committed cost is needed
-	// (the descent's iteration-0 solve and each accepted step, and every experiment cold/warm
-	// solve) -- min-of-N shrinks the seed-driven variance. Line-search probes still use 1.
-	int solve_restarts = 2;
+	int gtsp_num_restart = 2;
 
-	// Optional basin hopping: restart 0 descends from initial_*, each later restart descends from
-	// the best offset so far kicked by a Gaussian of std-dev restart_perturbation (meters; the
-	// tip/tilt kick is that over rot_metric_scale). Off by default -- with deterministic IK the
-	// descent reliably finds the one good basin near initial_*, and small kicks just re-descend
-	// to it. Raise num_restarts only if a problem looks genuinely multi-basin.
-	int num_restarts = 6;
-	double restart_perturbation = 0.05;
-	// Stop launching restarts once there is a fully-reachable result and this many consecutive
-	// restarts failed to beat it -- but never before min_restarts have run. 0 patience disables
-	// early stopping (always run all num_restarts).
-	int restart_patience = 6;
-	int min_restarts = 3;
-
-	// Gradient descent on the object offset. The descent direction is the unit-normalized negative
-	// gradient in a mixed metric where 1 rad of tip/tilt counts as `rot_metric_scale` meters, so
-	// `initial_step` / `min_step` are that blended displacement, not scaled by the raw gradient.
+	// Base gradient parameters
+	int descent_num_restart = 3;
+	double descent_restart_perturbation = 0.1; // sigma value of gaussian perturbation
 	int max_outer_iterations = 50;
 	double initial_step = 0.02;
 	double step_shrink = 0.25;
-	double armijo_c = 1e-4;
-	double min_step = 1e-4;
 	int max_line_search_iters = 4;
 	double jacobian_damping = 1e-3;  // lambda in the damped pseudo-inverse J^T (J J^T + lambda^2 I)^-1
 	double rot_metric_scale = 0.3;   // meters per radian, for blending translation & tip/tilt steps
 
-	double convergence_tolerance_offset = 0.002;  // blended (see rot_metric_scale) offset move per iteration
-	double convergence_tolerance_cost = 1e-3;	  // relative tour-cost improvement per outer iteration
-	// Stop early once this many consecutive iterations each improve the cost by less than
-	// convergence_tolerance_cost (relative) -- avoids grinding through many near-zero-gain steps.
-	int patience = 3;
+	double convergence_tolerance_offset = 0.002;  // stop optimization when object moves < 2mm
+	double convergence_tolerance_cost = 1e-3;	  // stop optimization when cost improvement < 0.1%
+	int patience = 3; // stop optimization if no improvement after this many iterations
 
 	int random_seed = 42;
 	// Log the analytic gradient next to a central-difference estimate every outer iteration.
@@ -115,6 +78,8 @@ struct BaseGradientParams
 	// Optional live convergence markers on this topic (base breadcrumb trail, -grad arrow, current
 	// tour). nullptr (default) disables progress publishing.
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub;
+	std::string progress_mesh_path;  // object mesh drawn in the progress markers; empty = no mesh
+	double progress_mesh_scale = 0.01;
 	double visualize_progress_delay_sec = 0.0;
 };
 
@@ -136,7 +101,7 @@ struct BaseGradientResult
 	double total_weighted_cost = 0.0;	   // the full weighted objective at the returned offset
 
 	// Full inner solves consumed by the descent (iteration-0 solve + one per accepted step, each
-	// counting solve_restarts sub-solves; line-search probes not included). A budget for a fair
+	// counting gtsp_num_restart sub-solves; line-search probes not included). A budget for a fair
 	// random-search comparison.
 	int num_inner_solves = 0;
 
@@ -241,7 +206,7 @@ void ExportBaseGradientExperimentResult(const std::string& output_dir, const Bas
 // Score one object offset with exactly the placement experiment's / descent's inner solve, so a
 // separate placement optimizer (e.g. the B* baseline in base_placement.cpp) can share the
 // objective verbatim. offset is (x, y, z, roll, pitch); it is clamped to params.bounds.
-// min-of-params.solve_restarts IK collections, then a full redundant-IK GTSP re-route -- or, if
+// min-of-params.gtsp_num_restart IK collections, then a full redundant-IK GTSP re-route -- or, if
 // fixed_order is non-empty, an exact fixed-order branch DP over that visiting sequence. Restores
 // the scene before returning.
 // ---------------------------------------------------------------------------------------------
@@ -277,14 +242,14 @@ ObjectOffsetScore ScoreObjectOffset(
 //   3  does the best object position move when the route changes -- are placement and routing
 //      separable, or coupled?
 // One sweep feeds all three: a grid_n^3 grid of (x, y, z) offsets over the bounds. At each grid
-// point the IK branch set is collected once (min-of-solve_restarts), then every reference route
+// point the IK branch set is collected once (min-of-gtsp_num_restart), then every reference route
 // is scored against it with an exact fixed-order branch DP (SolveFixedOrder), and one free-
 // routing full GTSP is run on the same branches. Reference routes are the full GTSP's output at
 // the nominal offset and at 6 spread offsets, each padded to a full permutation.
 // The grid can be sharded (grid_start / grid_count) across processes. The seed-pose RNG is
 // re-seeded per grid point from (seed, flat index); MoveIt's IK plugin RNG still advances with
 // the global call order, so a sharded run differs slightly from a single-process one -- within
-// the min-of-solve_restarts cost noise, not enough to move the flat-vs-structured verdict.
+// the min-of-gtsp_num_restart cost noise, not enough to move the flat-vs-structured verdict.
 // ---------------------------------------------------------------------------------------------
 struct PlacementGridPoint
 {
@@ -292,7 +257,7 @@ struct PlacementGridPoint
 	int num_ik_reachable = 0;				 // viewpoints with >=1 collision-free IK branch here
 
 	// Parallel to PlacementOrderExperimentResult::reference_orders -- the fixed-route branch-DP
-	// score of each reference route at this offset (best over the solve_restarts replicas).
+	// score of each reference route at this offset (best over the gtsp_num_restart replicas).
 	std::vector<double> order_weighted_cost;  // includes the unreachable penalty (solver metric)
 	std::vector<double> order_honest_cost;	 // penalty stripped
 	std::vector<int> order_num_reachable;

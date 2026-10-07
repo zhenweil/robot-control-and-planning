@@ -60,17 +60,13 @@ struct Params
 	int bg_max_solutions_per_candidate = 4;
 	int bg_ik_retries_per_point = 14;
 	int bg_gtsp_two_opt_rounds = 5;
-	int bg_solve_restarts = 2;  // min-of-N inner solves wherever a committed cost matters
+	int bg_gtsp_num_restart = 2;  // min-of-N inner solves wherever a committed cost matters
 
-	int bg_num_restarts = 6;
-	double bg_restart_perturbation = 0.05;
-	int bg_restart_patience = 6;
-	int bg_min_restarts = 3;
+	int bg_descent_num_restart = 6;
+	double bg_descent_restart_perturbation = 0.05;
 	int bg_max_outer_iterations = 50;
 	double bg_initial_step = 0.02;
 	double bg_step_shrink = 0.25;
-	double bg_armijo_c = 1e-4;
-	double bg_min_step = 1e-4;
 	int bg_max_line_search_iters = 4;
 	double bg_jacobian_damping = 1e-3;
 
@@ -269,17 +265,13 @@ private:
 		this->declareIfNeeded("bg_unreachable_penalty", this->params.bg_unreachable_penalty);
 		this->declareIfNeeded("bg_max_solutions_per_candidate", this->params.bg_max_solutions_per_candidate);
 		this->declareIfNeeded("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
-		this->declareIfNeeded("bg_solve_restarts", this->params.bg_solve_restarts);
+		this->declareIfNeeded("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->declareIfNeeded("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
-		this->declareIfNeeded("bg_num_restarts", this->params.bg_num_restarts);
-		this->declareIfNeeded("bg_restart_perturbation", this->params.bg_restart_perturbation);
-		this->declareIfNeeded("bg_restart_patience", this->params.bg_restart_patience);
-		this->declareIfNeeded("bg_min_restarts", this->params.bg_min_restarts);
+		this->declareIfNeeded("bg_descent_num_restart", this->params.bg_descent_num_restart);
+		this->declareIfNeeded("bg_descent_restart_perturbation", this->params.bg_descent_restart_perturbation);
 		this->declareIfNeeded("bg_max_outer_iterations", this->params.bg_max_outer_iterations);
 		this->declareIfNeeded("bg_initial_step", this->params.bg_initial_step);
 		this->declareIfNeeded("bg_step_shrink", this->params.bg_step_shrink);
-		this->declareIfNeeded("bg_armijo_c", this->params.bg_armijo_c);
-		this->declareIfNeeded("bg_min_step", this->params.bg_min_step);
 		this->declareIfNeeded("bg_max_line_search_iters", this->params.bg_max_line_search_iters);
 		this->declareIfNeeded("bg_jacobian_damping", this->params.bg_jacobian_damping);
 		this->declareIfNeeded("bg_convergence_tolerance_offset", this->params.bg_convergence_tolerance_offset);
@@ -345,17 +337,13 @@ private:
 		this->get_parameter("bg_unreachable_penalty", this->params.bg_unreachable_penalty);
 		this->get_parameter("bg_max_solutions_per_candidate", this->params.bg_max_solutions_per_candidate);
 		this->get_parameter("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
-		this->get_parameter("bg_solve_restarts", this->params.bg_solve_restarts);
+		this->get_parameter("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->get_parameter("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
-		this->get_parameter("bg_num_restarts", this->params.bg_num_restarts);
-		this->get_parameter("bg_restart_perturbation", this->params.bg_restart_perturbation);
-		this->get_parameter("bg_restart_patience", this->params.bg_restart_patience);
-		this->get_parameter("bg_min_restarts", this->params.bg_min_restarts);
+		this->get_parameter("bg_descent_num_restart", this->params.bg_descent_num_restart);
+		this->get_parameter("bg_descent_restart_perturbation", this->params.bg_descent_restart_perturbation);
 		this->get_parameter("bg_max_outer_iterations", this->params.bg_max_outer_iterations);
 		this->get_parameter("bg_initial_step", this->params.bg_initial_step);
 		this->get_parameter("bg_step_shrink", this->params.bg_step_shrink);
-		this->get_parameter("bg_armijo_c", this->params.bg_armijo_c);
-		this->get_parameter("bg_min_step", this->params.bg_min_step);
 		this->get_parameter("bg_max_line_search_iters", this->params.bg_max_line_search_iters);
 		this->get_parameter("bg_jacobian_damping", this->params.bg_jacobian_damping);
 		this->get_parameter("bg_convergence_tolerance_offset", this->params.bg_convergence_tolerance_offset);
@@ -440,17 +428,13 @@ private:
 		bg.max_solutions_per_candidate = this->params.bg_max_solutions_per_candidate;
 		bg.ik_timeout = this->params.ik_timeout;
 		bg.ik_retries_per_point = this->params.bg_ik_retries_per_point;
-		bg.solve_restarts = this->params.bg_solve_restarts;
+		bg.gtsp_num_restart = this->params.bg_gtsp_num_restart;
 		bg.gtsp_two_opt_rounds = this->params.bg_gtsp_two_opt_rounds;
-		bg.num_restarts = this->params.bg_num_restarts;
-		bg.restart_perturbation = this->params.bg_restart_perturbation;
-		bg.restart_patience = this->params.bg_restart_patience;
-		bg.min_restarts = this->params.bg_min_restarts;
+		bg.descent_num_restart = this->params.bg_descent_num_restart;
+		bg.descent_restart_perturbation = this->params.bg_descent_restart_perturbation;
 		bg.max_outer_iterations = this->params.bg_max_outer_iterations;
 		bg.initial_step = this->params.bg_initial_step;
 		bg.step_shrink = this->params.bg_step_shrink;
-		bg.armijo_c = this->params.bg_armijo_c;
-		bg.min_step = this->params.bg_min_step;
 		bg.max_line_search_iters = this->params.bg_max_line_search_iters;
 		bg.jacobian_damping = this->params.bg_jacobian_damping;
 		bg.convergence_tolerance_offset = this->params.bg_convergence_tolerance_offset;
@@ -460,6 +444,8 @@ private:
 		bg.fd_gradient_check = this->params.bg_fd_gradient_check;
 		bg.fd_epsilon = this->params.bg_fd_epsilon;
 		bg.progress_pub = this->progress_marker_pub;
+		bg.progress_mesh_path = this->resolved_mesh_path;
+		bg.progress_mesh_scale = this->params.mesh_scale;
 		bg.visualize_progress_delay_sec = this->params.visualize_progress_delay_sec;
 
 		if (this->params.bg_placement_experiment)

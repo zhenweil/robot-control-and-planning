@@ -18,6 +18,7 @@
 #include <moveit/robot_state/robot_state.h>
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <random_numbers/random_numbers.h>
+#include <std_msgs/msg/color_rgba.hpp>
 
 namespace
 {
@@ -721,6 +722,7 @@ struct InnerSolution
 	// Missed viewpoints and their closest-IK pose gaps; miss_cost = weight * sum of capped gaps.
 	std::vector<int> missed_vp;
 	std::vector<Eigen::Matrix<double, 6, 1>> missed_gap;
+	std::vector<std::vector<double>> missed_q;  // parallel: closest collision-free pose, empty if none
 	double miss_cost = 0.0;
 	int num_rescued = 0;  // missed by IK, reached via a collision-free closest-IK hit
 	int num_no_free = 0;  // closest IK found no collision-free posture at all (gap taken as the cap)
@@ -744,12 +746,13 @@ InnerSolution InnerSolve(
 		params, max_solutions);
 	const moveit::core::LinkModel* tool0_link = state.getRobotModel()->getLinkModel("tool0");
 
-	// Viewpoints IK missed: collision-aware closest IK from the warm seed + random starts. A hit on the
-	// target is added as a branch (IK just missed it); otherwise the best collision-free gap is kept, so
-	// the miss has a slope toward where a collision-free arm can put the tool. Object is at this offset.
+	// Viewpoints IK missed: collision-aware closest IK from the warm seed; random starts only if that finds
+	// no collision-free pose under the cap, so the gap changes smoothly with the offset. A hit is added as
+	// a branch (IK just missed it); otherwise the collision-free gap is kept, giving the miss a slope.
 	const double exact_gap = 1e-4;	// 0.1 mm: tight enough to use the hit as a real IK solution
 	std::vector<int> missed_vp;
 	std::vector<Eigen::Matrix<double, 6, 1>> missed_gap;
+	std::vector<std::vector<double>> missed_q;
 	int num_rescued = 0, num_no_free = 0;
 	const Eigen::Isometry3d xform = MakeObjectOffset(base);
 	for (size_t i = 0; i < branches.size(); ++i)
@@ -759,7 +762,9 @@ InnerSolution InnerSolve(
 		const Eigen::Isometry3d target = xform * tour_tcp_poses_original[i];
 		ClosestIkResult best;
 		std::vector<double> best_q;
-		for (int t = 0; t < std::max(1, params.closest_ik_starts) && best.gap >= exact_gap; ++t)
+		// Random starts only while no collision-free pose is under the cap (a capped gap has no slope).
+		for (int t = 0; t < std::max(1, params.closest_ik_starts) && (!best.found || best.gap >= params.miss_gap_cap);
+			 ++t)
 		{
 			std::vector<double> q = seed_per_viewpoint[i];
 			if (t > 0)
@@ -783,6 +788,7 @@ InnerSolution InnerSolve(
 			continue;
 		}
 		missed_vp.push_back(static_cast<int>(i));
+		missed_q.push_back(best_q);
 		if (best.found)
 			missed_gap.push_back(best.e);
 		else
@@ -821,6 +827,7 @@ InnerSolution InnerSolve(
 	out.num_no_free = num_no_free;
 	out.missed_vp = std::move(missed_vp);
 	out.missed_gap = std::move(missed_gap);
+	out.missed_q = std::move(missed_q);
 	for (const auto& e : out.missed_gap)
 		out.miss_cost +=
 			params.miss_gap_weight * std::min(params.miss_gap_cap, WeightedPoseGap(e, params.rot_metric_scale));
@@ -831,7 +838,7 @@ InnerSolution InnerSolve(
 	return out;
 }
 
-// InnerSolve run `params.solve_restarts` times (>=1), keeping the lowest-weighted_cost result.
+// InnerSolve run `params.gtsp_num_restart` times (>=1), keeping the lowest-weighted_cost result.
 // Consecutive runs in one process advance the shared RNG stream, so they explore different IK
 // branch sets -- min-of-N shrinks the seed-driven cost variance at a fixed offset. Use wherever a
 // committed cost matters; keep plain InnerSolve for cheap line-search probes.
@@ -843,7 +850,7 @@ InnerSolution BestOfNInnerSolve(
 	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params,
 	const std::vector<int>* warm_order, int max_solutions)
 {
-	const int n = std::max(1, params.solve_restarts);
+	const int n = std::max(1, params.gtsp_num_restart);
 	InnerSolution best = InnerSolve(
 		state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seed_per_viewpoint,
 		home_joints, home_tcp_local, base, params, warm_order, max_solutions);
@@ -1037,6 +1044,24 @@ Eigen::Matrix<double, 6, 5> OffsetTwist(const BaseOffset& base, const Eigen::Vec
 	return S;
 }
 
+// dw/db: how an object offset change moves one viewpoint's manipulability, the arm tracking it from q.
+// Its positive side keeps the viewpoint away from the reach edge.
+OffsetVec ManipulabilityOffsetGradient(
+	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
+	const moveit::core::LinkModel* tool0_link, const BaseOffset& base, const Eigen::Vector3d& target_pos,
+	const std::vector<double>& q, double damping)
+{
+	state.setJointGroupPositions(jmg, q);
+	state.update();
+	Eigen::MatrixXd J;
+	state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
+	Eigen::MatrixXd JJt = J * J.transpose();
+	JJt.diagonal().array() += damping * damping;
+	const Eigen::MatrixXd dq_db =
+		J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6)) * OffsetTwist(base, target_pos);
+	return dq_db.transpose() * ManipulabilityJointGradient(state, jmg, tool0_link, q);
+}
+
 // ---------------------------------------------------------------------------------------------
 // Analytic gradient of the objective (travel cost - weight * sum of manipulability) w.r.t. the
 // object offset (x, y, z, roll, pitch).
@@ -1190,118 +1215,114 @@ OffsetVec FiniteDifferenceGradient(
 // Live progress markers
 // ---------------------------------------------------------------------------------------------
 
-// Offset descent only -- the current offset (cube), the trail it has walked, and the -grad(D)
-// arrow. The tour / viewpoints are deliberately NOT drawn here; they appear once, after
-// convergence, on /base_gradient_markers (BuildBaseGradientMarkerArray). Every marker below uses a
-// fixed id per namespace so each publish overwrites the last instead of stacking ghosts.
+// Object during the descent, in actual (abs, base-frame) position: mesh, trail of past positions,
+// -grad(D) arrow, and viewpoints (green reached, red missed). Fixed id per namespace so each
+// publish overwrites the last instead of stacking.
 void PublishProgress(
-	const rclcpp::Node::SharedPtr& node, const BaseGradientParams& params, const std::vector<BaseOffset>& base_history,
-	const Eigen::Vector3d& neg_grad_translation, const BaseOffset& base)
+	const rclcpp::Node::SharedPtr& node, const BaseGradientParams& params, const Eigen::Isometry3d& object_pose_original,
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<BaseOffset>& base_history,
+	const Eigen::Vector3d& neg_grad_translation, const BaseOffset& base, const std::vector<int>& missed_vp)
 {
 	if (!params.progress_pub)
 		return;
 
-	rclcpp::Time stamp = node->now();
+	const rclcpp::Time stamp = node->now();
 	visualization_msgs::msg::MarkerArray markers;
+	auto make = [&](const char* ns, int type) {
+		visualization_msgs::msg::Marker m;
+		m.header.frame_id = "world";
+		m.header.stamp = stamp;
+		m.ns = ns;
+		m.id = 0;
+		m.type = type;
+		m.action = visualization_msgs::msg::Marker::ADD;
+		m.pose.orientation.w = 1.0;
+		return m;
+	};
+	const Eigen::Isometry3d xform = MakeObjectOffset(base);
+	const Eigen::Vector3d obj_pos = (xform * object_pose_original).translation();
 
-	// A short cube showing the object offset: position (x,y,z) and tip/tilt (roll,pitch).
-	visualization_msgs::msg::Marker base_marker;
-	base_marker.header.frame_id = "world";
-	base_marker.header.stamp = stamp;
-	base_marker.ns = "base_gradient_current";
-	base_marker.id = 0;
-	base_marker.type = visualization_msgs::msg::Marker::CUBE;
-	base_marker.action = visualization_msgs::msg::Marker::ADD;
-	base_marker.pose.position.x = base.x;
-	base_marker.pose.position.y = base.y;
-	base_marker.pose.position.z = base.z;
-	Eigen::Quaterniond bq(MakeObjectOffset(base).rotation());
-	base_marker.pose.orientation.x = bq.x();
-	base_marker.pose.orientation.y = bq.y();
-	base_marker.pose.orientation.z = bq.z();
-	base_marker.pose.orientation.w = bq.w();
-	base_marker.scale.x = base_marker.scale.y = 0.06;
-	base_marker.scale.z = 0.015;
-	base_marker.color.r = 1.0f;
-	base_marker.color.g = 0.85f;
-	base_marker.color.a = 1.0f;
-	markers.markers.push_back(base_marker);
+	if (!params.progress_mesh_path.empty())
+	{
+		visualization_msgs::msg::Marker mesh = make("base_gradient_current", visualization_msgs::msg::Marker::MESH_RESOURCE);
+		mesh.mesh_resource = "file://" + params.progress_mesh_path;
+		mesh.mesh_use_embedded_materials = false;
+		mesh.pose = ToPoseMsg(xform * object_pose_original);
+		mesh.scale.x = mesh.scale.y = mesh.scale.z = params.progress_mesh_scale;
+		mesh.color.r = 1.0f;
+		mesh.color.g = 0.85f;
+		mesh.color.a = 0.6f;
+		markers.markers.push_back(mesh);
+	}
 
+	// Viewpoints at this offset: green reached, red missed.
+	visualization_msgs::msg::Marker vps = make("base_gradient_viewpoints", visualization_msgs::msg::Marker::SPHERE_LIST);
+	vps.scale.x = vps.scale.y = vps.scale.z = 0.01;
+	for (size_t i = 0; i < tour_tcp_poses_original.size(); ++i)
+	{
+		const Eigen::Vector3d p = (xform * tour_tcp_poses_original[i]).translation();
+		geometry_msgs::msg::Point pt;
+		pt.x = p.x();
+		pt.y = p.y();
+		pt.z = p.z();
+		const bool missed = std::find(missed_vp.begin(), missed_vp.end(), static_cast<int>(i)) != missed_vp.end();
+		std_msgs::msg::ColorRGBA c;
+		c.r = missed ? 0.9f : 0.1f;
+		c.g = missed ? 0.1f : 0.9f;
+		c.b = 0.1f;
+		c.a = 1.0f;
+		vps.points.push_back(pt);
+		vps.colors.push_back(c);
+	}
+	markers.markers.push_back(vps);
+
+	// Trail of past object positions (abs). LINE_STRIP needs >= 2 points.
 	if (base_history.size() > 1)
 	{
-		visualization_msgs::msg::Marker trail;
-		trail.header.frame_id = "world";
-		trail.header.stamp = stamp;
-		trail.ns = "base_gradient_trail";
-		trail.id = 0;
-		trail.type = visualization_msgs::msg::Marker::LINE_STRIP;
-		trail.action = visualization_msgs::msg::Marker::ADD;
-		trail.pose.orientation.w = 1.0;
+		visualization_msgs::msg::Marker trail = make("base_gradient_trail", visualization_msgs::msg::Marker::LINE_STRIP);
 		trail.scale.x = 0.004;
 		trail.color.r = 1.0f;
 		trail.color.g = 0.4f;
 		trail.color.b = 0.1f;
 		trail.color.a = 0.8f;
-
-		// All past base poses as one SPHERE_LIST (single marker, fixed id) -- not one marker each,
-		// which would leave stale ids behind as the history grows.
-		visualization_msgs::msg::Marker crumbs;
-		crumbs.header.frame_id = "world";
-		crumbs.header.stamp = stamp;
-		crumbs.ns = "base_gradient_history";
-		crumbs.id = 0;
-		crumbs.type = visualization_msgs::msg::Marker::SPHERE_LIST;
-		crumbs.action = visualization_msgs::msg::Marker::ADD;
-		crumbs.pose.orientation.w = 1.0;
-		crumbs.scale.x = crumbs.scale.y = crumbs.scale.z = 0.022;
-		crumbs.color.r = 1.0f;
-		crumbs.color.g = 0.4f;
-		crumbs.color.b = 0.1f;
-		crumbs.color.a = 0.7f;
-
-		for (size_t h = 0; h < base_history.size(); ++h)
+		visualization_msgs::msg::Marker crumbs = make("base_gradient_history", visualization_msgs::msg::Marker::SPHERE_LIST);
+		crumbs.scale.x = crumbs.scale.y = crumbs.scale.z = 0.012;
+		crumbs.color = trail.color;
+		for (const BaseOffset& b : base_history)
 		{
+			const Eigen::Vector3d p = (MakeObjectOffset(b) * object_pose_original).translation();
 			geometry_msgs::msg::Point pt;
-			pt.x = base_history[h].x;
-			pt.y = base_history[h].y;
-			pt.z = base_history[h].z;
+			pt.x = p.x();
+			pt.y = p.y();
+			pt.z = p.z();
 			trail.points.push_back(pt);
-			if (h + 1 < base_history.size())
-				crumbs.points.push_back(pt);
+			crumbs.points.push_back(pt);
 		}
 		markers.markers.push_back(trail);
 		markers.markers.push_back(crumbs);
 	}
 
-	// -grad(D) translational part as a 3D arrow from the current offset.
-	double gnorm = neg_grad_translation.norm();
+	// -grad(D) translation from the object's position; a translation offset moves the object 1:1.
+	const double gnorm = neg_grad_translation.norm();
 	if (gnorm > 1e-9)
 	{
-		visualization_msgs::msg::Marker arrow;
-		arrow.header.frame_id = "world";
-		arrow.header.stamp = stamp;
-		arrow.ns = "base_gradient_descent_dir";
-		arrow.id = 0;
-		arrow.type = visualization_msgs::msg::Marker::ARROW;
-		arrow.action = visualization_msgs::msg::Marker::ADD;
-		arrow.pose.orientation.w = 1.0;
+		visualization_msgs::msg::Marker arrow = make("base_gradient_descent_dir", visualization_msgs::msg::Marker::ARROW);
 		arrow.scale.x = 0.006;
 		arrow.scale.y = 0.014;
-		arrow.scale.z = 0.0;
 		arrow.color.r = 0.1f;
 		arrow.color.g = 0.5f;
 		arrow.color.b = 1.0f;
 		arrow.color.a = 0.95f;
-		double scale = 0.15 / gnorm;  // fixed on-screen length regardless of magnitude
-		geometry_msgs::msg::Point tail, tip;
-		tail.x = base.x;
-		tail.y = base.y;
-		tail.z = base.z;
-		tip.x = base.x + neg_grad_translation.x() * scale;
-		tip.y = base.y + neg_grad_translation.y() * scale;
-		tip.z = base.z + neg_grad_translation.z() * scale;
-		arrow.points.push_back(tail);
-		arrow.points.push_back(tip);
+		const Eigen::Vector3d tip = obj_pos + neg_grad_translation * (0.15 / gnorm);  // fixed on-screen length
+		geometry_msgs::msg::Point a, b;
+		a.x = obj_pos.x();
+		a.y = obj_pos.y();
+		a.z = obj_pos.z();
+		b.x = tip.x();
+		b.y = tip.y();
+		b.z = tip.z();
+		arrow.points.push_back(a);
+		arrow.points.push_back(b);
 		markers.markers.push_back(arrow);
 	}
 
@@ -1382,9 +1403,17 @@ BaseGradientResult SolveBaseGradient(
 		int stall_count = 0;
 		// Each viewpoint's joints from the last time it was reached: seeds its closest-IK gap once missed.
 		std::vector<std::vector<double>> last_good(static_cast<size_t>(n));
+		// Each missed viewpoint's last closest-IK pose: seeds the next closest IK so the gap stays continuous.
+		std::vector<std::vector<double>> last_closest(static_cast<size_t>(n));
 		auto remember = [&](const InnerSolution& s) {
 			for (size_t k = 0; k < s.tour.size(); ++k)
+			{
 				last_good[static_cast<size_t>(s.tour[k])] = s.joints[k];
+				last_closest[static_cast<size_t>(s.tour[k])].clear();
+			}
+			for (size_t m = 0; m < s.missed_vp.size(); ++m)
+				if (!s.missed_q[m].empty())
+					last_closest[static_cast<size_t>(s.missed_vp[m])] = s.missed_q[m];
 		};
 
 		RestartResult rr;
@@ -1413,7 +1442,7 @@ BaseGradientResult SolveBaseGradient(
 			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
 			start_reference_joints, home_tcp_local, base, params, warm ? &warm->tour : nullptr,
 			params.max_solutions_per_candidate);
-		result.num_inner_solves += std::max(1, params.solve_restarts);
+		result.num_inner_solves += std::max(1, params.gtsp_num_restart);
 
 		if (cur.tour.empty())
 		{
@@ -1423,12 +1452,15 @@ BaseGradientResult SolveBaseGradient(
 
 		record(base, cur);
 		remember(cur);
+		PublishProgress(
+			node, params, object_pose_original, tour_tcp_poses_original, base_history, Eigen::Vector3d::Zero(), base,
+			cur.missed_vp);
 		RCLCPP_INFO(
 			node->get_logger(),
 			"restart %d/%d iter 0: rel (%.4f, %.4f, %.4f) abs (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg  "
 			"D=%.4f  lambda=%.1f  travel+miss=%.2f  sum_w=%.3f  sum_logw=%.2f  miss_gap=%.2f  reachable %d/%d  "
 			"(rescued %d, no collision-free posture %d)",
-			restart_idx + 1, std::max(1, params.num_restarts), base.x, base.y, base.z, abs_pos(base).x(),
+			restart_idx + 1, std::max(1, params.descent_num_restart), base.x, base.y, base.z, abs_pos(base).x(),
 			abs_pos(base).y(), abs_pos(base).z(), base.roll * 180.0 / M_PI,
 			base.pitch * 180.0 / M_PI, cur.weighted_cost, params.manipulability_weight,
 			cur.travel_cost + params.unreachable_penalty * (n - cur.num_reachable), cur.sum_manipulability,
@@ -1453,7 +1485,8 @@ BaseGradientResult SolveBaseGradient(
 					params.log_manipulability_weight * cur.sum_log_manipulability +
 					params.unreachable_penalty * (cur.num_total - cur.num_reachable) + cur.miss_cost;
 			}
-			// Don't stop while the weight is still annealing.
+			// A stop rule hit while still annealing jumps the weight to its final value instead of stopping,
+			// so the descent ends at the final objective without waiting out the decay.
 			const bool annealing = params.manipulability_weight > lambda_final * (1.0 + 1e-6);
 
 			OffsetVec g = AnalyticGradient(
@@ -1472,23 +1505,28 @@ BaseGradientResult SolveBaseGradient(
 					g(0), g(1), g(2), g(3), g(4), g_fd(0), g_fd(1), g_fd(2), g_fd(3), g_fd(4));
 			}
 
-			// Descend in a metric where 1 rad of tip/tilt equals rot_scale meters.
-			OffsetVec g_u = g;
-			g_u(3) /= rot_scale;
-			g_u(4) /= rot_scale;
-			// Locked axes (min == max) get no share of the step.
+			// Descend in a metric where 1 rad of tip/tilt equals rot_scale meters. Locked axes (min == max)
+			// get no share of the step.
 			const BaseGradientBounds& bb = params.bounds;
-			if (bb.z_min == bb.z_max)
-				g_u(2) = 0.0;
-			if (bb.roll_min == bb.roll_max)
-				g_u(3) = 0.0;
-			if (bb.pitch_min == bb.pitch_max)
-				g_u(4) = 0.0;
+			auto to_u = [&](OffsetVec v) {
+				v(3) /= rot_scale;
+				v(4) /= rot_scale;
+				if (bb.z_min == bb.z_max)
+					v(2) = 0.0;
+				if (bb.roll_min == bb.roll_max)
+					v(3) = 0.0;
+				if (bb.pitch_min == bb.pitch_max)
+					v(4) = 0.0;
+				return v;
+			};
+			const OffsetVec g_u = to_u(g);
 			double gnorm = g_u.norm();
 			if (gnorm < 1e-6)
 			{
 				RCLCPP_INFO(node->get_logger(), "  restart %d: gradient ~ 0 -- converged", restart_idx + 1);
-				PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
+				PublishProgress(
+					node, params, object_pose_original, tour_tcp_poses_original, base_history,
+					Eigen::Vector3d(-g.head<3>()), base, cur.missed_vp);
 				break;
 			}
 
@@ -1498,8 +1536,13 @@ BaseGradientResult SolveBaseGradient(
 			OffsetVec dir_u = -g_u / gnorm;
 			seeds = SeedsFromSolution(cur, fallback_seed, static_cast<size_t>(n));
 			for (int v : cur.missed_vp)
-				if (!last_good[static_cast<size_t>(v)].empty())
-					seeds[static_cast<size_t>(v)] = last_good[static_cast<size_t>(v)];
+			{
+				const size_t vi = static_cast<size_t>(v);
+				if (!last_closest[vi].empty())
+					seeds[vi] = last_closest[vi];
+				else if (!last_good[vi].empty())
+					seeds[vi] = last_good[vi];
+			}
 			const InnerSolution here_quick = InnerSolve(
 				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
 				start_reference_joints, home_tcp_local, base, params, &cur.tour, 1);
@@ -1508,7 +1551,12 @@ BaseGradientResult SolveBaseGradient(
 			bool accepted = false;
 			BaseOffset b_new = base;
 			InnerSolution next;
-			for (int ls = 0; ls < params.max_line_search_iters; ++ls)
+			// Steering: when a probe loses a reached viewpoint, remove the part of the direction that lowers
+			// its manipulability (pushes it to the reach edge) and retry the same step.
+			std::vector<OffsetVec> blocked;  // orthonormal, step metric
+			int num_steers = 0;
+			const int kMaxSteers = 3;
+			for (int ls = 0; ls < params.max_line_search_iters;)
 			{
 				BaseOffset cand = ProjectToBounds(
 					{base.x + step * dir_u(0), base.y + step * dir_u(1), base.z + step * dir_u(2),
@@ -1521,16 +1569,49 @@ BaseGradientResult SolveBaseGradient(
 				result.num_inner_solves += 1;
 				// Never trade away a reached viewpoint, whatever the cost says.
 				if (probe.num_reachable >= cur.num_reachable &&
-					probe.weighted_cost <= here_quick.weighted_cost - params.armijo_c * step * gnorm)
+					probe.weighted_cost < here_quick.weighted_cost)
 				{
 					accepted = true;
 					b_new = cand;
 					next = std::move(probe);
 					break;
 				}
+				if (probe.num_reachable < cur.num_reachable && num_steers < kMaxSteers)
+				{
+					bool steered = false;
+					for (int v : probe.missed_vp)
+					{
+						const auto it = std::find(cur.tour.begin(), cur.tour.end(), v);
+						if (it == cur.tour.end())
+							continue;  // already missed at the current offset
+						const Eigen::Vector3d p =
+							(MakeObjectOffset(base) * tour_tcp_poses_original[static_cast<size_t>(v)]).translation();
+						OffsetVec h = to_u(ManipulabilityOffsetGradient(
+							state, jmg, tool0_link, base, p, cur.joints[static_cast<size_t>(it - cur.tour.begin())],
+							params.jacobian_damping));
+						if (dir_u.dot(h) >= 0.0)
+							continue;  // the step doesn't lower its manipulability: lost for another reason
+						for (const OffsetVec& e : blocked)
+							h -= h.dot(e) * e;
+						if (h.norm() < 1e-9)
+							continue;
+						blocked.push_back(h.normalized());
+						steered = true;
+					}
+					if (steered)
+					{
+						++num_steers;
+						OffsetVec d = -g_u / gnorm;
+						for (const OffsetVec& e : blocked)
+							d -= d.dot(e) * e;
+						if (d.norm() < 0.1)
+							break;  // under 10% of the descent direction keeps every viewpoint: stuck
+						dir_u = d.normalized();
+						continue;
+					}
+				}
 				step *= params.step_shrink;
-				if (step < params.min_step)
-					break;
+				++ls;
 			}
 
 			InnerSolution committed;
@@ -1540,19 +1621,30 @@ BaseGradientResult SolveBaseGradient(
 					state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
 					start_reference_joints, home_tcp_local, b_new, params, &next.tour,
 					params.max_solutions_per_candidate);
-				result.num_inner_solves += std::max(1, params.solve_restarts);
+				result.num_inner_solves += std::max(1, params.gtsp_num_restart);
 				if (next.weighted_cost < committed.weighted_cost)
 					committed = std::move(next);
 				if (committed.weighted_cost > cur.weighted_cost || committed.num_reachable < cur.num_reachable)
 					accepted = false;  // quick probe looked better but the full solve isn't
 			}
 
-			if (!accepted && annealing)
+			// While viewpoints are missed the weight is held, so retrying the same offset changes nothing.
+			if (!accepted && annealing && cur.all_reachable)
+			{
+				params.manipulability_weight = lambda_final;
 				continue;
+			}
 			if (!accepted)
 			{
-				RCLCPP_INFO(node->get_logger(), "  restart %d: no step reduces the tour cost -- converged", restart_idx + 1);
-				PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
+				if (cur.all_reachable)
+					RCLCPP_INFO(node->get_logger(), "  restart %d: no step reduces the tour cost -- converged", restart_idx + 1);
+				else
+					RCLCPP_WARN(
+						node->get_logger(), "  restart %d: no step reduces the tour cost with %d/%d reachable -- stuck",
+						restart_idx + 1, cur.num_reachable, n);
+				PublishProgress(
+					node, params, object_pose_original, tour_tcp_poses_original, base_history,
+					Eigen::Vector3d(-g.head<3>()), base, cur.missed_vp);
 				break;
 			}
 
@@ -1573,24 +1665,27 @@ BaseGradientResult SolveBaseGradient(
 				"restart %d/%d iter %d/%d: rel (%.4f, %.4f, %.4f) abs (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg  "
 				"D=%.4f  lambda=%.1f  travel+miss=%.2f  sum_w=%.3f  sum_logw=%.2f  miss_gap=%.2f  reachable %d/%d  "
 				"(rescued %d, no collision-free posture %d)  |grad|=%.4f  step=%.4f",
-				restart_idx + 1, std::max(1, params.num_restarts), outer + 1, params.max_outer_iterations, base.x,
+				restart_idx + 1, std::max(1, params.descent_num_restart), outer + 1, params.max_outer_iterations, base.x,
 				base.y, base.z, abs_pos(base).x(), abs_pos(base).y(), abs_pos(base).z(), base.roll * 180.0 / M_PI,
 				base.pitch * 180.0 / M_PI, cur.weighted_cost, params.manipulability_weight,
 				cur.travel_cost + params.unreachable_penalty * (n - cur.num_reachable), cur.sum_manipulability,
 				cur.sum_log_manipulability, cur.miss_cost, cur.num_reachable, n, cur.num_rescued,
 				cur.num_no_free, gnorm, step);
 
-			PublishProgress(node, params, base_history, Eigen::Vector3d(-g.head<3>()), base);
+			PublishProgress(
+				node, params, object_pose_original, tour_tcp_poses_original, base_history,
+				Eigen::Vector3d(-g.head<3>()), base, cur.missed_vp);
 
-			if (annealing)
-			{
-				stall_count = 0;
-				continue;
-			}
 			if (rel_impr < params.convergence_tolerance_cost)
 			{
 				if (++stall_count >= std::max(1, params.patience))
 				{
+					if (annealing)
+					{
+						params.manipulability_weight = lambda_final;
+						stall_count = 0;
+						continue;
+					}
 					RCLCPP_INFO(
 						node->get_logger(), "  restart %d: %d iterations with <%.1e relative gain -- stopping early",
 						restart_idx + 1, stall_count, params.convergence_tolerance_cost);
@@ -1604,6 +1699,12 @@ BaseGradientResult SolveBaseGradient(
 
 			if (base_move < params.convergence_tolerance_offset && rel_impr < params.convergence_tolerance_cost)
 			{
+				if (annealing)
+				{
+					params.manipulability_weight = lambda_final;
+					stall_count = 0;
+					continue;
+				}
 				RCLCPP_INFO(node->get_logger(), "  restart %d: offset settled -- converged", restart_idx + 1);
 				break;
 			}
@@ -1613,16 +1714,15 @@ BaseGradientResult SolveBaseGradient(
 	};
 
 	std::mt19937 rng(static_cast<unsigned int>(params.random_seed));
-	const int num_restarts = std::max(1, params.num_restarts);
+	const int descent_num_restart = std::max(1, params.descent_num_restart);
 	RestartResult overall;
-	int since_improved = 0;  // restarts since `overall` last improved (only counted once it is ok)
 
-	for (int r = 0; r < num_restarts && rclcpp::ok(); ++r)
+	for (int r = 0; r < descent_num_restart && rclcpp::ok(); ++r)
 	{
 		BaseOffset start =
 			(r == 0) ? BaseOffset{params.initial_x, params.initial_y, params.initial_z, params.initial_roll,
 								  params.initial_pitch}
-					 : PerturbOffset(overall.offset, rng, params.restart_perturbation, rot_scale);
+					 : PerturbOffset(overall.offset, rng, params.descent_restart_perturbation, rot_scale);
 		RestartResult rr = run_descent(start, r, r == 0 ? nullptr : &overall.sol);
 
 		// weighted_cost carries the unreachable penalty, so lower cost == better (a fully-
@@ -1633,7 +1733,7 @@ BaseGradientResult SolveBaseGradient(
 			node->get_logger(),
 			"restart %d/%d done: D=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  rel (%.4f, %.4f, %.4f) "
 			"abs (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg%s",
-			r + 1, num_restarts, rr.cost,
+			r + 1, descent_num_restart, rr.cost,
 			rr.sol.travel_cost + params.unreachable_penalty * (n - rr.sol.num_reachable), rr.sol.sum_manipulability,
 			rr.sol.num_reachable, n,
 			rr.offset.x, rr.offset.y, rr.offset.z, abs_pos(rr.offset).x(), abs_pos(rr.offset).y(),
@@ -1641,15 +1741,6 @@ BaseGradientResult SolveBaseGradient(
 
 		if (improved)
 			overall = rr;
-
-		since_improved = improved ? 0 : since_improved + 1;
-		if (overall.ok && params.restart_patience > 0 && r + 1 >= params.min_restarts &&
-			since_improved >= params.restart_patience)
-		{
-			RCLCPP_INFO(
-				node->get_logger(), "stopping restarts: %d in a row did not beat D=%.4f", since_improved, overall.cost);
-			break;
-		}
 	}
 
 	const InnerSolution& fin = overall.sol;
@@ -1787,7 +1878,7 @@ BaseGradientExperimentResult RunBaseGradientExperiment(
 	out.seed = params.random_seed;
 	const double rot_scale = std::max(1e-6, params.rot_metric_scale);
 	out.rot_metric_scale = rot_scale;
-	const int sr = std::max(1, params.solve_restarts);
+	const int sr = std::max(1, params.gtsp_num_restart);
 
 	// b* for this seed -- one full descent.
 	RCLCPP_INFO(node->get_logger(), "[experiment] seed %d: descending for b* ...", params.random_seed);
@@ -1882,7 +1973,7 @@ BaseGradientExperimentResult RunBaseGradientExperiment(
 
 	// exp 5: random search of matched budget -- offsets drawn uniformly in the bounds, cold
 	// best-of-N solve each. Budget <= 0 => same number of committed solves the descent used
-	// (descent_inner_solves / solve_restarts, i.e. iterations + 1); else that many points.
+	// (descent_inner_solves / gtsp_num_restart, i.e. iterations + 1); else that many points.
 	const int rs_points =
 		random_search_budget > 0 ? random_search_budget : std::max(1, out.descent_inner_solves / sr);
 	std::uniform_real_distribution<double> ux(params.bounds.x_min, params.bounds.x_max);
@@ -2002,7 +2093,7 @@ ObjectOffsetScore ScoreObjectOffset(
 
 	const BaseOffset b = ProjectToBounds(
 		{offset[0], offset[1], offset[2], offset[3], offset[4]}, params.bounds);
-	const int R = std::max(1, params.solve_restarts);
+	const int R = std::max(1, params.gtsp_num_restart);
 
 	double best_wc = std::numeric_limits<double>::max();
 	for (int r = 0; r < R; ++r)
@@ -2117,7 +2208,7 @@ PlacementOrderExperimentResult RunPlacementOrderExperiment(
 	const Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
 	const std::vector<double>& home = start_reference_joints;
 	const std::vector<std::vector<double>> cold_seeds(static_cast<size_t>(n), home);
-	const int R = std::max(1, params.solve_restarts);
+	const int R = std::max(1, params.gtsp_num_restart);
 
 	// ---- reference routes -----------------------------------------------------------------
 	// Load from file when given (so every shard scores against an identical set); otherwise
