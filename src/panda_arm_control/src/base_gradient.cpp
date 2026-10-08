@@ -181,8 +181,7 @@ Eigen::VectorXd ManipulabilityJointGradient(
 	return g;
 }
 
-// Robot-robot and robot-object pairs closer than margin, as rows d(distance)/dq with their distance.
-// Same linearization as bstar_placement.cpp's LinearizeCollisionConstraints.
+// If two points are too close, use jacobian to push them apart
 void ClosePairSeparationGradients(
 	const collision_detection::DistanceResult& res, const moveit::core::RobotState& state,
 	const moveit::core::JointModelGroup* jmg, double margin, std::vector<Eigen::RowVectorXd>& rows,
@@ -220,23 +219,21 @@ void ClosePairSeparationGradients(
 		}
 }
 
-// Collision-aware closest IK: from q, step the tool toward the base-frame target while pushing any
-// pair (arm-arm or arm-object) closer than margin back apart -- the push has priority, the target
-// step only uses joint motion in its null space. Returns the collision-free iterate with the
-// smallest pose gap (q updated to it); found = false if no iterate was collision-free.
 struct ClosestIkResult
 {
 	bool found = false;
 	Eigen::Matrix<double, 6, 1> e = Eigen::Matrix<double, 6, 1>::Zero();  // [position; axis*angle] error
 	double gap = std::numeric_limits<double>::max();
+	std::vector<double> joints;  // the best collision-free pose; empty if none found
 };
 
 ClosestIkResult CollisionAwareClosestIk(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, moveit::core::RobotState& state,
 	const moveit::core::JointModelGroup* jmg, const moveit::core::LinkModel* tool0_link,
-	const Eigen::Isometry3d& target, std::vector<double>& q, int iters, double margin, double rot_scale)
+	const Eigen::Isometry3d& target_pose, const std::vector<double>& initial_joints, int iters, double margin, double rot_scale)
 {
-	const double damping = 0.01, max_joint_step = 0.1;
+	const double damping = 0.01; // for jacobian near singular positions
+	const double max_joint_step = 0.1;
 	const int dof = static_cast<int>(jmg->getVariableCount());
 	collision_detection::DistanceRequest req;
 	req.enable_nearest_points = true;
@@ -247,16 +244,16 @@ ClosestIkResult CollisionAwareClosestIk(
 	req.distance_threshold = margin;
 	req.max_contacts_per_body = 2;
 
+	std::vector<double> q = initial_joints;
 	ClosestIkResult best;
-	std::vector<double> best_q = q;
 	for (int it = 0; it <= iters; ++it)
 	{
 		state.setJointGroupPositions(jmg, q);
 		state.update();
 		const Eigen::Isometry3d& fk = state.getGlobalLinkTransform(tool0_link);
 		Eigen::Matrix<double, 6, 1> e;
-		e.head<3>() = target.translation() - fk.translation();
-		const Eigen::AngleAxisd aa(target.linear() * fk.linear().transpose());
+		e.head<3>() = target_pose.translation() - fk.translation();
+		const Eigen::AngleAxisd aa(target_pose.linear() * fk.linear().transpose());
 		e.tail<3>() = aa.axis() * aa.angle();
 		const double gap =
 			std::sqrt(e.head<3>().squaredNorm() + rot_scale * rot_scale * e.tail<3>().squaredNorm());
@@ -279,7 +276,7 @@ ClosestIkResult CollisionAwareClosestIk(
 			best.found = true;
 			best.e = e;
 			best.gap = gap;
-			best_q = q;
+			best.joints = q;
 			if (gap < 1e-6)
 				break;
 		}
@@ -316,7 +313,6 @@ ClosestIkResult CollisionAwareClosestIk(
 		state.enforceBounds(jmg);
 		state.copyJointGroupPositions(jmg, q);
 	}
-	q = best_q;
 	return best;
 }
 
@@ -754,34 +750,32 @@ InnerSolution InnerSolve(
 			continue;
 		const Eigen::Isometry3d target = xform * tour_poses_obj[i];
 		ClosestIkResult best;
-		std::vector<double> best_q;
 		// Random starts only while no collision-free pose is under the cap (a capped gap has no slope).
 		for (int t = 0; t < std::max(1, params.closest_ik_starts) && (!best.found || best.gap >= params.miss_gap_cap);
 			 ++t)
 		{
-			std::vector<double> q = seed_per_viewpoint[i];
+			std::vector<double> start_joints = seed_per_viewpoint[i];
 			if (t > 0)
 			{
 				state.setToRandomPositions(jmg);
-				state.copyJointGroupPositions(jmg, q);
+				state.copyJointGroupPositions(jmg, start_joints);
 			}
 			const ClosestIkResult r = CollisionAwareClosestIk(
-				planning_scene_monitor, state, jmg, tool0_link, target, q, params.closest_ik_iters,
+				planning_scene_monitor, state, jmg, tool0_link, target, start_joints, params.closest_ik_iters,
 				params.closest_ik_margin, params.rot_metric_scale);
 			if (r.found && r.gap < best.gap)
 			{
 				best = r;
-				best_q = q;
 			}
 		}
 		if (best.found && best.gap < exact_gap)
 		{
-			branches[i].push_back(best_q);
+			branches[i].push_back(best.joints);
 			++num_rescued;
 			continue;
 		}
 		missed_vp.push_back(static_cast<int>(i));
-		missed_q.push_back(best_q);
+		missed_q.push_back(best.joints);
 		if (best.found)
 			missed_gap.push_back(best.e);
 		else
