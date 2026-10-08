@@ -184,7 +184,7 @@ Eigen::VectorXd ManipulabilityJointGradient(
 // If two points are too close, use jacobian to push them apart
 void ClosePairSeparationGradients(
 	const collision_detection::DistanceResult& res, const moveit::core::RobotState& state,
-	const moveit::core::JointModelGroup* jmg, double margin, std::vector<Eigen::RowVectorXd>& rows,
+	const moveit::core::JointModelGroup* jmg, double margin, std::vector<Eigen::RowVectorXd>& close_pair_gradients,
 	std::vector<double>& dists)
 {
 	const auto& model = state.getRobotModel();
@@ -213,7 +213,7 @@ void ClosePairSeparationGradients(
 			}
 			if (any_robot_side && row.norm() > 1e-9)
 			{
-				rows.push_back(row);
+				close_pair_gradients.push_back(row);
 				dists.push_back(d.distance);
 			}
 		}
@@ -222,7 +222,7 @@ void ClosePairSeparationGradients(
 struct ClosestIkResult
 {
 	bool found = false;
-	Eigen::Matrix<double, 6, 1> e = Eigen::Matrix<double, 6, 1>::Zero();  // [position; axis*angle] error
+	Eigen::Matrix<double, 6, 1> pose_error = Eigen::Matrix<double, 6, 1>::Zero();  // [position; axis*angle] error
 	double gap = std::numeric_limits<double>::max();
 	std::vector<double> joints;  // the best collision-free pose; empty if none found
 };
@@ -234,6 +234,9 @@ ClosestIkResult CollisionAwareClosestIk(
 {
 	const double damping = 0.01; // for jacobian near singular positions
 	const double max_joint_step = 0.1;
+	// Stop once the smallest gap so far improves by less than 1 mm over 5 steps.
+	const int stall_window = 5;
+	const double stall_gain = 1e-3;
 	const int dof = static_cast<int>(jmg->getVariableCount());
 	collision_detection::DistanceRequest req;
 	req.enable_nearest_points = true;
@@ -246,21 +249,23 @@ ClosestIkResult CollisionAwareClosestIk(
 
 	std::vector<double> q = initial_joints;
 	ClosestIkResult best;
+	std::vector<double> min_gap_history;  // smallest gap seen up to each step
 	for (int it = 0; it <= iters; ++it)
 	{
 		state.setJointGroupPositions(jmg, q);
 		state.update();
 		const Eigen::Isometry3d& fk = state.getGlobalLinkTransform(tool0_link);
-		Eigen::Matrix<double, 6, 1> e;
-		e.head<3>() = target_pose.translation() - fk.translation();
+		Eigen::Matrix<double, 6, 1> pose_error;
+		pose_error.head<3>() = target_pose.translation() - fk.translation();
 		const Eigen::AngleAxisd aa(target_pose.linear() * fk.linear().transpose());
-		e.tail<3>() = aa.axis() * aa.angle();
+		pose_error.tail<3>() = aa.axis() * aa.angle();
 		const double gap =
-			std::sqrt(e.head<3>().squaredNorm() + rot_scale * rot_scale * e.tail<3>().squaredNorm());
+			std::sqrt(pose_error.head<3>().squaredNorm() + rot_scale * rot_scale * pose_error.tail<3>().squaredNorm());
 
 		// Arm-arm and arm-object pairs within the margin.
-		std::vector<Eigen::RowVectorXd> rows;
+		std::vector<Eigen::RowVectorXd> close_pair_gradients;
 		std::vector<double> dists;
+		double min_pair_distance = std::numeric_limits<double>::max();  // over pairs within the margin
 		{
 			collision_detection::DistanceResult self_res, world_res;
 			planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
@@ -268,13 +273,20 @@ ClosestIkResult CollisionAwareClosestIk(
 			req.acm = &locked_scene->getAllowedCollisionMatrix();
 			locked_scene->getCollisionEnv()->distanceSelf(req, self_res, state);
 			locked_scene->getCollisionEnv()->distanceRobot(req, world_res, state);
-			ClosePairSeparationGradients(self_res, state, jmg, margin, rows, dists);
-			ClosePairSeparationGradients(world_res, state, jmg, margin, rows, dists);
+			ClosePairSeparationGradients(self_res, state, jmg, margin, close_pair_gradients, dists);
+			ClosePairSeparationGradients(world_res, state, jmg, margin, close_pair_gradients, dists);
+			for (const collision_detection::DistanceResult* res : {&self_res, &world_res})
+				for (const auto& pair_entry : res->distances)
+					for (const auto& d : pair_entry.second)
+						min_pair_distance = std::min(min_pair_distance, d.distance);
 		}
-		if (gap < best.gap && IsStateCollisionFree(planning_scene_monitor, &state, jmg, q.data()))
+		// Every pair more than 1 mm apart means no contact; only near-touching poses need the full check.
+		const bool collision_free =
+			min_pair_distance > 1e-3 || IsStateCollisionFree(planning_scene_monitor, &state, jmg, q.data());
+		if (gap < best.gap && collision_free)
 		{
 			best.found = true;
-			best.e = e;
+			best.pose_error = pose_error;
 			best.gap = gap;
 			best.joints = q;
 			if (gap < 1e-6)
@@ -282,20 +294,24 @@ ClosestIkResult CollisionAwareClosestIk(
 		}
 		if (it == iters)
 			break;
+		min_gap_history.push_back(std::min(gap, min_gap_history.empty() ? gap : min_gap_history.back()));
+		if (static_cast<int>(min_gap_history.size()) > stall_window &&
+			min_gap_history[min_gap_history.size() - 1 - stall_window] - min_gap_history.back() < stall_gain)
+			break;
 
 		Eigen::MatrixXd J;
 		state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
 		Eigen::MatrixXd JJt = J * J.transpose();
 		JJt.diagonal().array() += damping * damping;
-		Eigen::VectorXd dq = J.transpose() * JJt.ldlt().solve(e);
-		if (!rows.empty())
+		Eigen::VectorXd dq = J.transpose() * JJt.ldlt().solve(pose_error);
+		if (!close_pair_gradients.empty())
 		{
 			// Push pairs out to the margin first; the target step keeps only its null-space part.
-			Eigen::MatrixXd Jc(static_cast<Eigen::Index>(rows.size()), dof);
-			Eigen::VectorXd r(static_cast<Eigen::Index>(rows.size()));
-			for (size_t k = 0; k < rows.size(); ++k)
+			Eigen::MatrixXd Jc(static_cast<Eigen::Index>(close_pair_gradients.size()), dof);
+			Eigen::VectorXd r(static_cast<Eigen::Index>(close_pair_gradients.size()));
+			for (size_t k = 0; k < close_pair_gradients.size(); ++k)
 			{
-				Jc.row(static_cast<Eigen::Index>(k)) = rows[k];
+				Jc.row(static_cast<Eigen::Index>(k)) = close_pair_gradients[k];
 				r(static_cast<Eigen::Index>(k)) = margin - dists[k];
 			}
 			Eigen::MatrixXd JcJct = Jc * Jc.transpose();
@@ -777,7 +793,7 @@ InnerSolution InnerSolve(
 		missed_vp.push_back(static_cast<int>(i));
 		missed_q.push_back(best.joints);
 		if (best.found)
-			missed_gap.push_back(best.e);
+			missed_gap.push_back(best.pose_error);
 		else
 		{
 			++num_no_free;
