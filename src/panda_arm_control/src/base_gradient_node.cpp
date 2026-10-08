@@ -34,12 +34,13 @@ struct Params
 	std::string tour_input_dir = "/tmp/viewpoint_planner_output";
 	std::string output_dir = "/tmp/base_gradient_output";
 
-	double bg_x_min = -0.6, bg_x_max = 0.6;
+	// Object position bounds and start, abs (m, base frame); roll/pitch are tilt (rad).
+	double bg_x_min = -0.1, bg_x_max = 1.1;
 	double bg_y_min = -0.6, bg_y_max = 0.6;
-	double bg_z_min = -0.2, bg_z_max = 0.2;
+	double bg_z_min = -0.05, bg_z_max = 0.35;
 	double bg_roll_min = -0.35, bg_roll_max = 0.35;	  // rad (~20 deg) -- object tip
 	double bg_pitch_min = -0.35, bg_pitch_max = 0.35;  // rad -- object tilt
-	double bg_initial_x = 0.0, bg_initial_y = 0.0, bg_initial_z = 0.0;
+	double bg_initial_x = 0.5, bg_initial_y = 0.0, bg_initial_z = 0.15;
 	double bg_initial_roll = 0.0, bg_initial_pitch = 0.0;
 	double bg_rot_metric_scale = 0.3;  // m per rad, blends translation & tip/tilt in the step
 
@@ -77,36 +78,13 @@ struct Params
 	bool bg_fd_gradient_check = false;
 	double bg_fd_epsilon = 1e-4;
 
-	// Attribution experiment (see base_gradient.hpp): instead of the normal run, descend once for
-	// b*, then cold/warm re-solve the tour at b*, offset 0, and random offsets of the same size.
-	// Sweep random_seed across launches for the seed distribution. Writes
-	// base_gradient_experiment_seed<seed>.json and exits.
-	bool bg_experiment_mode = false;
-	int bg_experiment_num_random_dirs = 10;
-	double bg_experiment_min_probe_metric = 0.01;
-	// exp 5: uniform-in-bounds random-search points to cold-solve. 0 = match the descent's
-	// committed-solve count (a genuine equal-budget baseline); >0 = that many points.
-	int bg_experiment_random_search_budget = 0;
-
-	// Placement / order separability experiment (see base_gradient.hpp): sweep a grid_n^3 grid of
-	// (x, y, z) offsets, score each reference route with a fixed-order branch DP + a free-routing
-	// GTSP. Writes placement_experiment_seed<seed>_g<grid_start>.json and exits. The grid can be
-	// sharded across processes with grid_start / grid_count (-1 = to the end).
-	bool bg_placement_experiment = false;
-	int bg_placement_grid_n = 5;
-	int bg_placement_grid_start = 0;
-	int bg_placement_grid_count = -1;
-	// Empty = solve the reference routes and write them to output_dir; a path = load them (so
-	// every shard of a parallel sweep scores against an identical route set).
-	std::string bg_placement_reference_orders_file = "";
-
 	double ik_timeout = 0.15;
 	int random_seed = 42;
 	double visualize_progress_delay_sec = 0.0;
 
 	// Drives the real robot through the recommended placement's tour by moving the (software-only)
 	// collision object into the frame the base would see at the recommended offset. Only correct
-	// if that matches reality -- see ApplyObjectOffsetToScene's doc comment. Defaults to false.
+	// if that matches reality -- see ApplyObjectPlacementToScene's doc comment. Defaults to false.
 	bool execute_on_robot = false;
 	double execution_planning_time = 5.0;
 	int execution_planning_attempts = 5;
@@ -193,7 +171,7 @@ public:
 
 		this->runPipeline();
 
-		if (!rclcpp::ok())  // experiment mode shuts down when done
+		if (!rclcpp::ok())  // shut down mid-run (Ctrl-C)
 			return;
 
 		this->marker_timer = this->create_wall_timer(
@@ -279,15 +257,6 @@ private:
 		this->declareIfNeeded("bg_patience", this->params.bg_patience);
 		this->declareIfNeeded("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
 		this->declareIfNeeded("bg_fd_epsilon", this->params.bg_fd_epsilon);
-		this->declareIfNeeded("bg_experiment_mode", this->params.bg_experiment_mode);
-		this->declareIfNeeded("bg_experiment_num_random_dirs", this->params.bg_experiment_num_random_dirs);
-		this->declareIfNeeded("bg_experiment_min_probe_metric", this->params.bg_experiment_min_probe_metric);
-		this->declareIfNeeded("bg_experiment_random_search_budget", this->params.bg_experiment_random_search_budget);
-		this->declareIfNeeded("bg_placement_experiment", this->params.bg_placement_experiment);
-		this->declareIfNeeded("bg_placement_grid_n", this->params.bg_placement_grid_n);
-		this->declareIfNeeded("bg_placement_grid_start", this->params.bg_placement_grid_start);
-		this->declareIfNeeded("bg_placement_grid_count", this->params.bg_placement_grid_count);
-		this->declareIfNeeded("bg_placement_reference_orders_file", this->params.bg_placement_reference_orders_file);
 		this->declareIfNeeded("ik_timeout", this->params.ik_timeout);
 		this->declareIfNeeded("random_seed", this->params.random_seed);
 		this->declareIfNeeded("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -351,15 +320,6 @@ private:
 		this->get_parameter("bg_patience", this->params.bg_patience);
 		this->get_parameter("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
 		this->get_parameter("bg_fd_epsilon", this->params.bg_fd_epsilon);
-		this->get_parameter("bg_experiment_mode", this->params.bg_experiment_mode);
-		this->get_parameter("bg_experiment_num_random_dirs", this->params.bg_experiment_num_random_dirs);
-		this->get_parameter("bg_experiment_min_probe_metric", this->params.bg_experiment_min_probe_metric);
-		this->get_parameter("bg_experiment_random_search_budget", this->params.bg_experiment_random_search_budget);
-		this->get_parameter("bg_placement_experiment", this->params.bg_placement_experiment);
-		this->get_parameter("bg_placement_grid_n", this->params.bg_placement_grid_n);
-		this->get_parameter("bg_placement_grid_start", this->params.bg_placement_grid_start);
-		this->get_parameter("bg_placement_grid_count", this->params.bg_placement_grid_count);
-		this->get_parameter("bg_placement_reference_orders_file", this->params.bg_placement_reference_orders_file);
 		this->get_parameter("ik_timeout", this->params.ik_timeout);
 		this->get_parameter("random_seed", this->params.random_seed);
 		this->get_parameter("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
@@ -448,43 +408,6 @@ private:
 		bg.progress_mesh_scale = this->params.mesh_scale;
 		bg.visualize_progress_delay_sec = this->params.visualize_progress_delay_sec;
 
-		if (this->params.bg_placement_experiment)
-		{
-			RCLCPP_INFO(
-				this->get_logger(),
-				"Placement/order experiment (seed %d): sweeping a %d^3 (x,y,z) grid, fixed-order vs free-routing "
-				"cost...",
-				this->params.random_seed, this->params.bg_placement_grid_n);
-			PlacementOrderExperimentResult pexp = RunPlacementOrderExperiment(
-				this->shared_from_this(), this->robot_model, local_scene, this->params.group_name,
-				object_translation_world, object_rotation_world, tour_tcp_poses, this->home_joint_values, bg,
-				this->params.bg_placement_grid_n, this->params.bg_placement_grid_start,
-				this->params.bg_placement_grid_count, this->params.bg_placement_reference_orders_file,
-				this->params.output_dir);
-			// grid_count == 0 is a routes-only prep run (writes the reference-routes file, no grid).
-			if (this->params.bg_placement_grid_count != 0)
-				ExportPlacementOrderExperimentResult(this->params.output_dir, pexp);
-			rclcpp::shutdown();
-			return;
-		}
-
-		if (this->params.bg_experiment_mode)
-		{
-			RCLCPP_INFO(
-				this->get_logger(),
-				"Experiment mode (seed %d): attributing the descent's cost drop to the object move vs "
-				"inner-solve variance...",
-				this->params.random_seed);
-			BaseGradientExperimentResult exp = RunBaseGradientExperiment(
-				this->shared_from_this(), this->robot_model, local_scene, this->params.group_name,
-				object_translation_world, object_rotation_world, tour_tcp_poses, this->home_joint_values, bg,
-				this->params.bg_experiment_num_random_dirs, this->params.bg_experiment_min_probe_metric,
-				this->params.bg_experiment_random_search_budget);
-			ExportBaseGradientExperimentResult(this->params.output_dir, exp);
-			rclcpp::shutdown();
-			return;
-		}
-
 		RCLCPP_INFO(
 			this->get_logger(), "Descending the object offset (x, y, z, tip, tilt) for a %zu-pose tour...",
 			tour_tcp_poses.size());
@@ -513,20 +436,16 @@ private:
 		{
 			RCLCPP_WARN(
 				this->get_logger(),
-				"execute_on_robot: driving the REAL robot against the object moved by (%.4f, %.4f, %.4f) m + tip "
-				"%.2f deg / tilt %.2f deg in software -- only correct if the physical object is actually fixtured "
-				"to match.",
+				"execute_on_robot: driving the REAL robot against the object placed at abs (%.4f, %.4f, %.4f) m + "
+				"tip %.2f deg / tilt %.2f deg in software -- only correct if the physical object is actually "
+				"fixtured to match.",
 				result.x, result.y, result.z, result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI);
 
-			ApplyObjectOffsetToScene(
-				local_scene, object_translation_world, object_rotation_world, result.x, result.y, result.z,
-				result.roll, result.pitch);
+			ApplyObjectPlacementToScene(
+				local_scene, object_rotation_world, result.x, result.y, result.z, result.roll, result.pitch);
 
-			Eigen::Isometry3d object_offset = Eigen::Isometry3d::Identity();
-			object_offset.translation() = Eigen::Vector3d(result.x, result.y, result.z);
-			object_offset.linear() = (Eigen::AngleAxisd(result.pitch, Eigen::Vector3d::UnitY()) *
-									  Eigen::AngleAxisd(result.roll, Eigen::Vector3d::UnitX()))
-										 .toRotationMatrix();
+			const Eigen::Isometry3d object_offset = PlacementTransform(
+				object_translation_world, result.x, result.y, result.z, result.roll, result.pitch);
 
 			std::vector<ViewpointCandidate> owned(result.tour_order.size());
 			std::vector<const ViewpointCandidate*> selected;

@@ -29,10 +29,9 @@ namespace
 // "Mirrors real_cost_planning.cpp" note in base_placement.cpp).
 // ---------------------------------------------------------------------------------------------
 
-// The rigid adjustment applied to the object + its viewpoints, in the robot base frame: translate
-// (x, y, z) and tip/tilt (roll about base x, pitch about base y). See BaseGradientBounds for why
-// yaw is excluded. Order: object_now = T(x,y,z) * Ry(pitch) * Rx(roll) * object_nominal.
-struct BaseOffset
+// Object placement: absolute position (x, y, z, base frame) plus tilt about that position (roll about
+// base x, pitch about base y), relative to the nominal orientation.
+struct ObjectPlacement
 {
 	double x = 0.0;
 	double y = 0.0;
@@ -41,7 +40,8 @@ struct BaseOffset
 	double pitch = 0.0;
 };
 
-Eigen::Isometry3d MakeObjectOffset(const BaseOffset& p)
+// Maps poses given relative to the object's position (base-frame axes, "_obj") to absolute poses.
+Eigen::Isometry3d MakePlacement(const ObjectPlacement& p)
 {
 	Eigen::Isometry3d t = Eigen::Isometry3d::Identity();
 	t.translation() = Eigen::Vector3d(p.x, p.y, p.z);
@@ -97,7 +97,7 @@ void SetObjectPose(
 	locked_scene->processCollisionObjectMsg(obj);
 }
 
-BaseOffset ProjectToBounds(BaseOffset p, const BaseGradientBounds& b)
+ObjectPlacement ProjectToBounds(ObjectPlacement p, const BaseGradientBounds& b)
 {
 	p.x = std::clamp(p.x, b.x_min, b.x_max);
 	p.y = std::clamp(p.y, b.y_min, b.y_max);
@@ -110,7 +110,7 @@ BaseOffset ProjectToBounds(BaseOffset p, const BaseGradientBounds& b)
 // The offset gradient / step vector: [d/dx, d/dy, d/dz, d/droll, d/dpitch].
 using OffsetVec = Eigen::Matrix<double, 5, 1>;
 
-OffsetVec ToOffsetVec(const BaseOffset& a, const BaseOffset& b)  // a - b, component-wise
+OffsetVec ToOffsetVec(const ObjectPlacement& a, const ObjectPlacement& b)  // a - b, component-wise
 {
 	OffsetVec v;
 	v << a.x - b.x, a.y - b.y, a.z - b.z, a.roll - b.roll, a.pitch - b.pitch;
@@ -118,7 +118,7 @@ OffsetVec ToOffsetVec(const BaseOffset& a, const BaseOffset& b)  // a - b, compo
 }
 
 // Gaussian kick around `center`: sigma_m meters on x/y/z, sigma_m/rot_scale rad on roll/pitch.
-BaseOffset PerturbOffset(const BaseOffset& center, std::mt19937& rng, double sigma_m, double rot_scale)
+ObjectPlacement PerturbOffset(const ObjectPlacement& center, std::mt19937& rng, double sigma_m, double rot_scale)
 {
 	std::normal_distribution<double> nm(0.0, sigma_m);
 	std::normal_distribution<double> nr(0.0, sigma_m / std::max(1e-6, rot_scale));
@@ -382,23 +382,23 @@ double WeightedEdgeCost(
 std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
-	const std::vector<std::vector<double>>& seed_per_viewpoint, const BaseOffset& base, const BaseGradientParams& params,
+	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
+	const std::vector<std::vector<double>>& seed_per_viewpoint, const ObjectPlacement& base, const BaseGradientParams& params,
 	int max_solutions, random_numbers::RandomNumberGenerator* rng = nullptr)
 {
-	Eigen::Isometry3d xform = MakeObjectOffset(base);
-	SetObjectPose(planning_scene_monitor, xform * object_pose_original);
+	Eigen::Isometry3d xform = MakePlacement(base);
+	SetObjectPose(planning_scene_monitor, xform * object_pose_obj);
 
 	auto validity_callback = [&planning_scene_monitor](
 								 moveit::core::RobotState* s, const moveit::core::JointModelGroup* g,
 								 const double* jp) { return IsStateCollisionFree(planning_scene_monitor, s, g, jp); };
 
-	std::vector<std::vector<std::vector<double>>> branches(tour_tcp_poses_original.size());
+	std::vector<std::vector<std::vector<double>>> branches(tour_poses_obj.size());
 	const int max_sol = std::max(1, max_solutions);
 
-	for (size_t i = 0; i < tour_tcp_poses_original.size(); ++i)
+	for (size_t i = 0; i < tour_poses_obj.size(); ++i)
 	{
-		geometry_msgs::msg::Pose target_local = ToPoseMsg(xform * tour_tcp_poses_original[i]);
+		geometry_msgs::msg::Pose target_local = ToPoseMsg(xform * tour_poses_obj[i]);
 		std::vector<std::vector<double>>& sols = branches[i];
 
 		state.setJointGroupPositions(jmg, seed_per_viewpoint[i]);
@@ -614,13 +614,13 @@ struct GtspSolution
 // still reachable, 2-opt is seeded from that order as well as from a fresh nearest-neighbour pass,
 // and the cheaper result is kept -- so a base step can never make the tour worse just because the
 // heuristic re-ordered it, which is what caused the cost to bounce between iterations.
-GtspSolution RunGtsp(
-	const std::vector<std::vector<std::vector<double>>>& branches, const BaseOffset& base,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& home_joints,
+GtspSolution FindTourOrder(
+	const std::vector<std::vector<std::vector<double>>>& branches, const ObjectPlacement& base,
+	const std::vector<Eigen::Isometry3d>& tour_poses_obj, const std::vector<double>& home_joints,
 	const Eigen::Vector3d& home_tcp_local, const BaseGradientParams& params,
 	const std::vector<int>* warm_order = nullptr, const std::vector<std::vector<double>>* node_cost = nullptr)
 {
-	Eigen::Isometry3d xform = MakeObjectOffset(base);
+	Eigen::Isometry3d xform = MakePlacement(base);
 
 	GtspContext ctx;
 	ctx.home_joints = &home_joints;
@@ -637,7 +637,7 @@ GtspSolution RunGtsp(
 		for (const auto& b : branches[i])
 			js.push_back(&b);
 		ctx.joints_by_group.push_back(std::move(js));
-		ctx.tcp_local_by_group.push_back((xform * tour_tcp_poses_original[i]).translation());
+		ctx.tcp_local_by_group.push_back((xform * tour_poses_obj[i]).translation());
 		if (node_cost)
 			ctx.node_cost_by_group.push_back((*node_cost)[i]);
 	}
@@ -690,17 +690,17 @@ GtspSolution RunGtsp(
 // ---------------------------------------------------------------------------------------------
 
 double TourWeightedCost(
-	const BaseOffset& base, const std::vector<int>& tour, const std::vector<std::vector<double>>& joints,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& home_joints,
+	const ObjectPlacement& base, const std::vector<int>& tour, const std::vector<std::vector<double>>& joints,
+	const std::vector<Eigen::Isometry3d>& tour_poses_obj, const std::vector<double>& home_joints,
 	const Eigen::Vector3d& home_tcp_local, const BaseGradientParams& params)
 {
-	Eigen::Isometry3d xform = MakeObjectOffset(base);
+	Eigen::Isometry3d xform = MakePlacement(base);
 	double total = 0.0;
 	const std::vector<double>* prev_j = &home_joints;
 	Eigen::Vector3d prev_p = home_tcp_local;
 	for (size_t k = 0; k < tour.size(); ++k)
 	{
-		Eigen::Vector3d p = (xform * tour_tcp_poses_original[tour[k]]).translation();
+		Eigen::Vector3d p = (xform * tour_poses_obj[tour[k]]).translation();
 		total += WeightedEdgeCost(*prev_j, joints[k], prev_p, p, params);
 		prev_j = &joints[k];
 		prev_p = p;
@@ -736,13 +736,13 @@ struct InnerSolution
 InnerSolution InnerSolve(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
+	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
 	const std::vector<std::vector<double>>& seed_per_viewpoint, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params,
+	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params,
 	const std::vector<int>* warm_order, int max_solutions)
 {
 	std::vector<std::vector<std::vector<double>>> branches = CollectIkSolutions(
-		state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seed_per_viewpoint, base,
+		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seed_per_viewpoint, base,
 		params, max_solutions);
 	const moveit::core::LinkModel* tool0_link = state.getRobotModel()->getLinkModel("tool0");
 
@@ -754,12 +754,12 @@ InnerSolution InnerSolve(
 	std::vector<Eigen::Matrix<double, 6, 1>> missed_gap;
 	std::vector<std::vector<double>> missed_q;
 	int num_rescued = 0, num_no_free = 0;
-	const Eigen::Isometry3d xform = MakeObjectOffset(base);
+	const Eigen::Isometry3d xform = MakePlacement(base);
 	for (size_t i = 0; i < branches.size(); ++i)
 	{
 		if (!branches[i].empty())
 			continue;
-		const Eigen::Isometry3d target = xform * tour_tcp_poses_original[i];
+		const Eigen::Isometry3d target = xform * tour_poses_obj[i];
 		ClosestIkResult best;
 		std::vector<double> best_q;
 		// Random starts only while no collision-free pose is under the cap (a capped gap has no slope).
@@ -810,17 +810,17 @@ InnerSolution InnerSolve(
 				-params.manipulability_weight * w -
 				params.log_manipulability_weight * std::log(std::max(kMinManipulability, w)));
 		}
-	GtspSolution gtsp = RunGtsp(
-		branches, base, tour_tcp_poses_original, home_joints, home_tcp_local, params, warm_order, &node_cost);
+	GtspSolution gtsp = FindTourOrder(
+		branches, base, tour_poses_obj, home_joints, home_tcp_local, params, warm_order, &node_cost);
 
 	InnerSolution out;
 	out.tour = std::move(gtsp.tour_pose_indices);
 	out.joints = std::move(gtsp.chosen_joints);
-	out.num_total = static_cast<int>(tour_tcp_poses_original.size());
+	out.num_total = static_cast<int>(tour_poses_obj.size());
 	out.num_reachable = static_cast<int>(out.tour.size());
 	out.all_reachable = (out.num_reachable == out.num_total);
 	out.travel_cost =
-		TourWeightedCost(base, out.tour, out.joints, tour_tcp_poses_original, home_joints, home_tcp_local, params);
+		TourWeightedCost(base, out.tour, out.joints, tour_poses_obj, home_joints, home_tcp_local, params);
 	out.sum_manipulability = SumManipulability(state, jmg, tool0_link, out.joints);
 	out.sum_log_manipulability = SumLogManipulability(state, jmg, tool0_link, out.joints);
 	out.num_rescued = num_rescued;
@@ -845,109 +845,24 @@ InnerSolution InnerSolve(
 InnerSolution BestOfNInnerSolve(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
+	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
 	const std::vector<std::vector<double>>& seed_per_viewpoint, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params,
+	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params,
 	const std::vector<int>* warm_order, int max_solutions)
 {
 	const int n = std::max(1, params.gtsp_num_restart);
 	InnerSolution best = InnerSolve(
-		state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seed_per_viewpoint,
+		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seed_per_viewpoint,
 		home_joints, home_tcp_local, base, params, warm_order, max_solutions);
 	for (int i = 1; i < n; ++i)
 	{
 		InnerSolution cand = InnerSolve(
-			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seed_per_viewpoint,
+			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seed_per_viewpoint,
 			home_joints, home_tcp_local, base, params, warm_order, max_solutions);
 		if (cand.weighted_cost < best.weighted_cost)
 			best = std::move(cand);
 	}
 	return best;
-}
-
-// Score a FIXED visiting order at `base`: walk `order` (viewpoint indices) and pick the cheapest
-// IK branch at each stop by exact DP (Viterbi over the branch layers) -- the "which arm config"
-// half of the inner problem with the route frozen, no reordering. Viewpoints with no branch at
-// this base are skipped and charged params.unreachable_penalty, exactly as RunGtsp scores a
-// partial tour. `order` may be any permutation; only its relative order of the reachable stops
-// matters.
-InnerSolution SolveFixedOrder(
-	const std::vector<std::vector<std::vector<double>>>& branches, const BaseOffset& base,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BaseGradientParams& params, const std::vector<int>& order)
-{
-	const Eigen::Isometry3d xform = MakeObjectOffset(base);
-	const int num_total = static_cast<int>(tour_tcp_poses_original.size());
-
-	std::vector<int> vp;					  // viewpoint index per reachable layer, in visit order
-	std::vector<Eigen::Vector3d> pos;		  // its tool0 position in the base frame
-	for (int i : order)
-		if (i >= 0 && i < static_cast<int>(branches.size()) && !branches[i].empty())
-		{
-			vp.push_back(i);
-			pos.push_back((xform * tour_tcp_poses_original[i]).translation());
-		}
-
-	InnerSolution out;
-	out.num_total = num_total;
-	if (vp.empty())
-	{
-		out.weighted_cost = params.unreachable_penalty * num_total;
-		return out;
-	}
-
-	const size_t L = vp.size();
-	std::vector<std::vector<double>> dp(L);	 // dp[l][k] = min cost to reach branch k of layer l
-	std::vector<std::vector<int>> back(L);	 // predecessor branch index
-
-	dp[0].resize(branches[vp[0]].size());
-	back[0].assign(branches[vp[0]].size(), -1);
-	for (size_t k = 0; k < branches[vp[0]].size(); ++k)
-		dp[0][k] = WeightedEdgeCost(home_joints, branches[vp[0]][k], home_tcp_local, pos[0], params);
-
-	for (size_t l = 1; l < L; ++l)
-	{
-		const auto& cur = branches[vp[l]];
-		const auto& prev = branches[vp[l - 1]];
-		dp[l].assign(cur.size(), std::numeric_limits<double>::max());
-		back[l].assign(cur.size(), -1);
-		for (size_t k = 0; k < cur.size(); ++k)
-			for (size_t j = 0; j < prev.size(); ++j)
-			{
-				const double c = dp[l - 1][j] + WeightedEdgeCost(prev[j], cur[k], pos[l - 1], pos[l], params);
-				if (c < dp[l][k])
-				{
-					dp[l][k] = c;
-					back[l][k] = static_cast<int>(j);
-				}
-			}
-	}
-
-	size_t best_k = 0;
-	for (size_t k = 1; k < dp[L - 1].size(); ++k)
-		if (dp[L - 1][k] < dp[L - 1][best_k])
-			best_k = k;
-	const double tour_cost = dp[L - 1][best_k];
-
-	std::vector<int> chosen(L);
-	for (size_t l = L; l-- > 0;)
-	{
-		chosen[l] = static_cast<int>(best_k);
-		if (l > 0)
-			best_k = static_cast<size_t>(back[l][best_k]);
-	}
-
-	out.tour.resize(L);
-	out.joints.resize(L);
-	for (size_t l = 0; l < L; ++l)
-	{
-		out.tour[l] = vp[l];
-		out.joints[l] = branches[vp[l]][chosen[l]];
-	}
-	out.num_reachable = static_cast<int>(L);
-	out.all_reachable = (out.num_reachable == num_total);
-	out.weighted_cost = tour_cost + params.unreachable_penalty * (num_total - out.num_reachable);
-	return out;
 }
 
 // seed_per_viewpoint for the next solve: each viewpoint warm-started from its own current joints,
@@ -975,12 +890,12 @@ struct TrackResult
 TrackResult TrackTour(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
+	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
 	const std::vector<int>& tour, const std::vector<std::vector<double>>& seeds, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params)
+	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params)
 {
-	Eigen::Isometry3d xform = MakeObjectOffset(base);
-	SetObjectPose(planning_scene_monitor, xform * object_pose_original);
+	Eigen::Isometry3d xform = MakePlacement(base);
+	SetObjectPose(planning_scene_monitor, xform * object_pose_obj);
 
 	auto validity_callback = [&planning_scene_monitor](
 								 moveit::core::RobotState* s, const moveit::core::JointModelGroup* g,
@@ -996,8 +911,8 @@ TrackResult TrackTour(
 
 	for (size_t k = 0; k < tour.size(); ++k)
 	{
-		geometry_msgs::msg::Pose target_local = ToPoseMsg(xform * tour_tcp_poses_original[tour[k]]);
-		Eigen::Vector3d p = (xform * tour_tcp_poses_original[tour[k]]).translation();
+		geometry_msgs::msg::Pose target_local = ToPoseMsg(xform * tour_poses_obj[tour[k]]);
+		Eigen::Vector3d p = (xform * tour_poses_obj[tour[k]]).translation();
 
 		state.setJointGroupPositions(jmg, seeds[k]);
 		bool ok = state.setFromIK(jmg, target_local, "tool0", params.ik_timeout, validity_callback);
@@ -1028,7 +943,7 @@ TrackResult TrackTour(
 
 // Twist of a moved target per offset component (6x5, [v; w] rows, columns x,y,z,roll,pitch), in the
 // base frame, for a target at base-frame position p. See AnalyticGradient's comment for the formula.
-Eigen::Matrix<double, 6, 5> OffsetTwist(const BaseOffset& base, const Eigen::Vector3d& p)
+Eigen::Matrix<double, 6, 5> OffsetTwist(const ObjectPlacement& base, const Eigen::Vector3d& p)
 {
 	const Eigen::Vector3d c(base.x, base.y, base.z);
 	const Eigen::Vector3d roll_axis =
@@ -1044,11 +959,11 @@ Eigen::Matrix<double, 6, 5> OffsetTwist(const BaseOffset& base, const Eigen::Vec
 	return S;
 }
 
-// dw/db: how an object offset change moves one viewpoint's manipulability, the arm tracking it from q.
+// dw/db: how an object placement change moves one viewpoint's manipulability, the arm tracking it from q.
 // Its positive side keeps the viewpoint away from the reach edge.
 OffsetVec ManipulabilityOffsetGradient(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const moveit::core::LinkModel* tool0_link, const BaseOffset& base, const Eigen::Vector3d& target_pos,
+	const moveit::core::LinkModel* tool0_link, const ObjectPlacement& base, const Eigen::Vector3d& target_pos,
 	const std::vector<double>& q, double damping)
 {
 	state.setJointGroupPositions(jmg, q);
@@ -1064,7 +979,7 @@ OffsetVec ManipulabilityOffsetGradient(
 
 // ---------------------------------------------------------------------------------------------
 // Analytic gradient of the objective (travel cost - weight * sum of manipulability) w.r.t. the
-// object offset (x, y, z, roll, pitch).
+// object placement (x, y, z, roll, pitch).
 //
 // The object + its viewpoints are moved by M = T(c) Ry(pitch) Rx(roll) in the base frame, so a
 // nominal target T_i sits at p_i^b = M T_i. The tracking config q_i(b) satisfies FK(q_i) = M T_i;
@@ -1082,13 +997,13 @@ OffsetVec ManipulabilityOffsetGradient(
 
 OffsetVec AnalyticGradient(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const moveit::core::LinkModel* tool0_link, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
+	const moveit::core::LinkModel* tool0_link, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
 	const std::vector<int>& tour, const std::vector<std::vector<double>>& joints, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params,
+	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params,
 	const std::vector<int>& missed_vp, const std::vector<Eigen::Matrix<double, 6, 1>>& missed_gap)
 {
 	const size_t n = tour.size();
-	Eigen::Isometry3d xform = MakeObjectOffset(base);
+	Eigen::Isometry3d xform = MakePlacement(base);
 	const double lambda2 = params.jacobian_damping * params.jacobian_damping;
 
 	// Per visit position: dq/db (dof x 5) and dp/db (3 x 5).
@@ -1098,7 +1013,7 @@ OffsetVec AnalyticGradient(
 	for (size_t k = 0; k < n; ++k)
 	{
 		const Eigen::Matrix<double, 6, 5> S =
-			OffsetTwist(base, (xform * tour_tcp_poses_original[tour[k]]).translation());
+			OffsetTwist(base, (xform * tour_poses_obj[tour[k]]).translation());
 
 		state.setJointGroupPositions(jmg, joints[k]);
 		state.update();
@@ -1133,7 +1048,7 @@ OffsetVec AnalyticGradient(
 			continue;
 		Eigen::Matrix<double, 6, 1> we = e;
 		we.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-		const Eigen::Vector3d p = (xform * tour_tcp_poses_original[static_cast<size_t>(missed_vp[m])]).translation();
+		const Eigen::Vector3d p = (xform * tour_poses_obj[static_cast<size_t>(missed_vp[m])]).translation();
 		g += params.miss_gap_weight * OffsetTwist(base, p).transpose() * we / gap;
 	}
 
@@ -1167,13 +1082,13 @@ OffsetVec AnalyticGradient(
 
 	if (n > 0)
 	{
-		Eigen::Vector3d p0 = (xform * tour_tcp_poses_original[tour[0]]).translation();
+		Eigen::Vector3d p0 = (xform * tour_poses_obj[tour[0]]).translation();
 		add_edge(home_joints, joints[0], zero_dq, dq_db[0], zero_dp, dp_db[0], home_tcp_local, p0);
 	}
 	for (size_t k = 1; k < n; ++k)
 	{
-		Eigen::Vector3d pa = (xform * tour_tcp_poses_original[tour[k - 1]]).translation();
-		Eigen::Vector3d pb = (xform * tour_tcp_poses_original[tour[k]]).translation();
+		Eigen::Vector3d pa = (xform * tour_poses_obj[tour[k - 1]]).translation();
+		Eigen::Vector3d pb = (xform * tour_poses_obj[tour[k]]).translation();
 		add_edge(joints[k - 1], joints[k], dq_db[k - 1], dq_db[k], dp_db[k - 1], dp_db[k], pa, pb);
 	}
 	return g;
@@ -1183,16 +1098,16 @@ OffsetVec AnalyticGradient(
 OffsetVec FiniteDifferenceGradient(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
+	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
 	const std::vector<int>& tour, const std::vector<std::vector<double>>& seeds, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BaseOffset& base, const BaseGradientParams& params)
+	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params)
 {
 	const double eps = params.fd_epsilon;
 	OffsetVec g = OffsetVec::Constant(std::nan(""));
 	for (int axis = 0; axis < 5; ++axis)
 	{
-		BaseOffset bp = base, bm = base;
-		auto component = [](BaseOffset& o, int a) -> double& {
+		ObjectPlacement bp = base, bm = base;
+		auto component = [](ObjectPlacement& o, int a) -> double& {
 			return a == 0 ? o.x : a == 1 ? o.y : a == 2 ? o.z : a == 3 ? o.roll : o.pitch;
 		};
 		double* pp = &component(bp, axis);
@@ -1200,10 +1115,10 @@ OffsetVec FiniteDifferenceGradient(
 		*pp += eps;
 		*pm -= eps;
 		TrackResult rp = TrackTour(
-			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, tour, seeds, home_joints,
+			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, tour, seeds, home_joints,
 			home_tcp_local, bp, params);
 		TrackResult rm = TrackTour(
-			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, tour, seeds, home_joints,
+			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, tour, seeds, home_joints,
 			home_tcp_local, bm, params);
 		if (rp.all_reachable && rm.all_reachable)
 			g(axis) = (rp.weighted_cost - rm.weighted_cost) / (2.0 * eps);
@@ -1219,9 +1134,9 @@ OffsetVec FiniteDifferenceGradient(
 // -grad(D) arrow, and viewpoints (green reached, red missed). Fixed id per namespace so each
 // publish overwrites the last instead of stacking.
 void PublishProgress(
-	const rclcpp::Node::SharedPtr& node, const BaseGradientParams& params, const Eigen::Isometry3d& object_pose_original,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<BaseOffset>& base_history,
-	const Eigen::Vector3d& neg_grad_translation, const BaseOffset& base, const std::vector<int>& missed_vp)
+	const rclcpp::Node::SharedPtr& node, const BaseGradientParams& params, const Eigen::Isometry3d& object_pose_obj,
+	const std::vector<Eigen::Isometry3d>& tour_poses_obj, const std::vector<ObjectPlacement>& base_history,
+	const Eigen::Vector3d& neg_grad_translation, const ObjectPlacement& base, const std::vector<int>& missed_vp)
 {
 	if (!params.progress_pub)
 		return;
@@ -1239,15 +1154,15 @@ void PublishProgress(
 		m.pose.orientation.w = 1.0;
 		return m;
 	};
-	const Eigen::Isometry3d xform = MakeObjectOffset(base);
-	const Eigen::Vector3d obj_pos = (xform * object_pose_original).translation();
+	const Eigen::Isometry3d xform = MakePlacement(base);
+	const Eigen::Vector3d obj_pos = (xform * object_pose_obj).translation();
 
 	if (!params.progress_mesh_path.empty())
 	{
 		visualization_msgs::msg::Marker mesh = make("base_gradient_current", visualization_msgs::msg::Marker::MESH_RESOURCE);
 		mesh.mesh_resource = "file://" + params.progress_mesh_path;
 		mesh.mesh_use_embedded_materials = false;
-		mesh.pose = ToPoseMsg(xform * object_pose_original);
+		mesh.pose = ToPoseMsg(xform * object_pose_obj);
 		mesh.scale.x = mesh.scale.y = mesh.scale.z = params.progress_mesh_scale;
 		mesh.color.r = 1.0f;
 		mesh.color.g = 0.85f;
@@ -1258,9 +1173,9 @@ void PublishProgress(
 	// Viewpoints at this offset: green reached, red missed.
 	visualization_msgs::msg::Marker vps = make("base_gradient_viewpoints", visualization_msgs::msg::Marker::SPHERE_LIST);
 	vps.scale.x = vps.scale.y = vps.scale.z = 0.01;
-	for (size_t i = 0; i < tour_tcp_poses_original.size(); ++i)
+	for (size_t i = 0; i < tour_poses_obj.size(); ++i)
 	{
-		const Eigen::Vector3d p = (xform * tour_tcp_poses_original[i]).translation();
+		const Eigen::Vector3d p = (xform * tour_poses_obj[i]).translation();
 		geometry_msgs::msg::Point pt;
 		pt.x = p.x();
 		pt.y = p.y();
@@ -1288,9 +1203,9 @@ void PublishProgress(
 		visualization_msgs::msg::Marker crumbs = make("base_gradient_history", visualization_msgs::msg::Marker::SPHERE_LIST);
 		crumbs.scale.x = crumbs.scale.y = crumbs.scale.z = 0.012;
 		crumbs.color = trail.color;
-		for (const BaseOffset& b : base_history)
+		for (const ObjectPlacement& b : base_history)
 		{
-			const Eigen::Vector3d p = (MakeObjectOffset(b) * object_pose_original).translation();
+			const Eigen::Vector3d p = (MakePlacement(b) * object_pose_obj).translation();
 			geometry_msgs::msg::Point pt;
 			pt.x = p.x();
 			pt.y = p.y();
@@ -1340,16 +1255,20 @@ void PublishProgress(
 BaseGradientResult SolveBaseGradient(
 	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
-	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& start_reference_joints,
+	const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const std::vector<double>& start_reference_joints,
 	const BaseGradientParams& params_in)
 {
 	// Mutable copy: each descent anneals manipulability_weight from its initial value down to
 	// params_in.manipulability_weight; results are compared at that final weight.
 	BaseGradientParams params = params_in;
 	const double lambda_final = params_in.manipulability_weight;
-	Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
-	const int n = static_cast<int>(tour_tcp_poses_original.size());
+	// Object and viewpoints relative to the object's position; MakePlacement puts them at an absolute one.
+	const Eigen::Isometry3d object_pose_obj = MakeIsometry(Eigen::Vector3d::Zero(), object_rotation_nominal);
+	std::vector<Eigen::Isometry3d> tour_poses_obj = tour_tcp_poses_nominal;
+	for (Eigen::Isometry3d& t : tour_poses_obj)
+		t.translation() -= object_translation_nominal;
+	const int n = static_cast<int>(tour_poses_obj.size());
 
 	moveit::core::RobotState state(robot_model);
 	state.setToDefaultValues();
@@ -1379,24 +1298,19 @@ BaseGradientResult SolveBaseGradient(
 
 	struct RestartResult
 	{
-		BaseOffset offset;
+		ObjectPlacement placement;
 		InnerSolution sol;
 		double cost = std::numeric_limits<double>::max();
 		bool ok = false;  // fully reachable
 	};
 
-	// Absolute object position in the robot base frame for a given (relative) offset.
-	auto abs_pos = [&](const BaseOffset& b) -> Eigen::Vector3d {
-		return (MakeObjectOffset(b) * object_pose_original).translation();
-	};
-
 	// One full gradient descent from `base`, warm-started internally but starting IK/GTSP cold.
 	// warm: IK seeds from an earlier solution (restarts), or null to start from the home config.
 	// Every descent starts at the initial weight; it decays only while all viewpoints are reached.
-	auto run_descent = [&](BaseOffset base, int restart_idx, const InnerSolution* warm) -> RestartResult {
+	auto run_descent = [&](ObjectPlacement base, int restart_idx, const InnerSolution* warm) -> RestartResult {
 		base = ProjectToBounds(base, params.bounds);
 		params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
-		std::vector<BaseOffset> base_history{base};
+		std::vector<ObjectPlacement> base_history{base};
 		std::vector<std::vector<double>> seeds =
 			warm ? SeedsFromSolution(*warm, fallback_seed, static_cast<size_t>(n))
 				 : std::vector<std::vector<double>>(static_cast<size_t>(n), fallback_seed);
@@ -1417,9 +1331,9 @@ BaseGradientResult SolveBaseGradient(
 		};
 
 		RestartResult rr;
-		rr.offset = base;
+		rr.placement = base;
 
-		auto record = [&](const BaseOffset& b, const InnerSolution& s) {
+		auto record = [&](const ObjectPlacement& b, const InnerSolution& s) {
 			// Re-score at the final weight so points found during annealing compare fairly.
 			InnerSolution sf = s;
 			sf.weighted_cost = s.travel_cost - lambda_final * s.sum_manipulability -
@@ -1431,7 +1345,7 @@ BaseGradientResult SolveBaseGradient(
 			// is also the one with the best reachability -- no separate all_reachable gate needed.
 			if (sf.weighted_cost < rr.cost)
 			{
-				rr.offset = b;
+				rr.placement = b;
 				rr.sol = sf;
 				rr.cost = sf.weighted_cost;
 				rr.ok = sf.all_reachable;
@@ -1439,29 +1353,28 @@ BaseGradientResult SolveBaseGradient(
 		};
 
 		InnerSolution cur = BestOfNInnerSolve(
-			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
+			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds,
 			start_reference_joints, home_tcp_local, base, params, warm ? &warm->tour : nullptr,
 			params.max_solutions_per_candidate);
 		result.num_inner_solves += std::max(1, params.gtsp_num_restart);
 
 		if (cur.tour.empty())
 		{
-			RCLCPP_WARN(node->get_logger(), "restart %d: no tour pose reachable at the start offset", restart_idx + 1);
+			RCLCPP_WARN(node->get_logger(), "restart %d: no tour pose reachable at the start placement", restart_idx + 1);
 			return rr;
 		}
 
 		record(base, cur);
 		remember(cur);
 		PublishProgress(
-			node, params, object_pose_original, tour_tcp_poses_original, base_history, Eigen::Vector3d::Zero(), base,
+			node, params, object_pose_obj, tour_poses_obj, base_history, Eigen::Vector3d::Zero(), base,
 			cur.missed_vp);
 		RCLCPP_INFO(
 			node->get_logger(),
-			"restart %d/%d iter 0: rel (%.4f, %.4f, %.4f) abs (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg  "
+			"restart %d/%d iter 0: abs (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg  "
 			"D=%.4f  lambda=%.1f  travel+miss=%.2f  sum_w=%.3f  sum_logw=%.2f  miss_gap=%.2f  reachable %d/%d  "
 			"(rescued %d, no collision-free posture %d)",
-			restart_idx + 1, std::max(1, params.descent_num_restart), base.x, base.y, base.z, abs_pos(base).x(),
-			abs_pos(base).y(), abs_pos(base).z(), base.roll * 180.0 / M_PI,
+			restart_idx + 1, std::max(1, params.descent_num_restart), base.x, base.y, base.z, base.roll * 180.0 / M_PI,
 			base.pitch * 180.0 / M_PI, cur.weighted_cost, params.manipulability_weight,
 			cur.travel_cost + params.unreachable_penalty * (n - cur.num_reachable), cur.sum_manipulability,
 			cur.sum_log_manipulability, cur.miss_cost, cur.num_reachable, n, cur.num_rescued,
@@ -1490,13 +1403,13 @@ BaseGradientResult SolveBaseGradient(
 			const bool annealing = params.manipulability_weight > lambda_final * (1.0 + 1e-6);
 
 			OffsetVec g = AnalyticGradient(
-				state, jmg, tool0_link, tour_tcp_poses_original, cur.tour, cur.joints, start_reference_joints,
+				state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, start_reference_joints,
 				home_tcp_local, base, params, cur.missed_vp, cur.missed_gap);
 
 			if (params.fd_gradient_check)
 			{
 				OffsetVec g_fd = FiniteDifferenceGradient(
-					state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cur.tour,
+					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, cur.tour,
 					cur.joints, start_reference_joints, home_tcp_local, base, params);
 				RCLCPP_INFO(
 					node->get_logger(),
@@ -1525,7 +1438,7 @@ BaseGradientResult SolveBaseGradient(
 			{
 				RCLCPP_INFO(node->get_logger(), "  restart %d: gradient ~ 0 -- converged", restart_idx + 1);
 				PublishProgress(
-					node, params, object_pose_original, tour_tcp_poses_original, base_history,
+					node, params, object_pose_obj, tour_poses_obj, base_history,
 					Eigen::Vector3d(-g.head<3>()), base, cur.missed_vp);
 				break;
 			}
@@ -1544,12 +1457,12 @@ BaseGradientResult SolveBaseGradient(
 					seeds[vi] = last_good[vi];
 			}
 			const InnerSolution here_quick = InnerSolve(
-				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
+				state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds,
 				start_reference_joints, home_tcp_local, base, params, &cur.tour, 1);
 			result.num_inner_solves += 1;
 			double step = params.initial_step;
 			bool accepted = false;
-			BaseOffset b_new = base;
+			ObjectPlacement b_new = base;
 			InnerSolution next;
 			// Steering: when a probe loses a reached viewpoint, remove the part of the direction that lowers
 			// its manipulability (pushes it to the reach edge) and retry the same step.
@@ -1558,13 +1471,13 @@ BaseGradientResult SolveBaseGradient(
 			const int kMaxSteers = 3;
 			for (int ls = 0; ls < params.max_line_search_iters;)
 			{
-				BaseOffset cand = ProjectToBounds(
+				ObjectPlacement cand = ProjectToBounds(
 					{base.x + step * dir_u(0), base.y + step * dir_u(1), base.z + step * dir_u(2),
 					 base.roll + step * dir_u(3) / rot_scale, base.pitch + step * dir_u(4) / rot_scale},
 					params.bounds);
 				// weighted_cost carries the unreachable penalty, so a probe that drops a viewpoint fails.
 				InnerSolution probe = InnerSolve(
-					state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
+					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds,
 					start_reference_joints, home_tcp_local, cand, params, &cur.tour, 1);
 				result.num_inner_solves += 1;
 				// Never trade away a reached viewpoint, whatever the cost says.
@@ -1585,7 +1498,7 @@ BaseGradientResult SolveBaseGradient(
 						if (it == cur.tour.end())
 							continue;  // already missed at the current offset
 						const Eigen::Vector3d p =
-							(MakeObjectOffset(base) * tour_tcp_poses_original[static_cast<size_t>(v)]).translation();
+							(MakePlacement(base) * tour_poses_obj[static_cast<size_t>(v)]).translation();
 						OffsetVec h = to_u(ManipulabilityOffsetGradient(
 							state, jmg, tool0_link, base, p, cur.joints[static_cast<size_t>(it - cur.tour.begin())],
 							params.jacobian_damping));
@@ -1618,7 +1531,7 @@ BaseGradientResult SolveBaseGradient(
 			if (accepted)
 			{
 				committed = BestOfNInnerSolve(
-					state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds,
+					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds,
 					start_reference_joints, home_tcp_local, b_new, params, &next.tour,
 					params.max_solutions_per_candidate);
 				result.num_inner_solves += std::max(1, params.gtsp_num_restart);
@@ -1643,7 +1556,7 @@ BaseGradientResult SolveBaseGradient(
 						node->get_logger(), "  restart %d: no step reduces the tour cost with %d/%d reachable -- stuck",
 						restart_idx + 1, cur.num_reachable, n);
 				PublishProgress(
-					node, params, object_pose_original, tour_tcp_poses_original, base_history,
+					node, params, object_pose_obj, tour_poses_obj, base_history,
 					Eigen::Vector3d(-g.head<3>()), base, cur.missed_vp);
 				break;
 			}
@@ -1662,18 +1575,18 @@ BaseGradientResult SolveBaseGradient(
 
 			RCLCPP_INFO(
 				node->get_logger(),
-				"restart %d/%d iter %d/%d: rel (%.4f, %.4f, %.4f) abs (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg  "
+				"restart %d/%d iter %d/%d: abs (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg  "
 				"D=%.4f  lambda=%.1f  travel+miss=%.2f  sum_w=%.3f  sum_logw=%.2f  miss_gap=%.2f  reachable %d/%d  "
 				"(rescued %d, no collision-free posture %d)  |grad|=%.4f  step=%.4f",
 				restart_idx + 1, std::max(1, params.descent_num_restart), outer + 1, params.max_outer_iterations, base.x,
-				base.y, base.z, abs_pos(base).x(), abs_pos(base).y(), abs_pos(base).z(), base.roll * 180.0 / M_PI,
+				base.y, base.z, base.roll * 180.0 / M_PI,
 				base.pitch * 180.0 / M_PI, cur.weighted_cost, params.manipulability_weight,
 				cur.travel_cost + params.unreachable_penalty * (n - cur.num_reachable), cur.sum_manipulability,
 				cur.sum_log_manipulability, cur.miss_cost, cur.num_reachable, n, cur.num_rescued,
 				cur.num_no_free, gnorm, step);
 
 			PublishProgress(
-				node, params, object_pose_original, tour_tcp_poses_original, base_history,
+				node, params, object_pose_obj, tour_poses_obj, base_history,
 				Eigen::Vector3d(-g.head<3>()), base, cur.missed_vp);
 
 			if (rel_impr < params.convergence_tolerance_cost)
@@ -1705,7 +1618,7 @@ BaseGradientResult SolveBaseGradient(
 					stall_count = 0;
 					continue;
 				}
-				RCLCPP_INFO(node->get_logger(), "  restart %d: offset settled -- converged", restart_idx + 1);
+				RCLCPP_INFO(node->get_logger(), "  restart %d: placement settled -- converged", restart_idx + 1);
 				break;
 			}
 		}
@@ -1719,10 +1632,13 @@ BaseGradientResult SolveBaseGradient(
 
 	for (int r = 0; r < descent_num_restart && rclcpp::ok(); ++r)
 	{
-		BaseOffset start =
-			(r == 0) ? BaseOffset{params.initial_x, params.initial_y, params.initial_z, params.initial_roll,
-								  params.initial_pitch}
-					 : PerturbOffset(overall.offset, rng, params.descent_restart_perturbation, rot_scale);
+		ObjectPlacement start =
+			(r == 0) ? ObjectPlacement{
+						   std::isnan(params.initial_x) ? object_translation_nominal.x() : params.initial_x,
+						   std::isnan(params.initial_y) ? object_translation_nominal.y() : params.initial_y,
+						   std::isnan(params.initial_z) ? object_translation_nominal.z() : params.initial_z,
+						   params.initial_roll, params.initial_pitch}
+					 : PerturbOffset(overall.placement, rng, params.descent_restart_perturbation, rot_scale);
 		RestartResult rr = run_descent(start, r, r == 0 ? nullptr : &overall.sol);
 
 		// weighted_cost carries the unreachable penalty, so lower cost == better (a fully-
@@ -1731,24 +1647,23 @@ BaseGradientResult SolveBaseGradient(
 
 		RCLCPP_INFO(
 			node->get_logger(),
-			"restart %d/%d done: D=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  rel (%.4f, %.4f, %.4f) "
-			"abs (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f deg%s",
+			"restart %d/%d done: D=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, %.4f, %.4f) m"
+			"  tip %.1f tilt %.1f deg%s",
 			r + 1, descent_num_restart, rr.cost,
 			rr.sol.travel_cost + params.unreachable_penalty * (n - rr.sol.num_reachable), rr.sol.sum_manipulability,
 			rr.sol.num_reachable, n,
-			rr.offset.x, rr.offset.y, rr.offset.z, abs_pos(rr.offset).x(), abs_pos(rr.offset).y(),
-			abs_pos(rr.offset).z(), rr.offset.roll * 180.0 / M_PI, rr.offset.pitch * 180.0 / M_PI, (r > 0 && improved) ? "  <-- new best" : "");
+			rr.placement.x, rr.placement.y, rr.placement.z, rr.placement.roll * 180.0 / M_PI, rr.placement.pitch * 180.0 / M_PI, (r > 0 && improved) ? "  <-- new best" : "");
 
 		if (improved)
 			overall = rr;
 	}
 
 	const InnerSolution& fin = overall.sol;
-	result.x = overall.offset.x;
-	result.y = overall.offset.y;
-	result.z = overall.offset.z;
-	result.roll = overall.offset.roll;
-	result.pitch = overall.offset.pitch;
+	result.x = overall.placement.x;
+	result.y = overall.placement.y;
+	result.z = overall.placement.z;
+	result.roll = overall.placement.roll;
+	result.pitch = overall.placement.pitch;
 	result.tour_order = fin.tour;
 	result.joint_solutions = fin.joints;
 	// Report the honest tour cost -- strip the unreachable penalty baked in for comparison.
@@ -1759,23 +1674,21 @@ BaseGradientResult SolveBaseGradient(
 	result.ok = overall.ok;
 
 	// Leave the scene as we found it.
-	SetObjectPose(planning_scene_monitor, object_pose_original);
+	SetObjectPose(planning_scene_monitor, MakeIsometry(object_translation_nominal, object_rotation_nominal));
 
 	if (result.ok)
 		RCLCPP_INFO(
 			node->get_logger(),
-			"Done. Object rel (%.4f, %.4f, %.4f) abs (%.4f, %.4f, %.4f) m, tip %.2f deg, tilt %.2f deg -- reaches "
+			"Done. Object abs (%.4f, %.4f, %.4f) m, tip %.2f deg, tilt %.2f deg -- reaches "
 			"all %d poses, tour joint path %.4f rad, travel %.2f, sum_w %.3f (weighted cost %.4f).",
-			result.x, result.y, result.z, abs_pos(overall.offset).x(), abs_pos(overall.offset).y(),
-			abs_pos(overall.offset).z(), result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI, n,
+			result.x, result.y, result.z, result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI, n,
 			result.total_joint_path_length, fin.travel_cost, fin.sum_manipulability, result.total_weighted_cost);
 	else
 		RCLCPP_WARN(
 			node->get_logger(),
-			"Done. Object rel (%.4f, %.4f, %.4f) abs (%.4f, %.4f, %.4f) m, tip %.2f deg, tilt %.2f deg -- reaches "
+			"Done. Object abs (%.4f, %.4f, %.4f) m, tip %.2f deg, tilt %.2f deg -- reaches "
 			"only %d/%d poses.",
-			result.x, result.y, result.z, abs_pos(overall.offset).x(), abs_pos(overall.offset).y(),
-			abs_pos(overall.offset).z(), result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI,
+			result.x, result.y, result.z, result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI,
 			result.num_reachable, n);
 
 	return result;
@@ -1837,662 +1750,32 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 	printf("Saved base gradient result JSON: %s\n", json_path.c_str());
 }
 
-// ---------------------------------------------------------------------------------------------
-// Attribution experiment (see base_gradient.hpp). Reuses the file-local InnerSolve / GTSP so the
-// costs here are exactly the descent's objective.
-// ---------------------------------------------------------------------------------------------
-namespace
+Eigen::Isometry3d PlacementTransform(
+	const Eigen::Vector3d& object_translation_nominal, double x, double y, double z, double roll, double pitch)
 {
-
-double MetricNorm(const BaseOffset& o, double rot_scale)
-{
-	return std::sqrt(
-		o.x * o.x + o.y * o.y + o.z * o.z + (o.roll * rot_scale) * (o.roll * rot_scale) +
-		(o.pitch * rot_scale) * (o.pitch * rot_scale));
+	return MakePlacement(ObjectPlacement{x, y, z, roll, pitch}) * Eigen::Translation3d(-object_translation_nominal);
 }
 
-BaseGradientPointEval EvalPoint(const InnerSolution& s, const BaseOffset& at, double rot_scale, double unreachable_penalty)
-{
-	BaseGradientPointEval e;
-	e.weighted_cost = s.weighted_cost;
-	e.honest_cost = s.weighted_cost - unreachable_penalty * (s.num_total - s.num_reachable);
-	e.num_reachable = s.num_reachable;
-	e.all_reachable = s.all_reachable;
-	e.offset = {at.x, at.y, at.z, at.roll, at.pitch};
-	e.d_metric = MetricNorm(at, rot_scale);
-	return e;
-}
-
-}  // namespace
-
-BaseGradientExperimentResult RunBaseGradientExperiment(
-	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
-	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& start_reference_joints,
-	const BaseGradientParams& params, int num_random_directions, double min_probe_d_metric, int random_search_budget)
-{
-	BaseGradientExperimentResult out;
-	const int n = static_cast<int>(tour_tcp_poses_original.size());
-	out.num_total = n;
-	out.seed = params.random_seed;
-	const double rot_scale = std::max(1e-6, params.rot_metric_scale);
-	out.rot_metric_scale = rot_scale;
-	const int sr = std::max(1, params.gtsp_num_restart);
-
-	// b* for this seed -- one full descent.
-	RCLCPP_INFO(node->get_logger(), "[experiment] seed %d: descending for b* ...", params.random_seed);
-	BaseGradientResult descent = SolveBaseGradient(
-		node, robot_model, planning_scene_monitor, group_name, object_translation_original, object_rotation_original,
-		tour_tcp_poses_original, start_reference_joints, params);
-
-	out.descent_ok = descent.ok;
-	out.descent_offset = {descent.x, descent.y, descent.z, descent.roll, descent.pitch};
-	out.descent_reported_cost = descent.total_weighted_cost;
-	out.descent_inner_solves = descent.num_inner_solves;
-	const BaseOffset bstar{descent.x, descent.y, descent.z, descent.roll, descent.pitch};
-	out.descent_d_metric = MetricNorm(bstar, rot_scale);
-
-	double probe_d = out.descent_d_metric;
-	if (probe_d < min_probe_d_metric)
-	{
-		probe_d = min_probe_d_metric;
-		out.probe_d_floored = true;
-		RCLCPP_WARN(
-			node->get_logger(), "[experiment] |b*| = %.5f is ~0; probing exp 3/4 at a floor radius of %.4f",
-			out.descent_d_metric, probe_d);
-	}
-	out.probe_d_metric = probe_d;
-
-	// Solve setup (mirrors SolveBaseGradient).
-	moveit::core::RobotState state(robot_model);
-	state.setToDefaultValues();
-	const moveit::core::JointModelGroup* jmg = state.getJointModelGroup(group_name);
-	state.setJointGroupPositions(jmg, start_reference_joints);
-	state.update();
-	const Eigen::Vector3d home_tcp_local = state.getGlobalLinkTransform("tool0").translation();
-	const Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
-	const std::vector<double>& home = start_reference_joints;
-	const std::vector<std::vector<double>> cold_seeds(static_cast<size_t>(n), home);
-
-	auto cold_solve = [&](const BaseOffset& b) {
-		return BestOfNInnerSolve(
-			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cold_seeds, home,
-			home_tcp_local, b, params, nullptr, params.max_solutions_per_candidate);
-	};
-
-	// exp 1: cold solve at both endpoints.
-	const InnerSolution s0 = cold_solve(BaseOffset{});
-	out.c0_cold = EvalPoint(s0, BaseOffset{}, rot_scale, params.unreachable_penalty);
-	const InnerSolution sopt = cold_solve(bstar);
-	out.copt_cold = EvalPoint(sopt, bstar, rot_scale, params.unreachable_penalty);
-	RCLCPP_INFO(
-		node->get_logger(), "[experiment] exp1 cold: C0=%.3f (%d/%d)  Copt=%.3f (%d/%d)  dPhi=%+.3f", out.c0_cold.honest_cost,
-		out.c0_cold.num_reachable, n, out.copt_cold.honest_cost, out.copt_cold.num_reachable, n,
-		out.copt_cold.honest_cost - out.c0_cold.honest_cost);
-
-	// Warm start for exp 4: IK seeds + GTSP order from the offset-0 cold solution, single hop.
-	const std::vector<std::vector<double>> seeds0 = SeedsFromSolution(s0, home, static_cast<size_t>(n));
-	const std::vector<int> warm_order0 = s0.tour;
-	auto warm_solve = [&](const BaseOffset& b) {
-		return BestOfNInnerSolve(
-			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, seeds0, home,
-			home_tcp_local, b, params, &warm_order0, params.max_solutions_per_candidate);
-	};
-
-	out.copt_warm = EvalPoint(warm_solve(bstar), bstar, rot_scale, params.unreachable_penalty);
-
-	// exp 3 / 4: random offsets of the same mixed-metric magnitude as b*.
-	std::mt19937 rng(static_cast<unsigned int>(params.random_seed));
-	std::normal_distribution<double> gauss(0.0, 1.0);
-	const int k = std::max(0, num_random_directions);
-	out.rand_cold.reserve(static_cast<size_t>(k));
-	out.rand_warm.reserve(static_cast<size_t>(k));
-	for (int i = 0; i < k; ++i)
-	{
-		double v[5];
-		double sq = 0.0;
-		for (double& c : v)
-		{
-			c = gauss(rng);
-			sq += c * c;
-		}
-		const double inv = 1.0 / std::sqrt(std::max(sq, 1e-12));
-		// Unit vector in the mixed metric, scaled to probe_d, then mapped back to offset units.
-		BaseOffset rb = ProjectToBounds(
-			{probe_d * v[0] * inv, probe_d * v[1] * inv, probe_d * v[2] * inv, probe_d * v[3] * inv / rot_scale,
-			 probe_d * v[4] * inv / rot_scale},
-			params.bounds);
-
-		out.rand_cold.push_back(EvalPoint(cold_solve(rb), rb, rot_scale, params.unreachable_penalty));
-		out.rand_warm.push_back(EvalPoint(warm_solve(rb), rb, rot_scale, params.unreachable_penalty));
-		RCLCPP_INFO(
-			node->get_logger(), "[experiment] exp3/4 dir %d/%d: cold=%.3f  warm=%.3f", i + 1, k,
-			out.rand_cold.back().honest_cost, out.rand_warm.back().honest_cost);
-	}
-
-	// exp 5: random search of matched budget -- offsets drawn uniformly in the bounds, cold
-	// best-of-N solve each. Budget <= 0 => same number of committed solves the descent used
-	// (descent_inner_solves / gtsp_num_restart, i.e. iterations + 1); else that many points.
-	const int rs_points =
-		random_search_budget > 0 ? random_search_budget : std::max(1, out.descent_inner_solves / sr);
-	std::uniform_real_distribution<double> ux(params.bounds.x_min, params.bounds.x_max);
-	std::uniform_real_distribution<double> uy(params.bounds.y_min, params.bounds.y_max);
-	std::uniform_real_distribution<double> uz(params.bounds.z_min, params.bounds.z_max);
-	std::uniform_real_distribution<double> ur(params.bounds.roll_min, params.bounds.roll_max);
-	std::uniform_real_distribution<double> up(params.bounds.pitch_min, params.bounds.pitch_max);
-	out.random_search.reserve(static_cast<size_t>(rs_points));
-	double rs_best = std::numeric_limits<double>::max();
-	for (int i = 0; i < rs_points; ++i)
-	{
-		BaseOffset rb{ux(rng), uy(rng), uz(rng), ur(rng), up(rng)};
-		BaseGradientPointEval e = EvalPoint(cold_solve(rb), rb, rot_scale, params.unreachable_penalty);
-		out.random_search.push_back(e);
-		rs_best = std::min(rs_best, e.honest_cost);
-		RCLCPP_INFO(
-			node->get_logger(), "[experiment] exp5 random-search %d/%d: cold=%.3f  (best so far %.3f)", i + 1,
-			rs_points, e.honest_cost, rs_best);
-	}
-
-	SetObjectPose(planning_scene_monitor, object_pose_original);  // leave the scene as we found it
-	return out;
-}
-
-void ExportBaseGradientExperimentResult(const std::string& output_dir, const BaseGradientExperimentResult& result)
-{
-	std::filesystem::create_directories(output_dir);
-
-	auto eval_to_json = [](const BaseGradientPointEval& e) {
-		Json::Value j;
-		j["weighted_cost"] = e.weighted_cost;
-		j["honest_cost"] = e.honest_cost;
-		j["num_reachable"] = e.num_reachable;
-		j["all_reachable"] = e.all_reachable;
-		j["d_metric"] = e.d_metric;
-		Json::Value off(Json::arrayValue);
-		for (double c : e.offset)
-			off.append(c);
-		j["offset"] = off;
-		return j;
-	};
-
-	Json::Value root;
-	root["seed"] = result.seed;
-	root["num_total"] = result.num_total;
-	root["rot_metric_scale"] = result.rot_metric_scale;
-	root["probe_d_metric"] = result.probe_d_metric;
-	root["probe_d_floored"] = result.probe_d_floored;
-
-	Json::Value descent(Json::objectValue);
-	descent["ok"] = result.descent_ok;
-	descent["d_metric"] = result.descent_d_metric;
-	descent["reported_weighted_cost"] = result.descent_reported_cost;
-	descent["inner_solves"] = result.descent_inner_solves;
-	Json::Value doff(Json::arrayValue);
-	for (double c : result.descent_offset)
-		doff.append(c);
-	descent["offset"] = doff;
-	root["descent"] = descent;
-
-	Json::Value exp1(Json::objectValue);
-	exp1["c0_cold"] = eval_to_json(result.c0_cold);
-	exp1["copt_cold"] = eval_to_json(result.copt_cold);
-	exp1["delta_honest"] = result.copt_cold.honest_cost - result.c0_cold.honest_cost;
-	root["exp1_cold_endpoints"] = exp1;
-
-	Json::Value exp3(Json::arrayValue);
-	for (const auto& e : result.rand_cold)
-		exp3.append(eval_to_json(e));
-	root["exp3_cold_placebo"] = exp3;
-
-	Json::Value exp4(Json::objectValue);
-	exp4["copt_warm"] = eval_to_json(result.copt_warm);
-	Json::Value exp4rand(Json::arrayValue);
-	for (const auto& e : result.rand_warm)
-		exp4rand.append(eval_to_json(e));
-	exp4["random"] = exp4rand;
-	root["exp4_warm_placebo"] = exp4;
-
-	Json::Value exp5(Json::arrayValue);
-	for (const auto& e : result.random_search)
-		exp5.append(eval_to_json(e));
-	root["exp5_random_search"] = exp5;
-
-	const std::string json_path =
-		output_dir + "/base_gradient_experiment_seed" + std::to_string(result.seed) + ".json";
-	std::ofstream json_file(json_path);
-	Json::StreamWriterBuilder writer_builder;
-	writer_builder["indentation"] = "    ";
-	std::unique_ptr<Json::StreamWriter> writer(writer_builder.newStreamWriter());
-	writer->write(root, &json_file);
-
-	printf("Saved base gradient experiment JSON: %s\n", json_path.c_str());
-}
-
-ObjectOffsetScore ScoreObjectOffset(
-	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
-	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& start_reference_joints,
-	const BaseGradientParams& params, const std::array<double, 5>& offset, const std::vector<int>& fixed_order)
-{
-	(void)node;
-	ObjectOffsetScore out;
-	const int n = static_cast<int>(tour_tcp_poses_original.size());
-	out.num_total = n;
-
-	moveit::core::RobotState state(robot_model);
-	state.setToDefaultValues();
-	const moveit::core::JointModelGroup* jmg = state.getJointModelGroup(group_name);
-	state.setJointGroupPositions(jmg, start_reference_joints);
-	state.update();
-	const Eigen::Vector3d home_tcp_local = state.getGlobalLinkTransform("tool0").translation();
-	const Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
-	const std::vector<double>& home = start_reference_joints;
-	const std::vector<std::vector<double>> cold_seeds(static_cast<size_t>(n), home);
-
-	const BaseOffset b = ProjectToBounds(
-		{offset[0], offset[1], offset[2], offset[3], offset[4]}, params.bounds);
-	const int R = std::max(1, params.gtsp_num_restart);
-
-	double best_wc = std::numeric_limits<double>::max();
-	for (int r = 0; r < R; ++r)
-	{
-		const auto branches = CollectIkSolutions(
-			state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cold_seeds, b, params,
-			params.max_solutions_per_candidate);
-
-		InnerSolution s;
-		if (!fixed_order.empty())
-		{
-			s = SolveFixedOrder(branches, b, tour_tcp_poses_original, home, home_tcp_local, params, fixed_order);
-		}
-		else
-		{
-			const GtspSolution g = RunGtsp(
-				branches, b, tour_tcp_poses_original, home, home_tcp_local, params, nullptr);
-			s.tour = g.tour_pose_indices;
-			s.joints = g.chosen_joints;
-			s.num_total = n;
-			s.num_reachable = static_cast<int>(s.tour.size());
-			s.all_reachable = (s.num_reachable == n);
-			s.weighted_cost =
-				TourWeightedCost(b, s.tour, s.joints, tour_tcp_poses_original, home, home_tcp_local, params) +
-				params.unreachable_penalty * (n - s.num_reachable);
-		}
-
-		if (s.weighted_cost < best_wc)
-		{
-			best_wc = s.weighted_cost;
-			out.weighted_cost = s.weighted_cost;
-			out.honest_cost = s.weighted_cost - params.unreachable_penalty * (n - s.num_reachable);
-			out.num_reachable = s.num_reachable;
-			out.all_reachable = s.all_reachable;
-			out.tour = s.tour;
-			out.joints = s.joints;
-		}
-	}
-
-	SetObjectPose(planning_scene_monitor, object_pose_original);  // leave the scene as we found it
-	return out;
-}
-
-// ---------------------------------------------------------------------------------------------
-// Placement / order separability experiment (see base_gradient.hpp).
-// ---------------------------------------------------------------------------------------------
-namespace
-{
-
-// Grid coordinate i of n points spanning [mn, mx]; the midpoint for n == 1. With odd n and a
-// symmetric span the centre index lands exactly on 0, so the nominal offset is on the grid.
-double GridCoord(int i, int n, double mn, double mx)
-{
-	if (n <= 1)
-		return 0.5 * (mn + mx);
-	return mn + (mx - mn) * (static_cast<double>(i) / (n - 1));
-}
-
-// A solved tour (reachable viewpoints only) padded to a full permutation of 0..num_total-1 by
-// appending the missing indices in ascending order -- so a reference route always names every
-// viewpoint even if the offset it was solved at could not reach them all.
-std::vector<int> PadToFullPermutation(const std::vector<int>& tour, int num_total)
-{
-	std::vector<char> seen(num_total, 0);
-	std::vector<int> out;
-	out.reserve(num_total);
-	for (int v : tour)
-		if (v >= 0 && v < num_total && !seen[v])
-		{
-			seen[v] = 1;
-			out.push_back(v);
-		}
-	for (int v = 0; v < num_total; ++v)
-		if (!seen[v])
-			out.push_back(v);
-	return out;
-}
-
-}  // namespace
-
-PlacementOrderExperimentResult RunPlacementOrderExperiment(
-	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
-	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& start_reference_joints,
-	const BaseGradientParams& params, int grid_n, int grid_start, int grid_count,
-	const std::string& reference_orders_file, const std::string& output_dir)
-{
-	PlacementOrderExperimentResult out;
-	const int n = static_cast<int>(tour_tcp_poses_original.size());
-	out.seed = params.random_seed;
-	out.num_total = n;
-	out.unreachable_penalty = params.unreachable_penalty;
-
-	grid_n = std::max(1, grid_n);
-	// Collapse an axis to a single point when its bounds are degenerate (min == max), so e.g.
-	// passing z_min:=0 z_max:=0 does an x-y sweep only instead of grid_n redundant z-layers.
-	const int nx = (params.bounds.x_max - params.bounds.x_min > 1e-9) ? grid_n : 1;
-	const int ny = (params.bounds.y_max - params.bounds.y_min > 1e-9) ? grid_n : 1;
-	const int nz = (params.bounds.z_max - params.bounds.z_min > 1e-9) ? grid_n : 1;
-	out.grid_shape = {nx, ny, nz};
-	out.grid_min = {params.bounds.x_min, params.bounds.y_min, params.bounds.z_min};
-	out.grid_max = {params.bounds.x_max, params.bounds.y_max, params.bounds.z_max};
-
-	// Solve setup (mirrors SolveBaseGradient / RunBaseGradientExperiment).
-	moveit::core::RobotState state(robot_model);
-	state.setToDefaultValues();
-	const moveit::core::JointModelGroup* jmg = state.getJointModelGroup(group_name);
-	state.setJointGroupPositions(jmg, start_reference_joints);
-	state.update();
-	const Eigen::Vector3d home_tcp_local = state.getGlobalLinkTransform("tool0").translation();
-	const Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
-	const std::vector<double>& home = start_reference_joints;
-	const std::vector<std::vector<double>> cold_seeds(static_cast<size_t>(n), home);
-	const int R = std::max(1, params.gtsp_num_restart);
-
-	// ---- reference routes -----------------------------------------------------------------
-	// Load from file when given (so every shard scores against an identical set); otherwise
-	// solve them -- full GTSP at the nominal offset + 6 spread offsets -- and write them out.
-	if (!reference_orders_file.empty())
-	{
-		std::ifstream rf(reference_orders_file);
-		Json::Value root;
-		Json::CharReaderBuilder rb;
-		std::string errs;
-		if (!rf.is_open() || !Json::parseFromStream(rb, rf, &root, &errs))
-		{
-			RCLCPP_ERROR(
-				node->get_logger(), "[placement] cannot read reference routes from %s (%s) -- aborting",
-				reference_orders_file.c_str(), errs.c_str());
-			return out;
-		}
-		for (const auto& l : root["order_labels"])
-			out.order_labels.push_back(l.asString());
-		for (const auto& ord : root["reference_orders"])
-		{
-			std::vector<int> v;
-			for (const auto& e : ord)
-				v.push_back(e.asInt());
-			out.reference_orders.push_back(PadToFullPermutation(v, n));
-		}
-		RCLCPP_INFO(
-			node->get_logger(), "[placement] loaded %zu reference routes from %s", out.reference_orders.size(),
-			reference_orders_file.c_str());
-	}
-	else
-	{
-		const double sx = 0.7 * std::max(std::abs(params.bounds.x_min), std::abs(params.bounds.x_max));
-		const double sy = 0.7 * std::max(std::abs(params.bounds.y_min), std::abs(params.bounds.y_max));
-		const double sz = 0.7 * std::max(std::abs(params.bounds.z_min), std::abs(params.bounds.z_max));
-		// Route 0 is the tour exactly as the viewpoint_planner_* run produced it (viewpoints are
-		// already stored in visiting order), so the EXP 1 / EXP 3 frozen route is the real
-		// pipeline order, not one re-derived at a particular offset.
-		{
-			std::vector<int> file_order(n);
-			for (int i = 0; i < n; ++i)
-				file_order[i] = i;
-			out.order_labels.push_back("file_order");
-			out.reference_orders.push_back(file_order);
-			RCLCPP_INFO(node->get_logger(), "[placement] reference route file_order: the input tour as given (%d poses)", n);
-		}
-
-		const std::vector<std::pair<std::string, BaseOffset>> seed_offsets = {
-			{"gtsp@nominal", {0, 0, 0, 0, 0}}, {"gtsp@+x", {sx, 0, 0, 0, 0}},   {"gtsp@-x", {-sx, 0, 0, 0, 0}},
-			{"gtsp@+y", {0, sy, 0, 0, 0}},	  {"gtsp@-y", {0, -sy, 0, 0, 0}},  {"gtsp@+z", {0, 0, sz, 0, 0}},
-			{"gtsp@-z", {0, 0, -sz, 0, 0}},
-		};
-		for (const auto& [label, off] : seed_offsets)
-		{
-			if (!rclcpp::ok())
-				break;
-			const InnerSolution s = BestOfNInnerSolve(
-				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cold_seeds, home,
-				home_tcp_local, off, params, nullptr, params.max_solutions_per_candidate);
-			out.order_labels.push_back(label);
-			out.reference_orders.push_back(PadToFullPermutation(s.tour, n));
-			RCLCPP_INFO(
-				node->get_logger(), "[placement] reference route %s: full GTSP reaches %d/%d, honest cost %.3f",
-				label.c_str(), s.num_reachable, n, s.weighted_cost - params.unreachable_penalty * (n - s.num_reachable));
-		}
-
-		Json::Value root;
-		Json::Value labels(Json::arrayValue), orders(Json::arrayValue);
-		for (const auto& l : out.order_labels)
-			labels.append(l);
-		for (const auto& ord : out.reference_orders)
-		{
-			Json::Value a(Json::arrayValue);
-			for (int v : ord)
-				a.append(v);
-			orders.append(a);
-		}
-		root["order_labels"] = labels;
-		root["reference_orders"] = orders;
-		root["seed"] = params.random_seed;
-		std::filesystem::create_directories(output_dir);
-		const std::string rpath =
-			output_dir + "/placement_reference_orders_seed" + std::to_string(params.random_seed) + ".json";
-		std::ofstream rout(rpath);
-		Json::StreamWriterBuilder wb;
-		wb["indentation"] = "";
-		std::unique_ptr<Json::StreamWriter>(wb.newStreamWriter())->write(root, &rout);
-		RCLCPP_INFO(node->get_logger(), "[placement] wrote reference routes to %s", rpath.c_str());
-	}
-	const int K = static_cast<int>(out.reference_orders.size());
-	if (K == 0)
-	{
-		RCLCPP_ERROR(node->get_logger(), "[placement] no reference routes available -- aborting");
-		return out;
-	}
-
-	// ---- grid sweep (this shard's slice) ---------------------------------------------------
-	const int P = nx * ny * nz;
-	const int lo = std::clamp(grid_start, 0, P);
-	const int hi = grid_count < 0 ? P : std::min(P, lo + grid_count);
-	out.grid_start = lo;
-	out.grid_count = std::max(0, hi - lo);
-	RCLCPP_INFO(
-		node->get_logger(),
-		"[placement] seed %d: sweeping grid points [%d, %d) of %d (%dx%dx%d), %d routes, min-of-%d",
-		params.random_seed, lo, hi, P, nx, ny, nz, K, R);
-
-	for (int idx = lo; idx < hi && rclcpp::ok(); ++idx)
-	{
-		const int ix = idx / (ny * nz);
-		const int iy = (idx / nz) % ny;
-		const int iz = idx % nz;
-		const BaseOffset b{
-			GridCoord(ix, nx, params.bounds.x_min, params.bounds.x_max),
-			GridCoord(iy, ny, params.bounds.y_min, params.bounds.y_max),
-			GridCoord(iz, nz, params.bounds.z_min, params.bounds.z_max), 0.0, 0.0};
-
-		PlacementGridPoint gp;
-		gp.offset = {b.x, b.y, b.z};
-		gp.order_weighted_cost.assign(K, std::numeric_limits<double>::max());
-		gp.order_honest_cost.assign(K, std::numeric_limits<double>::max());
-		gp.order_num_reachable.assign(K, 0);
-		double full_wc = std::numeric_limits<double>::max();
-
-		// Per-grid-point seed-pose RNG: keeps the bulk of a point's IK-seed variation independent of
-		// the shard layout (MoveIt's own IK RNG still advances globally, so shards are not bit-exact).
-		random_numbers::RandomNumberGenerator gp_rng(
-			static_cast<unsigned int>(params.random_seed) * 1000003u + static_cast<unsigned int>(idx));
-
-		for (int r = 0; r < R && rclcpp::ok(); ++r)
-		{
-			const auto branches = CollectIkSolutions(
-				state, jmg, planning_scene_monitor, object_pose_original, tour_tcp_poses_original, cold_seeds, b, params,
-				params.max_solutions_per_candidate, &gp_rng);
-
-			int ik_reachable = 0;
-			for (const auto& br : branches)
-				ik_reachable += !br.empty();
-			gp.num_ik_reachable = std::max(gp.num_ik_reachable, ik_reachable);
-
-			for (int k = 0; k < K; ++k)
-			{
-				const InnerSolution s = SolveFixedOrder(
-					branches, b, tour_tcp_poses_original, home, home_tcp_local, params, out.reference_orders[k]);
-				if (s.weighted_cost < gp.order_weighted_cost[k])
-				{
-					gp.order_weighted_cost[k] = s.weighted_cost;
-					gp.order_honest_cost[k] = s.weighted_cost - params.unreachable_penalty * (n - s.num_reachable);
-					gp.order_num_reachable[k] = s.num_reachable;
-				}
-			}
-
-			const GtspSolution g = RunGtsp(
-				branches, b, tour_tcp_poses_original, home, home_tcp_local, params, nullptr);
-			const int g_reach = static_cast<int>(g.tour_pose_indices.size());
-			const double g_wc =
-				TourWeightedCost(
-					b, g.tour_pose_indices, g.chosen_joints, tour_tcp_poses_original, home, home_tcp_local, params) +
-				params.unreachable_penalty * (n - g_reach);
-			if (g_wc < full_wc)
-			{
-				full_wc = g_wc;
-				gp.full_weighted_cost = g_wc;
-				gp.full_honest_cost = g_wc - params.unreachable_penalty * (n - g_reach);
-				gp.full_num_reachable = g_reach;
-				gp.full_tour = g.tour_pose_indices;
-			}
-		}
-
-		if ((idx - lo) % 10 == 0 || idx + 1 == hi)
-			RCLCPP_INFO(
-				node->get_logger(),
-				"[placement] %d/%d  offset (%.3f, %.3f, %.3f)  ik %d/%d  %s wc %.2f (%d/%d)  full wc %.2f (%d/%d)",
-				idx - lo + 1, hi - lo, b.x, b.y, b.z, gp.num_ik_reachable, n, out.order_labels[0].c_str(),
-				gp.order_weighted_cost[0], gp.order_num_reachable[0], n, gp.full_weighted_cost, gp.full_num_reachable, n);
-
-		out.grid.push_back(std::move(gp));
-	}
-
-	SetObjectPose(planning_scene_monitor, object_pose_original);  // leave the scene as we found it
-	return out;
-}
-
-void ExportPlacementOrderExperimentResult(const std::string& output_dir, const PlacementOrderExperimentResult& result)
-{
-	std::filesystem::create_directories(output_dir);
-
-	Json::Value root;
-	root["seed"] = result.seed;
-	root["num_total"] = result.num_total;
-	root["unreachable_penalty"] = result.unreachable_penalty;
-
-	Json::Value shape(Json::arrayValue), gmin(Json::arrayValue), gmax(Json::arrayValue);
-	for (int v : result.grid_shape)
-		shape.append(v);
-	for (double v : result.grid_min)
-		gmin.append(v);
-	for (double v : result.grid_max)
-		gmax.append(v);
-	root["grid_shape"] = shape;
-	root["grid_min"] = gmin;
-	root["grid_max"] = gmax;
-	root["grid_start"] = result.grid_start;
-	root["grid_count"] = result.grid_count;
-
-	Json::Value labels(Json::arrayValue);
-	for (const auto& l : result.order_labels)
-		labels.append(l);
-	root["order_labels"] = labels;
-
-	Json::Value orders(Json::arrayValue);
-	for (const auto& ord : result.reference_orders)
-	{
-		Json::Value a(Json::arrayValue);
-		for (int v : ord)
-			a.append(v);
-		orders.append(a);
-	}
-	root["reference_orders"] = orders;
-
-	Json::Value grid(Json::arrayValue);
-	for (const auto& gp : result.grid)
-	{
-		Json::Value j;
-		Json::Value off(Json::arrayValue);
-		for (double v : gp.offset)
-			off.append(v);
-		j["offset"] = off;
-		j["num_ik_reachable"] = gp.num_ik_reachable;
-
-		Json::Value owc(Json::arrayValue), ohc(Json::arrayValue), onr(Json::arrayValue);
-		for (double v : gp.order_weighted_cost)
-			owc.append(v);
-		for (double v : gp.order_honest_cost)
-			ohc.append(v);
-		for (int v : gp.order_num_reachable)
-			onr.append(v);
-		j["order_weighted_cost"] = owc;
-		j["order_honest_cost"] = ohc;
-		j["order_num_reachable"] = onr;
-
-		j["full_weighted_cost"] = gp.full_weighted_cost;
-		j["full_honest_cost"] = gp.full_honest_cost;
-		j["full_num_reachable"] = gp.full_num_reachable;
-		Json::Value ft(Json::arrayValue);
-		for (int v : gp.full_tour)
-			ft.append(v);
-		j["full_tour"] = ft;
-
-		grid.append(j);
-	}
-	root["grid"] = grid;
-
-	const std::string json_path = output_dir + "/placement_experiment_seed" + std::to_string(result.seed) + "_g" +
-		std::to_string(result.grid_start) + ".json";
-	std::ofstream json_file(json_path);
-	Json::StreamWriterBuilder writer_builder;
-	writer_builder["indentation"] = "    ";
-	std::unique_ptr<Json::StreamWriter> writer(writer_builder.newStreamWriter());
-	writer->write(root, &json_file);
-
-	printf("Saved placement/order experiment JSON: %s\n", json_path.c_str());
-}
-
-void ApplyObjectOffsetToScene(
+void ApplyObjectPlacementToScene(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original, double x,
-	double y, double z, double roll, double pitch)
+	const Eigen::Matrix3d& object_rotation_nominal, double x, double y, double z, double roll, double pitch)
 {
-	Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
-	Eigen::Isometry3d xform = MakeObjectOffset(BaseOffset{x, y, z, roll, pitch});
-	SetObjectPose(planning_scene_monitor, xform * object_pose_original);
+	SetObjectPose(
+		planning_scene_monitor,
+		MakePlacement(ObjectPlacement{x, y, z, roll, pitch}) * MakeIsometry(Eigen::Vector3d::Zero(), object_rotation_nominal));
 }
 
 visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
 	const rclcpp::Time& stamp, const std::string& resolved_mesh_path, double mesh_scale,
-	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const BaseGradientResult& result)
+	const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const BaseGradientResult& result)
 {
 	visualization_msgs::msg::MarkerArray markers;
 	int id = 0;
 
-	Eigen::Isometry3d xform = MakeObjectOffset({result.x, result.y, result.z, result.roll, result.pitch});
-	Eigen::Isometry3d object_pose_original = MakeIsometry(object_translation_original, object_rotation_original);
+	const Eigen::Isometry3d xform = PlacementTransform(
+		object_translation_nominal, result.x, result.y, result.z, result.roll, result.pitch);
+	const Eigen::Isometry3d object_pose_nominal = MakeIsometry(object_translation_nominal, object_rotation_nominal);
 
 	visualization_msgs::msg::Marker mesh_marker;
 	mesh_marker.header.frame_id = "world";
@@ -2503,7 +1786,7 @@ visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
 	mesh_marker.action = visualization_msgs::msg::Marker::ADD;
 	mesh_marker.mesh_resource = "file://" + resolved_mesh_path;
 	mesh_marker.mesh_use_embedded_materials = false;
-	mesh_marker.pose = ToPoseMsg(xform * object_pose_original);
+	mesh_marker.pose = ToPoseMsg(xform * object_pose_nominal);
 	mesh_marker.scale.x = mesh_marker.scale.y = mesh_marker.scale.z = mesh_scale;
 	mesh_marker.color.r = mesh_marker.color.g = mesh_marker.color.b = 0.7f;
 	mesh_marker.color.a = 0.5f;
@@ -2525,7 +1808,7 @@ visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
 
 	for (size_t k = 0; k < result.tour_order.size(); ++k)
 	{
-		Eigen::Isometry3d local = xform * tour_tcp_poses_original[result.tour_order[k]];
+		Eigen::Isometry3d local = xform * tour_tcp_poses_nominal[result.tour_order[k]];
 
 		visualization_msgs::msg::Marker sphere;
 		sphere.header.frame_id = "world";
