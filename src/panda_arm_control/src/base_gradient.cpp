@@ -24,9 +24,9 @@ namespace
 {
 
 // ---------------------------------------------------------------------------------------------
-// Small helpers -- mirror base_placement.cpp's file-local versions of the same name/signature
+// Small helpers -- mirror bstar_placement.cpp's file-local versions of the same name/signature
 // (this codebase already duplicates such helpers rather than exporting them; see the
-// "Mirrors real_cost_planning.cpp" note in base_placement.cpp).
+// "Mirrors real_cost_planning.cpp" note in bstar_placement.cpp).
 // ---------------------------------------------------------------------------------------------
 
 // Object placement: absolute position (x, y, z, base frame) plus tilt about that position (roll about
@@ -189,7 +189,7 @@ Eigen::VectorXd ManipulabilityJointGradient(
 }
 
 // Robot-robot and robot-object pairs closer than margin, as rows d(distance)/dq with their distance.
-// Same linearization as base_placement.cpp's LinearizeCollisionConstraints.
+// Same linearization as bstar_placement.cpp's LinearizeCollisionConstraints.
 void AppendCloseRows(
 	const collision_detection::DistanceResult& res, const moveit::core::RobotState& state,
 	const moveit::core::JointModelGroup* jmg, double margin, std::vector<Eigen::RowVectorXd>& rows,

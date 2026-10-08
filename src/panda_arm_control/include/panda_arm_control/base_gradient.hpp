@@ -138,7 +138,7 @@ void ApplyObjectPlacementToScene(
 	double pitch);
 
 // Object mesh + tour polyline/waypoints re-expressed in the recommended base's frame (same idea
-// as BuildBasePlacementMarkerArray). frame_id is "world".
+// as BuildBstarPlacementMarkerArray). frame_id is "world".
 visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
 	const rclcpp::Time& stamp,
 	const std::string& resolved_mesh_path,

@@ -12,16 +12,16 @@
 
 // Base pose search bounds (x, y only -- no rotation search), applied as an object offset
 // (object-offset duality).
-struct BasePlacementBounds
+struct BstarPlacementBounds
 {
 	double x_min = -0.15, x_max = 0.15;
 	double y_min = -0.15, y_max = 0.15;
 };
 
 // Search-strategy knobs for the two-layer B* algorithm (Zhao et al., arXiv:2504.12719).
-struct BasePlacementParams
+struct BstarPlacementParams
 {
-	BasePlacementBounds bounds;
+	BstarPlacementBounds bounds;
 
 	int num_restarts = 1;
 	int random_seed = 42;
@@ -81,7 +81,7 @@ struct BasePlacementParams
 	double visualize_progress_delay_sec = 0.0;
 };
 
-struct BasePlacementResult
+struct BstarPlacementResult
 {
 	bool ok = false;
 	int num_reachable = 0;
@@ -99,7 +99,7 @@ struct BasePlacementResult
 // constraint tightening over per-point relaxed base poses, inner-layer trust-region SLP (OSQP).
 // Runs num_restarts independent instances, keeps the lowest-cost feasible one. Moves the
 // registered "object" collision object during the search and restores it before returning.
-BasePlacementResult SolveBasePlacement(
+BstarPlacementResult SolveBstarPlacement(
 	const rclcpp::Node::SharedPtr& node,
 	const moveit::core::RobotModelConstPtr& robot_model,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
@@ -108,13 +108,13 @@ BasePlacementResult SolveBasePlacement(
 	const Eigen::Matrix3d& object_rotation_original,
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
 	const std::vector<double>& start_reference_joints,
-	const BasePlacementParams& params);
+	const BstarPlacementParams& params);
 
-// Writes base_placement_result.json to output_dir.
-void ExportBasePlacementResult(const std::string& output_dir, const BasePlacementResult& result);
+// Writes bstar_placement_result.json to output_dir.
+void ExportBstarPlacementResult(const std::string& output_dir, const BstarPlacementResult& result);
 
 // Moves the registered "object" to its nominal pose adjusted by T(x, y, 0).
-void ApplyBasePlacementToScene(
+void ApplyBstarPlacementToScene(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Vector3d& object_translation_original,
 	const Eigen::Matrix3d& object_rotation_original,
@@ -122,11 +122,11 @@ void ApplyBasePlacementToScene(
 	double y);
 
 // Object mesh + tour polyline/waypoints re-expressed at the recommended offset. frame_id "world".
-visualization_msgs::msg::MarkerArray BuildBasePlacementMarkerArray(
+visualization_msgs::msg::MarkerArray BuildBstarPlacementMarkerArray(
 	const rclcpp::Time& stamp,
 	const std::string& resolved_mesh_path,
 	double mesh_scale,
 	const Eigen::Vector3d& object_translation_original,
 	const Eigen::Matrix3d& object_rotation_original,
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original,
-	const BasePlacementResult& result);
+	const BstarPlacementResult& result);

@@ -1,4 +1,4 @@
-#include "panda_arm_control/base_placement.hpp"
+#include "panda_arm_control/bstar_placement.hpp"
 
 #include <algorithm>
 #include <array>
@@ -88,12 +88,12 @@ struct XYOffset
 	double x = 0.0, y = 0.0;
 };
 
-XYOffset RandomInBounds(const BasePlacementBounds& b, std::mt19937& rng)
+XYOffset RandomInBounds(const BstarPlacementBounds& b, std::mt19937& rng)
 {
 	return {RandomUniform(rng, b.x_min, b.x_max), RandomUniform(rng, b.y_min, b.y_max)};
 }
 
-XYOffset ClampToBounds(XYOffset o, const BasePlacementBounds& b)
+XYOffset ClampToBounds(XYOffset o, const BstarPlacementBounds& b)
 {
 	o.x = std::clamp(o.x, b.x_min, b.x_max);
 	o.y = std::clamp(o.y, b.y_min, b.y_max);
@@ -121,7 +121,7 @@ Eigen::Vector3d OrientationError(const Eigen::Matrix3d& target, const Eigen::Mat
 // ---------------------------------------------------------------------------------------------
 
 void PublishRelaxationProgress(
-	const rclcpp::Node::SharedPtr& node, const BasePlacementParams& params, const std::vector<XYOffset>& offsets,
+	const rclcpp::Node::SharedPtr& node, const BstarPlacementParams& params, const std::vector<XYOffset>& offsets,
 	const std::vector<bool>& placed, const XYOffset& mean)
 {
 	if (!params.progress_pub)
@@ -135,7 +135,7 @@ void PublishRelaxationProgress(
 		visualization_msgs::msg::Marker dot;
 		dot.header.frame_id = "world";
 		dot.header.stamp = stamp;
-		dot.ns = "base_placement_relaxation";
+		dot.ns = "bstar_placement_relaxation";
 		dot.id = id++;
 		dot.type = visualization_msgs::msg::Marker::SPHERE;
 		dot.action = visualization_msgs::msg::Marker::ADD;
@@ -153,7 +153,7 @@ void PublishRelaxationProgress(
 	visualization_msgs::msg::Marker mean_marker;
 	mean_marker.header.frame_id = "world";
 	mean_marker.header.stamp = stamp;
-	mean_marker.ns = "base_placement_relaxation_mean";
+	mean_marker.ns = "bstar_placement_relaxation_mean";
 	mean_marker.id = id++;
 	mean_marker.type = visualization_msgs::msg::Marker::SPHERE;
 	mean_marker.action = visualization_msgs::msg::Marker::ADD;
@@ -267,8 +267,8 @@ bool FindInitialIkForViewpoint(
 	const moveit::core::JointModelGroup* jmg, const moveit::core::LinkModel* tool0_link,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Isometry3d& object_pose_original, const Eigen::Isometry3d& target_pose_original,
-	const std::vector<double>& seed_joints, const XYOffset& seed_xy_offset, const BasePlacementBounds& bounds,
-	const BasePlacementParams& params, std::vector<double>* out_joints, XYOffset* out_xy_offset,
+	const std::vector<double>& seed_joints, const XYOffset& seed_xy_offset, const BstarPlacementBounds& bounds,
+	const BstarPlacementParams& params, std::vector<double>* out_joints, XYOffset* out_xy_offset,
 	double* out_best_residual = nullptr, std::string* out_stop_reason = nullptr, int* out_iters_used = nullptr)
 {
 	const int dof = static_cast<int>(jmg->getVariableCount());
@@ -478,7 +478,7 @@ LpStep SolveTrustRegionLp(
 	const moveit::core::RobotModelConstPtr& robot_model, const moveit::core::JointModelGroup* jmg,
 	const std::vector<std::vector<double>>& q0, const std::vector<XYOffset>& xy_offset0,
 	const std::vector<FkLinearization>& fk, const std::vector<std::vector<CollisionRow>>& collision,
-	const BasePlacementBounds& bounds, double mu, double trust_region, double trust_region_reg,
+	const BstarPlacementBounds& bounds, double mu, double trust_region, double trust_region_reg,
 	double fk_penalty_weight)
 {
 	const int n = static_cast<int>(q0.size());
@@ -782,7 +782,7 @@ InnerResult RunInnerSlp(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
 	const moveit::core::JointModelGroup* jmg, const moveit::core::LinkModel* tool0_link,
 	const Eigen::Isometry3d& object_pose_original, const std::vector<Eigen::Isometry3d>& targets,
-	std::vector<std::vector<double>> q, std::vector<XYOffset> xy_offset, double mu, const BasePlacementParams& params,
+	std::vector<std::vector<double>> q, std::vector<XYOffset> xy_offset, double mu, const BstarPlacementParams& params,
 	int restart_number, int outer_number)
 {
 	moveit::core::RobotState state(robot_model);
@@ -916,7 +916,7 @@ RestartResult RunOuterRelaxation(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
 	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
 	const std::vector<Eigen::Isometry3d>& targets, const std::vector<double>& start_reference_joints,
-	const BasePlacementParams& params, std::mt19937& rng)
+	const BstarPlacementParams& params, std::mt19937& rng)
 {
 	const int n = static_cast<int>(targets.size());
 	const Eigen::Isometry3d object_pose_original =
@@ -1092,12 +1092,12 @@ RestartResult RunOuterRelaxation(
 
 }  // namespace
 
-BasePlacementResult SolveBasePlacement(
+BstarPlacementResult SolveBstarPlacement(
 	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
 	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const std::vector<double>& start_reference_joints,
-	const BasePlacementParams& params)
+	const BstarPlacementParams& params)
 {
 	const Eigen::Isometry3d object_pose_original =
 		MakeTransform(object_translation_original, object_rotation_original);
@@ -1131,7 +1131,7 @@ BasePlacementResult SolveBasePlacement(
 
 	SetObjectPose(planning_scene_monitor, object_pose_original);
 
-	BasePlacementResult result;
+	BstarPlacementResult result;
 	result.num_total = n;
 	if (have_best)
 	{
@@ -1160,7 +1160,7 @@ BasePlacementResult SolveBasePlacement(
 	return result;
 }
 
-void ApplyBasePlacementToScene(
+void ApplyBstarPlacementToScene(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original, double x,
 	double y)
@@ -1170,7 +1170,7 @@ void ApplyBasePlacementToScene(
 	SetObjectPose(planning_scene_monitor, Eigen::Translation3d(x, y, 0.0) * object_pose_original);
 }
 
-void ExportBasePlacementResult(const std::string& output_dir, const BasePlacementResult& result)
+void ExportBstarPlacementResult(const std::string& output_dir, const BstarPlacementResult& result)
 {
 	std::filesystem::create_directories(output_dir);
 
@@ -1198,7 +1198,7 @@ void ExportBasePlacementResult(const std::string& output_dir, const BasePlacemen
 	}
 	root["joint_solutions"] = joints;
 
-	const std::string json_path = output_dir + "/base_placement_result.json";
+	const std::string json_path = output_dir + "/bstar_placement_result.json";
 	std::ofstream json_file(json_path);
 	Json::StreamWriterBuilder writer_builder;
 	writer_builder["indentation"] = "    ";
@@ -1208,10 +1208,10 @@ void ExportBasePlacementResult(const std::string& output_dir, const BasePlacemen
 	printf("Saved base placement result JSON: %s\n", json_path.c_str());
 }
 
-visualization_msgs::msg::MarkerArray BuildBasePlacementMarkerArray(
+visualization_msgs::msg::MarkerArray BuildBstarPlacementMarkerArray(
 	const rclcpp::Time& stamp, const std::string& resolved_mesh_path, double mesh_scale,
 	const Eigen::Vector3d& object_translation_original, const Eigen::Matrix3d& object_rotation_original,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const BasePlacementResult& result)
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_original, const BstarPlacementResult& result)
 {
 	visualization_msgs::msg::MarkerArray markers;
 	int id = 0;

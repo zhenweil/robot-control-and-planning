@@ -14,7 +14,7 @@ def generate_launch_description():
         "use_rviz",
         default_value="false",
         description="Launch RViz. Set to true if no other launch file is already "
-        "providing it (panda.rviz shows /base_placement_markers too).",
+        "providing it (panda.rviz shows /bstar_placement_markers too).",
     )
     use_rviz = LaunchConfiguration("use_rviz")
 
@@ -33,7 +33,7 @@ def generate_launch_description():
         "visualize_progress_delay_sec",
         default_value="0.0",
         description="Seconds to pause after each refinement-loop iteration's progress publish "
-        "(topic /base_placement_progress_markers), so the search's convergence can actually be "
+        "(topic /bstar_placement_progress_markers), so the search's convergence can actually be "
         "watched in RViz instead of flashing by. 0.0 (default) adds no delay; try e.g. 0.5.",
     )
     visualize_progress_delay_sec = ParameterValue(
@@ -105,15 +105,15 @@ def generate_launch_description():
         .to_moveit_configs()
     )
 
-    base_placement_params = {
+    bstar_placement_params = {
         "mesh_path": "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl",
         "mesh_scale": 0.01,
         "group_name": "panda_arm",
         # Where a prior viewpoint_planner_* run (e.g. viewpoint_planner_hgtsp) exported the
         # ordered tour's selected_robot_poses.json -- this node's input.
         "tour_input_dir": "/tmp/viewpoint_planner_output",
-        "output_dir": "/tmp/base_placement_output",
-        # Base-offset search box + two-layer B* search-strategy knobs -- see base_placement.hpp.
+        "output_dir": "/tmp/bstar_placement_output",
+        # Base-offset search box + two-layer B* search-strategy knobs -- see bstar_placement.hpp.
         **bounds,
         "bp_num_restarts": num_restarts,
         **outer_inner,
@@ -138,12 +138,12 @@ def generate_launch_description():
         [FindPackageShare("panda_arm_control"), "config", "object_pose.yaml"]
     )
 
-    base_placement_node = Node(
+    bstar_placement_node = Node(
         package="panda_arm_control",
-        executable="base_placement",
-        name="base_placement",
+        executable="bstar_placement",
+        name="bstar_placement",
         output="screen",
-        parameters=[moveit_config.to_dict(), base_placement_params, object_pose_config],
+        parameters=[moveit_config.to_dict(), bstar_placement_params, object_pose_config],
         # Makes MoveIt's IK (KDL) deterministic -- it otherwise re-seeds from /dev/urandom.
         additional_env={"RANDOM_SEED": random_seed},
     )
@@ -171,7 +171,7 @@ def generate_launch_description():
             fd_jacobian_check_arg,
             *bound_args,
             *outer_inner_args,
-            base_placement_node,
+            bstar_placement_node,
             rviz_node,
         ]
     )

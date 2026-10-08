@@ -14,7 +14,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
-#include "panda_arm_control/base_placement.hpp"
+#include "panda_arm_control/bstar_placement.hpp"
 #include "panda_arm_control/real_cost_planning.hpp"
 #include "panda_arm_control/viewpoint_io.hpp"
 #include "panda_arm_control/viewpoint_types.hpp"
@@ -33,7 +33,7 @@ struct Params
 	// Directory a prior viewpoint_planner_* run exported selected_robot_poses.json into --
 	// that ordered tour is this node's input.
 	std::string tour_input_dir = "/tmp/viewpoint_planner_output";
-	std::string output_dir = "/tmp/base_placement_output";
+	std::string output_dir = "/tmp/bstar_placement_output";
 
 	// Base-offset search box (x, y meters -- no rotation search), relative to the object's nominal pose.
 	double bp_x_min = -0.15, bp_x_max = 0.15;
@@ -68,14 +68,14 @@ struct Params
 	double ik_timeout = 3.0;
 	int random_seed = 42;
 	// Seconds to pause after each refinement-loop iteration's progress publish, so the
-	// convergence can actually be watched in RViz on /base_placement_progress_markers. 0.0
+	// convergence can actually be watched in RViz on /bstar_placement_progress_markers. 0.0
 	// (default) adds no delay -- iterations still publish, just at full search speed.
 	double visualize_progress_delay_sec = 0.0;
 
 	// Drives the real robot through the recommended placement's tour by moving the *object*
 	// (in this local scene, not physically) into the frame the base would see if it had actually
 	// been placed at the recommended offset. Only turn this on once you've verified that matches
-	// reality -- see ApplyBasePlacementToScene's doc comment. Defaults to false since driving the
+	// reality -- see ApplyBstarPlacementToScene's doc comment. Defaults to false since driving the
 	// real robot relative to a hypothetical, unverified object placement is unsafe.
 	bool execute_on_robot = false;
 	double execution_planning_time = 5.0;
@@ -121,11 +121,11 @@ std::vector<Eigen::Isometry3d> LoadTourTcpPoses(const std::string& tour_input_di
 
 } // namespace
 
-class BasePlacementNode : public rclcpp::Node
+class BstarPlacementNode : public rclcpp::Node
 {
 public:
-	explicit BasePlacementNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
-		: Node("base_placement", rclcpp::NodeOptions(options).automatically_declare_parameters_from_overrides(true))
+	explicit BstarPlacementNode(const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
+		: Node("bstar_placement", rclcpp::NodeOptions(options).automatically_declare_parameters_from_overrides(true))
 	{
 	}
 
@@ -145,10 +145,10 @@ public:
 		this->robot_state->copyJointGroupPositions(this->jmg, this->home_joint_values);
 
 		this->marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>(
-			"/base_placement_markers", rclcpp::QoS(1).transient_local());
+			"/bstar_placement_markers", rclcpp::QoS(1).transient_local());
 
 		this->progress_marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>(
-			"/base_placement_progress_markers", rclcpp::QoS(1).transient_local());
+			"/bstar_placement_progress_markers", rclcpp::QoS(1).transient_local());
 
 		if (this->params.execute_on_robot)
 		{
@@ -309,7 +309,7 @@ private:
 			this->shared_from_this(), this->resolved_mesh_path, this->params.mesh_scale, object_translation_world,
 			object_rotation_world);
 
-		BasePlacementParams bp_params;
+		BstarPlacementParams bp_params;
 		bp_params.bounds.x_min = this->params.bp_x_min;
 		bp_params.bounds.x_max = this->params.bp_x_max;
 		bp_params.bounds.y_min = this->params.bp_y_min;
@@ -344,13 +344,13 @@ private:
 		RCLCPP_INFO(
 			this->get_logger(), "B*: optimizing the base offset (x,y) over %zu viewpoints...", tour_tcp_poses.size());
 
-		BasePlacementResult result = SolveBasePlacement(
+		BstarPlacementResult result = SolveBstarPlacement(
 			this->shared_from_this(), this->robot_model, local_scene, this->params.group_name,
 			object_translation_world, object_rotation_world, tour_tcp_poses, this->home_joint_values, bp_params);
 
-		ExportBasePlacementResult(this->params.output_dir, result);
+		ExportBstarPlacementResult(this->params.output_dir, result);
 
-		this->marker_array = BuildBasePlacementMarkerArray(
+		this->marker_array = BuildBstarPlacementMarkerArray(
 			this->now(), this->resolved_mesh_path, this->params.mesh_scale, object_translation_world,
 			object_rotation_world, tour_tcp_poses, result);
 		this->marker_pub->publish(this->marker_array);
@@ -371,7 +371,7 @@ private:
 				"software -- only correct if the physical object has actually been re-fixtured to match.",
 				result.x, result.y);
 
-			ApplyBasePlacementToScene(local_scene, object_translation_world, object_rotation_world, result.x, result.y);
+			ApplyBstarPlacementToScene(local_scene, object_translation_world, object_rotation_world, result.x, result.y);
 
 			Eigen::Isometry3d object_offset = Eigen::Isometry3d::Identity();
 			object_offset.translation() = Eigen::Vector3d(result.x, result.y, 0.0);
@@ -405,7 +405,7 @@ private:
 int main(int argc, char* argv[])
 {
 	rclcpp::init(argc, argv);
-	auto node = std::make_shared<BasePlacementNode>();
+	auto node = std::make_shared<BstarPlacementNode>();
 
 	std::thread spin_thread([node]() { rclcpp::spin(node); });
 

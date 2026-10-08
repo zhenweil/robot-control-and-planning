@@ -74,11 +74,11 @@ add_executable(viewpoint_planner_hgtsp
 	src/viewpoint_planner_hgtsp_node.cpp
 	)
 
-add_executable(base_placement
-	src/base_placement.cpp
+add_executable(bstar_placement
+	src/bstar_placement.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
-	src/base_placement_node.cpp
+	src/bstar_placement_node.cpp
 	)
 
 add_executable(base_gradient
@@ -88,7 +88,7 @@ add_executable(base_gradient
 	src/base_gradient_node.cpp
 	)
 
-foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp base_placement base_gradient)
+foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient)
 	target_include_directories(${viewpoint_planner_target} PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		)
@@ -117,14 +117,14 @@ foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt
 		)
 endforeach()
 
-# base_placement's B* implementation solves a sequence of linear programs with OSQP.
-target_link_libraries(base_placement osqp::osqp)
+# bstar_placement's B* implementation solves a sequence of linear programs with OSQP.
+target_link_libraries(bstar_placement osqp::osqp)
 
 install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp base_placement base_gradient
+install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient
 	DESTINATION lib/${PROJECT_NAME}
 	)
 
