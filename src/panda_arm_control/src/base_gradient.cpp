@@ -23,12 +23,6 @@
 namespace
 {
 
-// ---------------------------------------------------------------------------------------------
-// Small helpers -- mirror bstar_placement.cpp's file-local versions of the same name/signature
-// (this codebase already duplicates such helpers rather than exporting them; see the
-// "Mirrors real_cost_planning.cpp" note in bstar_placement.cpp).
-// ---------------------------------------------------------------------------------------------
-
 // Object placement: absolute position (x, y, z, base frame) plus tilt about that position (roll about
 // base x, pitch about base y), relative to the nominal orientation.
 struct ObjectPlacement
@@ -107,12 +101,9 @@ ObjectPlacement ProjectToBounds(ObjectPlacement p, const BaseGradientBounds& b)
 	return p;
 }
 
-// The offset gradient / step vector: [d/dx, d/dy, d/dz, d/droll, d/dpitch].
-using OffsetVec = Eigen::Matrix<double, 5, 1>;
-
-OffsetVec ToOffsetVec(const ObjectPlacement& a, const ObjectPlacement& b)  // a - b, component-wise
+Eigen::Matrix<double, 5, 1> ToOffsetVec(const ObjectPlacement& a, const ObjectPlacement& b)  // a - b, component-wise
 {
-	OffsetVec v;
+	Eigen::Matrix<double, 5, 1> v;
 	v << a.x - b.x, a.y - b.y, a.z - b.z, a.roll - b.roll, a.pitch - b.pitch;
 	return v;
 }
@@ -124,18 +115,6 @@ ObjectPlacement PerturbOffset(const ObjectPlacement& center, std::mt19937& rng, 
 	std::normal_distribution<double> nr(0.0, sigma_m / std::max(1e-6, rot_scale));
 	return {center.x + nm(rng), center.y + nm(rng), center.z + nm(rng), center.roll + nr(rng),
 			center.pitch + nr(rng)};
-}
-
-// Mirrors real_cost_planning.cpp's AreJointSolutionsSimilar (combined L2, radians).
-bool AreJointSolutionsSimilar(const std::vector<double>& a, const std::vector<double>& b, double threshold_rad)
-{
-	double dist_sq = 0.0;
-	for (size_t i = 0; i < a.size() && i < b.size(); ++i)
-	{
-		double d = a[i] - b[i];
-		dist_sq += d * d;
-	}
-	return std::sqrt(dist_sq) < threshold_rad;
 }
 
 double JointL2Distance(const std::vector<double>& a, const std::vector<double>& b)
@@ -426,7 +405,7 @@ std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 			state.copyJointGroupPositions(jmg, s);
 			bool dup = false;
 			for (const auto& e : sols)
-				if (AreJointSolutionsSimilar(e, s, 0.1))  // ~5.7 deg, matches real_cost_planning.cpp
+				if (JointL2Distance(e, s) < 0.1)  // same IK solution: ~5.7 deg, matches real_cost_planning.cpp
 				{
 					dup = true;
 					break;
@@ -961,7 +940,7 @@ Eigen::Matrix<double, 6, 5> OffsetTwist(const ObjectPlacement& base, const Eigen
 
 // dw/db: how an object placement change moves one viewpoint's manipulability, the arm tracking it from q.
 // Its positive side keeps the viewpoint away from the reach edge.
-OffsetVec ManipulabilityOffsetGradient(
+Eigen::Matrix<double, 5, 1> ManipulabilityOffsetGradient(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const moveit::core::LinkModel* tool0_link, const ObjectPlacement& base, const Eigen::Vector3d& target_pos,
 	const std::vector<double>& q, double damping)
@@ -995,7 +974,7 @@ OffsetVec ManipulabilityOffsetGradient(
 // -weight * (dw/dq)^T dq/db, with dw/dq from joint-space central differences.
 // ---------------------------------------------------------------------------------------------
 
-OffsetVec AnalyticGradient(
+Eigen::Matrix<double, 5, 1> AnalyticGradient(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const moveit::core::LinkModel* tool0_link, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
 	const std::vector<int>& tour, const std::vector<std::vector<double>>& joints, const std::vector<double>& home_joints,
@@ -1029,7 +1008,7 @@ OffsetVec AnalyticGradient(
 	}
 
 	const size_t dof = home_joints.size();
-	OffsetVec g = OffsetVec::Zero();
+	Eigen::Matrix<double, 5, 1> g = Eigen::Matrix<double, 5, 1>::Zero();
 	for (size_t k = 0; k < n; ++k)
 	{
 		// d(-lambda w - mu log w)/db = -(lambda + mu / w) (dq/db)^T dw/dq
@@ -1095,7 +1074,7 @@ OffsetVec AnalyticGradient(
 }
 
 // Central-difference gradient of the objective via re-tracked IK -- cross-check only.
-OffsetVec FiniteDifferenceGradient(
+Eigen::Matrix<double, 5, 1> FiniteDifferenceGradient(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
@@ -1103,7 +1082,7 @@ OffsetVec FiniteDifferenceGradient(
 	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params)
 {
 	const double eps = params.fd_epsilon;
-	OffsetVec g = OffsetVec::Constant(std::nan(""));
+	Eigen::Matrix<double, 5, 1> g = Eigen::Matrix<double, 5, 1>::Constant(std::nan(""));
 	for (int axis = 0; axis < 5; ++axis)
 	{
 		ObjectPlacement bp = base, bm = base;
@@ -1402,13 +1381,13 @@ BaseGradientResult SolveBaseGradient(
 			// so the descent ends at the final objective without waiting out the decay.
 			const bool annealing = params.manipulability_weight > lambda_final * (1.0 + 1e-6);
 
-			OffsetVec g = AnalyticGradient(
+			Eigen::Matrix<double, 5, 1> g = AnalyticGradient(
 				state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, start_reference_joints,
 				home_tcp_local, base, params, cur.missed_vp, cur.missed_gap);
 
 			if (params.fd_gradient_check)
 			{
-				OffsetVec g_fd = FiniteDifferenceGradient(
+				Eigen::Matrix<double, 5, 1> g_fd = FiniteDifferenceGradient(
 					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, cur.tour,
 					cur.joints, start_reference_joints, home_tcp_local, base, params);
 				RCLCPP_INFO(
@@ -1421,7 +1400,7 @@ BaseGradientResult SolveBaseGradient(
 			// Descend in a metric where 1 rad of tip/tilt equals rot_scale meters. Locked axes (min == max)
 			// get no share of the step.
 			const BaseGradientBounds& bb = params.bounds;
-			auto to_u = [&](OffsetVec v) {
+			auto to_u = [&](Eigen::Matrix<double, 5, 1> v) {
 				v(3) /= rot_scale;
 				v(4) /= rot_scale;
 				if (bb.z_min == bb.z_max)
@@ -1432,7 +1411,7 @@ BaseGradientResult SolveBaseGradient(
 					v(4) = 0.0;
 				return v;
 			};
-			const OffsetVec g_u = to_u(g);
+			const Eigen::Matrix<double, 5, 1> g_u = to_u(g);
 			double gnorm = g_u.norm();
 			if (gnorm < 1e-6)
 			{
@@ -1446,7 +1425,7 @@ BaseGradientResult SolveBaseGradient(
 			// Backtracking line search. Probes use the quick single-IK solve and are compared with the
 			// same quick solve at the current point, so the comparison is fair; only the accepted
 			// offset gets a full solve, and it is kept only if it beats the current full solution.
-			OffsetVec dir_u = -g_u / gnorm;
+			Eigen::Matrix<double, 5, 1> dir_u = -g_u / gnorm;
 			seeds = SeedsFromSolution(cur, fallback_seed, static_cast<size_t>(n));
 			for (int v : cur.missed_vp)
 			{
@@ -1466,7 +1445,7 @@ BaseGradientResult SolveBaseGradient(
 			InnerSolution next;
 			// Steering: when a probe loses a reached viewpoint, remove the part of the direction that lowers
 			// its manipulability (pushes it to the reach edge) and retry the same step.
-			std::vector<OffsetVec> blocked;  // orthonormal, step metric
+			std::vector<Eigen::Matrix<double, 5, 1>> blocked;  // orthonormal, step metric
 			int num_steers = 0;
 			const int kMaxSteers = 3;
 			for (int ls = 0; ls < params.max_line_search_iters;)
@@ -1499,12 +1478,12 @@ BaseGradientResult SolveBaseGradient(
 							continue;  // already missed at the current offset
 						const Eigen::Vector3d p =
 							(MakePlacement(base) * tour_poses_obj[static_cast<size_t>(v)]).translation();
-						OffsetVec h = to_u(ManipulabilityOffsetGradient(
+						Eigen::Matrix<double, 5, 1> h = to_u(ManipulabilityOffsetGradient(
 							state, jmg, tool0_link, base, p, cur.joints[static_cast<size_t>(it - cur.tour.begin())],
 							params.jacobian_damping));
 						if (dir_u.dot(h) >= 0.0)
 							continue;  // the step doesn't lower its manipulability: lost for another reason
-						for (const OffsetVec& e : blocked)
+						for (const Eigen::Matrix<double, 5, 1>& e : blocked)
 							h -= h.dot(e) * e;
 						if (h.norm() < 1e-9)
 							continue;
@@ -1514,8 +1493,8 @@ BaseGradientResult SolveBaseGradient(
 					if (steered)
 					{
 						++num_steers;
-						OffsetVec d = -g_u / gnorm;
-						for (const OffsetVec& e : blocked)
+						Eigen::Matrix<double, 5, 1> d = -g_u / gnorm;
+						for (const Eigen::Matrix<double, 5, 1>& e : blocked)
 							d -= d.dot(e) * e;
 						if (d.norm() < 0.1)
 							break;  // under 10% of the descent direction keeps every viewpoint: stuck
@@ -1561,7 +1540,7 @@ BaseGradientResult SolveBaseGradient(
 				break;
 			}
 
-			OffsetVec du = ToOffsetVec(b_new, base);
+			Eigen::Matrix<double, 5, 1> du = ToOffsetVec(b_new, base);
 			du(3) *= rot_scale;
 			du(4) *= rot_scale;
 			double base_move = du.norm();
