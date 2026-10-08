@@ -148,28 +148,42 @@ double Manipulability(
 	return std::sqrt(std::max(0.0, (J * J.transpose()).determinant()));
 }
 
-// dw/dq by central differences in joint space.
+// Analytic dw/dq: dw/dq_i = w * tr((J J^T)^-1 J dJ_i^T). For revolute joints, column j of dJ/dq_i is
+// [z_min(i,j) x Jv_max(i,j); i < j ? z_i x z_j : 0], built from J itself.
 Eigen::VectorXd ManipulabilityJointGradient(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const moveit::core::LinkModel* tool0_link, const std::vector<double>& q)
 {
-	const double eps = 1e-6;
-	Eigen::VectorXd g(q.size());
-	std::vector<double> qp = q, qm = q;
-	for (size_t i = 0; i < q.size(); ++i)
+	state.setJointGroupPositions(jmg, q);
+	state.update();
+	Eigen::MatrixXd J;  // 6 x n, [linear; angular] in the base frame
+	state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
+	const int n = static_cast<int>(J.cols());
+	const Eigen::MatrixXd A = J * J.transpose();
+	const double w = std::sqrt(std::max(0.0, A.determinant()));
+	Eigen::VectorXd g = Eigen::VectorXd::Zero(n);
+	if (w < 1e-12)
+		return g;
+	const Eigen::MatrixXd M = A.ldlt().solve(J);  // (J J^T)^-1 J
+	Eigen::MatrixXd dJ(6, n);
+	for (int i = 0; i < n; ++i)
 	{
-		qp[i] = q[i] + eps;
-		qm[i] = q[i] - eps;
-		g(i) = (Manipulability(state, jmg, tool0_link, qp) - Manipulability(state, jmg, tool0_link, qm)) / (2.0 * eps);
-		qp[i] = q[i];
-		qm[i] = q[i];
+		dJ.setZero();
+		for (int j = 0; j < n; ++j)
+		{
+			const int lo = std::min(i, j), hi = std::max(i, j);
+			dJ.col(j).head<3>() = J.col(lo).tail<3>().cross(J.col(hi).head<3>());
+			if (i < j)
+				dJ.col(j).tail<3>() = J.col(i).tail<3>().cross(J.col(j).tail<3>());
+		}
+		g(i) = w * M.cwiseProduct(dJ).sum();  // tr(M dJ^T)
 	}
 	return g;
 }
 
 // Robot-robot and robot-object pairs closer than margin, as rows d(distance)/dq with their distance.
 // Same linearization as bstar_placement.cpp's LinearizeCollisionConstraints.
-void AppendCloseRows(
+void ClosePairSeparationGradients(
 	const collision_detection::DistanceResult& res, const moveit::core::RobotState& state,
 	const moveit::core::JointModelGroup* jmg, double margin, std::vector<Eigen::RowVectorXd>& rows,
 	std::vector<double>& dists)
@@ -257,8 +271,8 @@ ClosestIkResult CollisionAwareClosestIk(
 			req.acm = &locked_scene->getAllowedCollisionMatrix();
 			locked_scene->getCollisionEnv()->distanceSelf(req, self_res, state);
 			locked_scene->getCollisionEnv()->distanceRobot(req, world_res, state);
-			AppendCloseRows(self_res, state, jmg, margin, rows, dists);
-			AppendCloseRows(world_res, state, jmg, margin, rows, dists);
+			ClosePairSeparationGradients(self_res, state, jmg, margin, rows, dists);
+			ClosePairSeparationGradients(world_res, state, jmg, margin, rows, dists);
 		}
 		if (gap < best.gap && IsStateCollisionFree(planning_scene_monitor, &state, jmg, q.data()))
 		{
