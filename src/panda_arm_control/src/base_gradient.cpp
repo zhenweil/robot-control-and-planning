@@ -372,17 +372,7 @@ double WeightedEdgeCost(
 		params.max_joint_deviation_weight * MaxJointDeviation(qa, qb);
 }
 
-// ---------------------------------------------------------------------------------------------
-// IK-branch collection
-// ---------------------------------------------------------------------------------------------
-
-// Up to `max_solutions` distinct collision-free IK solutions for every tour pose, at base `base`.
-// Object is moved into `base`'s frame once up front. Empty inner vector for a pose that has no
-// feasible solution at this base.
-//
-// seed_per_viewpoint[i] is the warm start for pose i's first IK attempt -- passing the previous
-// base's solution for that pose keeps q_i(b) on a continuous IK branch as the base moves, which
-// is what makes the objective (and hence the gradient) meaningful across iterations.
+// Sample IK candidates for each viewpoint. Sample based on previous solution if not the first run.
 std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
@@ -397,13 +387,13 @@ std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 								 moveit::core::RobotState* s, const moveit::core::JointModelGroup* g,
 								 const double* jp) { return IsStateCollisionFree(planning_scene_monitor, s, g, jp); };
 
-	std::vector<std::vector<std::vector<double>>> branches(tour_poses_obj.size());
+	std::vector<std::vector<std::vector<double>>> ik_solutions(tour_poses_obj.size());
 	const int max_sol = std::max(1, max_solutions);
 
 	for (size_t i = 0; i < tour_poses_obj.size(); ++i)
 	{
 		geometry_msgs::msg::Pose target_local = ToPoseMsg(xform * tour_poses_obj[i]);
-		std::vector<std::vector<double>>& sols = branches[i];
+		std::vector<std::vector<double>>& sols = ik_solutions[i];
 
 		state.setJointGroupPositions(jmg, seed_per_viewpoint[i]);
 		if (state.setFromIK(jmg, target_local, "tool0", params.ik_timeout, validity_callback))
@@ -439,7 +429,7 @@ std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 				sols.push_back(std::move(s));
 		}
 	}
-	return branches;
+	return ik_solutions;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -619,7 +609,7 @@ struct GtspSolution
 // and the cheaper result is kept -- so a base step can never make the tour worse just because the
 // heuristic re-ordered it, which is what caused the cost to bounce between iterations.
 GtspSolution FindTourOrder(
-	const std::vector<std::vector<std::vector<double>>>& branches, const ObjectPlacement& base,
+	const std::vector<std::vector<std::vector<double>>>& ik_solutions, const ObjectPlacement& base,
 	const std::vector<Eigen::Isometry3d>& tour_poses_obj, const std::vector<double>& home_joints,
 	const Eigen::Vector3d& home_tcp_local, const BaseGradientParams& params,
 	const std::vector<int>* warm_order = nullptr, const std::vector<std::vector<double>>* node_cost = nullptr)
@@ -630,15 +620,15 @@ GtspSolution FindTourOrder(
 	ctx.home_joints = &home_joints;
 	ctx.home_tcp_local = home_tcp_local;
 	ctx.params = &params;
-	std::vector<int> group_of_viewpoint(branches.size(), -1);
-	for (size_t i = 0; i < branches.size(); ++i)
+	std::vector<int> group_of_viewpoint(ik_solutions.size(), -1);
+	for (size_t i = 0; i < ik_solutions.size(); ++i)
 	{
-		if (branches[i].empty())
+		if (ik_solutions[i].empty())
 			continue;
 		group_of_viewpoint[i] = static_cast<int>(ctx.group_pose_index.size());
 		ctx.group_pose_index.push_back(static_cast<int>(i));
 		std::vector<const std::vector<double>*> js;
-		for (const auto& b : branches[i])
+		for (const auto& b : ik_solutions[i])
 			js.push_back(&b);
 		ctx.joints_by_group.push_back(std::move(js));
 		ctx.tcp_local_by_group.push_back((xform * tour_poses_obj[i]).translation());
@@ -745,7 +735,7 @@ InnerSolution InnerSolve(
 	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params,
 	const std::vector<int>* warm_order, int max_solutions)
 {
-	std::vector<std::vector<std::vector<double>>> branches = CollectIkSolutions(
+	std::vector<std::vector<std::vector<double>>> ik_solutions = CollectIkSolutions(
 		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seed_per_viewpoint, base,
 		params, max_solutions);
 	const moveit::core::LinkModel* tool0_link = state.getRobotModel()->getLinkModel("tool0");
@@ -759,9 +749,9 @@ InnerSolution InnerSolve(
 	std::vector<std::vector<double>> missed_q;
 	int num_rescued = 0, num_no_free = 0;
 	const Eigen::Isometry3d xform = MakePlacement(base);
-	for (size_t i = 0; i < branches.size(); ++i)
+	for (size_t i = 0; i < ik_solutions.size(); ++i)
 	{
-		if (!branches[i].empty())
+		if (!ik_solutions[i].empty())
 			continue;
 		const Eigen::Isometry3d target = xform * tour_poses_obj[i];
 		ClosestIkResult best;
@@ -785,7 +775,7 @@ InnerSolution InnerSolve(
 		}
 		if (best.found && best.gap < exact_gap)
 		{
-			branches[i].push_back(best.joints);
+			ik_solutions[i].push_back(best.joints);
 			++num_rescued;
 			continue;
 		}
@@ -803,9 +793,9 @@ InnerSolution InnerSolve(
 		}
 	}
 
-	std::vector<std::vector<double>> node_cost(branches.size());
-	for (size_t i = 0; i < branches.size(); ++i)
-		for (const auto& q : branches[i])
+	std::vector<std::vector<double>> node_cost(ik_solutions.size());
+	for (size_t i = 0; i < ik_solutions.size(); ++i)
+		for (const auto& q : ik_solutions[i])
 		{
 			const double w = Manipulability(state, jmg, tool0_link, q);
 			node_cost[i].push_back(
@@ -813,7 +803,7 @@ InnerSolution InnerSolve(
 				params.log_manipulability_weight * std::log(std::max(kMinManipulability, w)));
 		}
 	GtspSolution gtsp = FindTourOrder(
-		branches, base, tour_poses_obj, home_joints, home_tcp_local, params, warm_order, &node_cost);
+		ik_solutions, base, tour_poses_obj, home_joints, home_tcp_local, params, warm_order, &node_cost);
 
 	InnerSolution out;
 	out.tour = std::move(gtsp.tour_pose_indices);
