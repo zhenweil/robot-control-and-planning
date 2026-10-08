@@ -434,8 +434,7 @@ std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 
 // ---------------------------------------------------------------------------------------------
 // Inner redundant-IK GTSP (compact reimplementation of the generalized NN + 2-opt / solution-swap
-// scheme in hierarchical_tour.cpp, keyed on a plain endpoint cost so it matches the descent
-// objective exactly). One node per (tour pose, IK branch); visit exactly one node per pose.
+// scheme in hierarchical_tour.cpp. One node per (tour pose, IK branch); visit exactly one node per pose.
 // ---------------------------------------------------------------------------------------------
 
 struct GtspNode
@@ -679,10 +678,8 @@ GtspSolution FindTourOrder(
 	return sol;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Objective evaluation
-// ---------------------------------------------------------------------------------------------
-
+// 1.0 × joint L2 distance  +  1.0 × largest single-joint move  +  0.0 × tool's straight-line distance
+// straight-line distance doesn't help with pose optimziation
 double TourWeightedCost(
 	const ObjectPlacement& base, const std::vector<int>& tour, const std::vector<std::vector<double>>& joints,
 	const std::vector<Eigen::Isometry3d>& tour_poses_obj, const std::vector<double>& home_joints,
@@ -933,22 +930,23 @@ TrackResult TrackTour(
 	return r;
 }
 
-// Twist of a moved target per offset component (6x5, [v; w] rows, columns x,y,z,roll,pitch), in the
-// base frame, for a target at base-frame position p. See AnalyticGradient's comment for the formula.
-Eigen::Matrix<double, 6, 5> OffsetTwist(const ObjectPlacement& base, const Eigen::Vector3d& p)
+// Jacobian of a viewpoint's pose w.r.t. the object placement: 6x5, rows [position; rotation],
+// columns x, y, z, roll, pitch, in the base frame.
+Eigen::Matrix<double, 6, 5> PlacementJacobian(
+	const ObjectPlacement& base, const Eigen::Vector3d& viewpoint_position)
 {
-	const Eigen::Vector3d c(base.x, base.y, base.z);
+	const Eigen::Vector3d object_center(base.x, base.y, base.z);
 	const Eigen::Vector3d roll_axis =
 		Eigen::AngleAxisd(base.pitch, Eigen::Vector3d::UnitY()).toRotationMatrix() * Eigen::Vector3d::UnitX();
 	const Eigen::Vector3d pitch_axis = Eigen::Vector3d::UnitY();
-	const Eigen::Vector3d r = p - c;
-	Eigen::Matrix<double, 6, 5> S = Eigen::Matrix<double, 6, 5>::Zero();
-	S.block<3, 3>(0, 0).setIdentity();
-	S.block<3, 1>(0, 3) = roll_axis.cross(r);
-	S.block<3, 1>(3, 3) = roll_axis;
-	S.block<3, 1>(0, 4) = pitch_axis.cross(r);
-	S.block<3, 1>(3, 4) = pitch_axis;
-	return S;
+	const Eigen::Vector3d lever_arm = viewpoint_position - object_center;  // tilt swings the viewpoint around the center
+	Eigen::Matrix<double, 6, 5> jacobian = Eigen::Matrix<double, 6, 5>::Zero();
+	jacobian.block<3, 3>(0, 0).setIdentity();
+	jacobian.block<3, 1>(0, 3) = roll_axis.cross(lever_arm);
+	jacobian.block<3, 1>(3, 3) = roll_axis;
+	jacobian.block<3, 1>(0, 4) = pitch_axis.cross(lever_arm);
+	jacobian.block<3, 1>(3, 4) = pitch_axis;
+	return jacobian;
 }
 
 // dw/db: how an object placement change moves one viewpoint's manipulability, the arm tracking it from q.
@@ -965,26 +963,15 @@ Eigen::Matrix<double, 5, 1> ManipulabilityOffsetGradient(
 	Eigen::MatrixXd JJt = J * J.transpose();
 	JJt.diagonal().array() += damping * damping;
 	const Eigen::MatrixXd dq_db =
-		J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6)) * OffsetTwist(base, target_pos);
+		J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6)) * PlacementJacobian(base, target_pos);
 	return dq_db.transpose() * ManipulabilityJointGradient(state, jmg, tool0_link, q);
 }
 
 // ---------------------------------------------------------------------------------------------
-// Analytic gradient of the objective (travel cost - weight * sum of manipulability) w.r.t. the
-// object placement (x, y, z, roll, pitch).
-//
-// The object + its viewpoints are moved by M = T(c) Ry(pitch) Rx(roll) in the base frame, so a
-// nominal target T_i sits at p_i^b = M T_i. The tracking config q_i(b) satisfies FK(q_i) = M T_i;
-// with minimum-norm redundancy resolution
-//   dq_i/db = J_i^#  S_i          (J_i^# = damped pinv of the base-frame tool0 Jacobian)
-// where S_i (6x5, [v; w] rows to match RobotState::getJacobian; columns x,y,z,roll,pitch) is the
-// twist of the moved target per offset component, in the base frame:
-//   x/y/z : [ e_axis ; 0 ]
-//   roll  : [ (Rp e_x) x (p_i^b - c) ; Rp e_x ]     (Rp = Ry(pitch), c = (x,y,z))
-//   pitch : [ e_y x (p_i^b - c) ; e_y ]
-// Edge cost d(q_a, q_b) then contributes (dd/dq_a) dq_a/db + (dd/dq_b) dq_b/db, home configs being
-// offset-independent (their sensitivities are zero). Each viewpoint also adds
-// -weight * (dw/dq)^T dq/db, with dw/dq from joint-space central differences.
+// Analytic gradient of the cost (travel, manipulability terms, missed-viewpoint gaps) w.r.t. the object
+// placement (x, y, z, roll, pitch). Joints follow a moved viewpoint as dq/db = J_pinv * placement_jacobian
+// (damped pseudo-inverse of the tool Jacobian); each edge, manipulability term and miss gap is chained
+// through that. The home pose doesn't move with the object.
 // ---------------------------------------------------------------------------------------------
 
 Eigen::Matrix<double, 5, 1> AnalyticGradient(
@@ -1004,8 +991,8 @@ Eigen::Matrix<double, 5, 1> AnalyticGradient(
 
 	for (size_t k = 0; k < n; ++k)
 	{
-		const Eigen::Matrix<double, 6, 5> S =
-			OffsetTwist(base, (xform * tour_poses_obj[tour[k]]).translation());
+		const Eigen::Matrix<double, 6, 5> placement_jacobian =
+			PlacementJacobian(base, (xform * tour_poses_obj[tour[k]]).translation());
 
 		state.setJointGroupPositions(jmg, joints[k]);
 		state.update();
@@ -1016,8 +1003,8 @@ Eigen::Matrix<double, 5, 1> AnalyticGradient(
 		JJt.diagonal().array() += lambda2;
 		Eigen::MatrixXd J_pinv = J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6));
 
-		dq_db[k] = J_pinv * S;		   // dof x 5
-		dp_db[k] = S.topRows<3>();	   // 3 x 5
+		dq_db[k] = J_pinv * placement_jacobian;		   // dof x 5
+		dp_db[k] = placement_jacobian.topRows<3>();	   // 3 x 5
 	}
 
 	const size_t dof = home_joints.size();
@@ -1030,18 +1017,20 @@ Eigen::Matrix<double, 5, 1> AnalyticGradient(
 			ManipulabilityJointGradient(state, jmg, tool0_link, joints[k]);
 	}
 
-	// Missed viewpoints: the target moves by S db, so the gap e grows by S db and
-	// d|e|_W/db = S^T (W e) / |e|_W. No slope once the gap is past the cap.
+	// Missed viewpoints: moving the object moves the viewpoint, which changes its pose error, so
+	// d(gap)/db = placement_jacobian^T * weighted_error / gap. No slope once the gap is past the cap.
 	for (size_t m = 0; m < missed_vp.size(); ++m)
 	{
-		const Eigen::Matrix<double, 6, 1>& e = missed_gap[m];
-		const double gap = WeightedPoseGap(e, params.rot_metric_scale);
+		const Eigen::Matrix<double, 6, 1>& pose_error = missed_gap[m];
+		const double gap = WeightedPoseGap(pose_error, params.rot_metric_scale);
 		if (gap < 1e-9 || gap >= params.miss_gap_cap)
 			continue;
-		Eigen::Matrix<double, 6, 1> we = e;
-		we.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-		const Eigen::Vector3d p = (xform * tour_poses_obj[static_cast<size_t>(missed_vp[m])]).translation();
-		g += params.miss_gap_weight * OffsetTwist(base, p).transpose() * we / gap;
+		Eigen::Matrix<double, 6, 1> weighted_error = pose_error;
+		weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
+		const Eigen::Vector3d viewpoint_position =
+			(xform * tour_poses_obj[static_cast<size_t>(missed_vp[m])]).translation();
+		g += params.miss_gap_weight * PlacementJacobian(base, viewpoint_position).transpose() *
+			weighted_error / gap;
 	}
 
 	auto add_edge = [&](const std::vector<double>& qa, const std::vector<double>& qb, const Eigen::MatrixXd& dqa,
