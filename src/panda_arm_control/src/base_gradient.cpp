@@ -219,6 +219,12 @@ void ClosePairSeparationGradients(
 		}
 }
 
+// Pose gap in meters: |position|^2 + (rot_scale * |rotation|)^2, square-rooted.
+double WeightedPoseGap(const Eigen::Matrix<double, 6, 1>& e, double rot_scale)
+{
+	return std::sqrt(e.head<3>().squaredNorm() + rot_scale * rot_scale * e.tail<3>().squaredNorm());
+}
+
 struct ClosestIkResult
 {
 	bool found = false;
@@ -259,8 +265,7 @@ ClosestIkResult CollisionAwareClosestIk(
 		pose_error.head<3>() = target_pose.translation() - fk.translation();
 		const Eigen::AngleAxisd aa(target_pose.linear() * fk.linear().transpose());
 		pose_error.tail<3>() = aa.axis() * aa.angle();
-		const double gap =
-			std::sqrt(pose_error.head<3>().squaredNorm() + rot_scale * rot_scale * pose_error.tail<3>().squaredNorm());
+		const double gap = WeightedPoseGap(pose_error, rot_scale);
 
 		// Arm-arm and arm-object pairs within the margin.
 		std::vector<Eigen::RowVectorXd> close_pair_gradients;
@@ -330,12 +335,6 @@ ClosestIkResult CollisionAwareClosestIk(
 		state.copyJointGroupPositions(jmg, q);
 	}
 	return best;
-}
-
-// Pose gap in meters: |position|^2 + (rot_scale * |rotation|)^2, square-rooted.
-double WeightedPoseGap(const Eigen::Matrix<double, 6, 1>& e, double rot_scale)
-{
-	return std::sqrt(e.head<3>().squaredNorm() + rot_scale * rot_scale * e.tail<3>().squaredNorm());
 }
 
 // Floor on w before taking its log, so a singular configuration gives a large finite barrier.
