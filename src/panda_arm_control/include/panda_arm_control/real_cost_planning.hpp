@@ -118,6 +118,19 @@ struct TourTrajectory
 	moveit_msgs::msg::RobotTrajectory trajectory;
 };
 
+// Real joint travel of a tour: plans each leg from start_reference_joints through waypoint_joints in order,
+// num_planning_attempts tries per leg, and returns each leg's shortest planned joint path (sum of ||dq||
+// along the waypoints); -1 for a leg that failed to plan.
+std::vector<double> PlanTourJointPathLengths(
+	const rclcpp::Node::SharedPtr& node,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::vector<std::vector<double>>& waypoint_joints,
+	const std::vector<double>& start_reference_joints,
+	const std::string& group_name,
+	double planning_time,
+	int num_planning_attempts);
+
 // Plans each consecutive leg of selected from start_reference_joints, retrying num_planning_attempts
 // times per leg and keeping the shortest -- affordable since it's only selected.size() calls.
 std::vector<TourTrajectory> PlanFinalTourTrajectories(

@@ -70,6 +70,19 @@ struct BaseGradientParams
 	double convergence_tolerance_offset = 0.002;  // stop optimization when object moves < 2mm
 	double convergence_tolerance_cost = 1e-3;	  // stop optimization when cost improvement < 0.1%
 	int patience = 3; // stop optimization if no improvement after this many iterations
+	bool stop_when_all_reached = false;  // end each descent as soon as every viewpoint is reached
+	int refine_solves = 0;  // extra full solves at each descent's result, warm-started from the best so far
+	bool travel_gradient = true;  // false: the descent direction ignores tour travel (cost still includes it)
+	bool manipulability_gradient = true;  // false: the descent direction ignores the manipulability terms
+	bool travel_in_cost = true;  // false: the placement cost leaves out travel (GTSP still orders by travel)
+	bool freeze_order = false;  // once all viewpoints are reached, keep the viewpoint order fixed
+	bool lock_input_order = false;  // visit viewpoints in the input order throughout (no GTSP reordering)
+	bool manipulability_after_reach = false;  // misses only until all are reached, then manipulability on
+	// > 0: refine picks tours by real cost (OMPL-planned joint travel); seconds per planning attempt.
+	double real_cost_planning_time = 0.0;
+	int real_cost_attempts = 3;  // planning attempts per leg; the shortest joint path is kept
+	bool steering = true;  // steer the step around viewpoints it would lose (false: only shrink the step)
+	int refine_at_reach = 0;  // log N refine solves at the first all-reached placement (descent continues)
 
 	int random_seed = 42;
 	// Log the analytic gradient next to a central-difference estimate every outer iteration.

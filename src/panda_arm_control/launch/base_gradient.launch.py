@@ -88,10 +88,86 @@ def generate_launch_description():
     )
     ik_timeout = ParameterValue(LaunchConfiguration("ik_timeout"), value_type=float)
 
+    # Descent length; descent_num_restart:=1 max_outer_iterations:=0 just solves the tour at the start position.
+    descent_num_restart_arg = DeclareLaunchArgument(
+        "descent_num_restart", default_value="6", description="Number of descents (restarts)."
+    )
+    descent_num_restart = ParameterValue(LaunchConfiguration("descent_num_restart"), value_type=int)
+    max_outer_iterations_arg = DeclareLaunchArgument(
+        "max_outer_iterations", default_value="50", description="Max descent iterations per restart."
+    )
+    max_outer_iterations = ParameterValue(LaunchConfiguration("max_outer_iterations"), value_type=int)
+    stop_when_all_reached_arg = DeclareLaunchArgument(
+        "stop_when_all_reached", default_value="false", description="End each descent once every viewpoint is reached."
+    )
+    stop_when_all_reached = ParameterValue(LaunchConfiguration("stop_when_all_reached"), value_type=bool)
+    refine_solves_arg = DeclareLaunchArgument(
+        "refine_solves", default_value="0",
+        description="Extra full solves at each descent's result, warm-started from its best solution.",
+    )
+    refine_solves = ParameterValue(LaunchConfiguration("refine_solves"), value_type=int)
+    travel_gradient_arg = DeclareLaunchArgument(
+        "travel_gradient", default_value="true",
+        description="false: the descent direction ignores tour travel (the cost still includes it).",
+    )
+    travel_gradient = ParameterValue(LaunchConfiguration("travel_gradient"), value_type=bool)
+    manipulability_gradient_arg = DeclareLaunchArgument(
+        "manipulability_gradient", default_value="true",
+        description="false: the descent direction ignores the manipulability terms (the cost still includes them).",
+    )
+    manipulability_gradient = ParameterValue(LaunchConfiguration("manipulability_gradient"), value_type=bool)
+    travel_in_cost_arg = DeclareLaunchArgument(
+        "travel_in_cost", default_value="true",
+        description="false: the placement cost leaves out travel (GTSP still orders viewpoints by travel).",
+    )
+    travel_in_cost = ParameterValue(LaunchConfiguration("travel_in_cost"), value_type=bool)
+    manipulability_weight_initial_arg = DeclareLaunchArgument(
+        "manipulability_weight_initial", default_value="40.0", description="Starting lambda (manipulability weight)."
+    )
+    manipulability_weight_initial = ParameterValue(
+        LaunchConfiguration("manipulability_weight_initial"), value_type=float)
+    log_manipulability_weight_arg = DeclareLaunchArgument(
+        "log_manipulability_weight", default_value="2.0", description="mu (log-manipulability barrier weight)."
+    )
+    log_manipulability_weight = ParameterValue(LaunchConfiguration("log_manipulability_weight"), value_type=float)
+    freeze_order_arg = DeclareLaunchArgument(
+        "freeze_order", default_value="false",
+        description="Once all viewpoints are reached, keep the viewpoint order fixed (arm poses still re-picked).",
+    )
+    freeze_order = ParameterValue(LaunchConfiguration("freeze_order"), value_type=bool)
+    lock_input_order_arg = DeclareLaunchArgument(
+        "lock_input_order", default_value="false",
+        description="Visit viewpoints in the input order throughout (no GTSP reordering; arm poses still re-picked).",
+    )
+    lock_input_order = ParameterValue(LaunchConfiguration("lock_input_order"), value_type=bool)
+    manipulability_after_reach_arg = DeclareLaunchArgument(
+        "manipulability_after_reach", default_value="false",
+        description="Misses only (lambda = mu = 0) until all viewpoints are reached, then manipulability on.",
+    )
+    manipulability_after_reach = ParameterValue(LaunchConfiguration("manipulability_after_reach"), value_type=bool)
+    real_cost_planning_time_arg = DeclareLaunchArgument(
+        "real_cost_planning_time", default_value="0.0",
+        description="> 0: refine picks tours by real cost (OMPL-planned joint travel); seconds per planning attempt.",
+    )
+    real_cost_planning_time = ParameterValue(LaunchConfiguration("real_cost_planning_time"), value_type=float)
+    real_cost_attempts_arg = DeclareLaunchArgument(
+        "real_cost_attempts", default_value="3", description="Planning attempts per leg for the real cost."
+    )
+    real_cost_attempts = ParameterValue(LaunchConfiguration("real_cost_attempts"), value_type=int)
+    steering_arg = DeclareLaunchArgument(
+        "steering", default_value="true", description="Steer the step around viewpoints it would lose."
+    )
+    steering = ParameterValue(LaunchConfiguration("steering"), value_type=bool)
+    refine_at_reach_arg = DeclareLaunchArgument(
+        "refine_at_reach", default_value="0",
+        description="Log N refine solves at the first all-reached placement; the descent then continues.",
+    )
+    refine_at_reach = ParameterValue(LaunchConfiguration("refine_at_reach"), value_type=int)
+
     # Object position bounds, abs (m, base frame). Defaults: nominal (0.5, 0, 0.15) +-0.6 in x/y, z locked.
     position_bound_args = []
     position_bounds = {}
-    for _name, _default in (("x_min", -0.1), ("x_max", 1.1), ("y_min", -0.6), ("y_max", 0.6),
+    for _name, _default in (("x_min", -0.5), ("x_max", 0.5), ("y_min", -0.5), ("y_max", 0.5),
                             ("z_min", 0.15), ("z_max", 0.15)):
         position_bound_args.append(DeclareLaunchArgument(
             _name, default_value=str(_default), description=f"Object position {_name} bound (m, abs).",
@@ -164,10 +240,10 @@ def generate_launch_description():
         "bg_manipulability_weight": 0.0,
         # Start each descent at this weight and multiply by the decay per outer iteration down to the
         # value above (40 * 0.8^k, snapped to it once within 5%: ~14 iterations to reach 0).
-        "bg_manipulability_weight_initial": 40.0,
+        "bg_manipulability_weight_initial": manipulability_weight_initial,
         "bg_manipulability_weight_decay": 0.8,
         # Reach-margin barrier: objective also subtracts this * sum of log(manipulability).
-        "bg_log_manipulability_weight": 2.0,
+        "bg_log_manipulability_weight": log_manipulability_weight,
         # A missed viewpoint costs the penalty + this * its closest-IK pose gap (m), capped at the cap.
         "bg_miss_gap_weight": 5000.0,
         "bg_miss_gap_cap": 0.15,
@@ -185,10 +261,10 @@ def generate_launch_description():
         "bg_gtsp_two_opt_rounds": 5,
         # Basin hopping (1 = single descent). Each restart after the first descends from the best
         # offset so far kicked by a Gaussian of std-dev descent_restart_perturbation (m).
-        "bg_descent_num_restart": 6,
+        "bg_descent_num_restart": descent_num_restart,
         "bg_descent_restart_perturbation": 0.05,
-        "bg_max_outer_iterations": 50,
-        "bg_initial_step": 0.05,
+        "bg_max_outer_iterations": max_outer_iterations,
+        "bg_initial_step": 0.02,
         "bg_step_shrink": 0.25,
         "bg_max_line_search_iters": 4,
         "bg_jacobian_damping": 1e-3,
@@ -196,6 +272,18 @@ def generate_launch_description():
         "bg_convergence_tolerance_cost": 1e-3,
         # Stop after this many consecutive iterations that each gain < bg_convergence_tolerance_cost.
         "bg_patience": 3,
+        "bg_stop_when_all_reached": stop_when_all_reached,
+        "bg_refine_solves": refine_solves,
+        "bg_travel_gradient": travel_gradient,
+        "bg_manipulability_gradient": manipulability_gradient,
+        "bg_travel_in_cost": travel_in_cost,
+        "bg_freeze_order": freeze_order,
+        "bg_lock_input_order": lock_input_order,
+        "bg_manipulability_after_reach": manipulability_after_reach,
+        "bg_real_cost_planning_time": real_cost_planning_time,
+        "bg_real_cost_attempts": real_cost_attempts,
+        "bg_steering": steering,
+        "bg_refine_at_reach": refine_at_reach,
         "bg_fd_gradient_check": fd_gradient_check,
         "bg_fd_epsilon": 1e-4,
         "ik_timeout": ik_timeout,
@@ -284,6 +372,22 @@ def generate_launch_description():
             max_solutions_per_candidate_arg,
             ik_retries_per_point_arg,
             ik_timeout_arg,
+            descent_num_restart_arg,
+            max_outer_iterations_arg,
+            stop_when_all_reached_arg,
+            refine_solves_arg,
+            travel_gradient_arg,
+            manipulability_gradient_arg,
+            travel_in_cost_arg,
+            manipulability_weight_initial_arg,
+            log_manipulability_weight_arg,
+            freeze_order_arg,
+            lock_input_order_arg,
+            manipulability_after_reach_arg,
+            real_cost_planning_time_arg,
+            real_cost_attempts_arg,
+            steering_arg,
+            refine_at_reach_arg,
             *position_bound_args,
             *initial_position_args,
             output_dir_arg,

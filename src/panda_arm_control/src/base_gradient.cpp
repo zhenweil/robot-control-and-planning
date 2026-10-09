@@ -1,4 +1,5 @@
 #include "panda_arm_control/base_gradient.hpp"
+#include "panda_arm_control/real_cost_planning.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -7,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <random>
 #include <thread>
 
@@ -699,6 +701,58 @@ double TourWeightedCost(
 	return total;
 }
 
+// Best arm pose per viewpoint for a fixed visiting order: exact dynamic programming over each viewpoint's
+// IK solutions (edge cost + per-pose cost), starting from home. Returns the chosen joints, parallel to order.
+std::vector<std::vector<double>> BestPosesForOrder(
+	const std::vector<std::vector<std::vector<double>>>& ik_solutions,
+	const std::vector<std::vector<double>>& pose_cost, const std::vector<int>& order, const ObjectPlacement& placement,
+	const std::vector<Eigen::Isometry3d>& tour_poses_obj, const std::vector<double>& home_joints,
+	const Eigen::Vector3d& home_tcp_local, const BaseGradientParams& params)
+{
+	const Eigen::Isometry3d xform = MakePlacement(placement);
+	// best[k][j]: cheapest cost of visiting order[0..k] ending in IK solution j of order[k].
+	std::vector<std::vector<double>> best(order.size());
+	std::vector<std::vector<int>> parent(order.size());
+	for (size_t k = 0; k < order.size(); ++k)
+	{
+		const size_t v = static_cast<size_t>(order[k]);
+		const Eigen::Vector3d p = (xform * tour_poses_obj[v]).translation();
+		best[k].assign(ik_solutions[v].size(), std::numeric_limits<double>::max());
+		parent[k].assign(ik_solutions[v].size(), -1);
+		for (size_t j = 0; j < ik_solutions[v].size(); ++j)
+		{
+			if (k == 0)
+			{
+				best[k][j] = pose_cost[v][j] +
+					WeightedEdgeCost(home_joints, ik_solutions[v][j], home_tcp_local, p, params);
+				continue;
+			}
+			const size_t u = static_cast<size_t>(order[k - 1]);
+			const Eigen::Vector3d prev_p = (xform * tour_poses_obj[u]).translation();
+			for (size_t i = 0; i < ik_solutions[u].size(); ++i)
+			{
+				const double c = best[k - 1][i] + pose_cost[v][j] +
+					WeightedEdgeCost(ik_solutions[u][i], ik_solutions[v][j], prev_p, p, params);
+				if (c < best[k][j])
+				{
+					best[k][j] = c;
+					parent[k][j] = static_cast<int>(i);
+				}
+			}
+		}
+	}
+	std::vector<std::vector<double>> joints(order.size());
+	if (order.empty())
+		return joints;
+	int j = static_cast<int>(std::min_element(best.back().begin(), best.back().end()) - best.back().begin());
+	for (size_t k = order.size(); k-- > 0;)
+	{
+		joints[k] = ik_solutions[static_cast<size_t>(order[k])][static_cast<size_t>(j)];
+		j = parent[k][static_cast<size_t>(j)];
+	}
+	return joints;
+}
+
 // The full inner problem evaluated at one base pose: collect IK branches, run the GTSP (warm-
 // started from `warm_order` if given), and score the resulting tour. This IS Phi(base) -- the
 // quantity the outer gradient descent minimizes and the line search must test against.
@@ -717,6 +771,7 @@ struct InnerSolution
 	double miss_cost = 0.0;
 	int num_rescued = 0;  // missed by IK, reached via a collision-free closest-IK hit
 	int num_no_free = 0;  // closest IK found no collision-free posture at all (gap taken as the cap)
+	double real_cost = -1.0;  // planned joint travel (sum of ||dq|| along OMPL paths); -1 = not computed
 	int num_reachable = 0;
 	int num_total = 0;
 	bool all_reachable = false;
@@ -730,7 +785,7 @@ InnerSolution InnerSolve(
 	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
 	const std::vector<std::vector<double>>& seed_per_viewpoint, const std::vector<double>& home_joints,
 	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params,
-	const std::vector<int>* warm_order, int max_solutions)
+	const std::vector<int>* warm_order, int max_solutions, const std::vector<int>* fixed_order = nullptr)
 {
 	std::vector<std::vector<std::vector<double>>> ik_solutions = CollectIkSolutions(
 		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seed_per_viewpoint, base,
@@ -799,12 +854,23 @@ InnerSolution InnerSolve(
 				-params.manipulability_weight * w -
 				params.log_manipulability_weight * std::log(std::max(kMinManipulability, w)));
 		}
-	GtspSolution gtsp = FindTourOrder(
-		ik_solutions, base, tour_poses_obj, home_joints, home_tcp_local, params, warm_order, &node_cost);
-
 	InnerSolution out;
-	out.tour = std::move(gtsp.tour_pose_indices);
-	out.joints = std::move(gtsp.chosen_joints);
+	if (fixed_order)
+	{
+		// Keep the given order (reachable viewpoints only); pick only the arm poses.
+		for (int v : *fixed_order)
+			if (!ik_solutions[static_cast<size_t>(v)].empty())
+				out.tour.push_back(v);
+		out.joints = BestPosesForOrder(
+			ik_solutions, node_cost, out.tour, base, tour_poses_obj, home_joints, home_tcp_local, params);
+	}
+	else
+	{
+		GtspSolution gtsp = FindTourOrder(
+			ik_solutions, base, tour_poses_obj, home_joints, home_tcp_local, params, warm_order, &node_cost);
+		out.tour = std::move(gtsp.tour_pose_indices);
+		out.joints = std::move(gtsp.chosen_joints);
+	}
 	out.num_total = static_cast<int>(tour_poses_obj.size());
 	out.num_reachable = static_cast<int>(out.tour.size());
 	out.all_reachable = (out.num_reachable == out.num_total);
@@ -821,7 +887,7 @@ InnerSolution InnerSolve(
 		out.miss_cost +=
 			params.miss_gap_weight * std::min(params.miss_gap_cap, WeightedPoseGap(e, params.rot_metric_scale));
 
-	out.weighted_cost = out.travel_cost - params.manipulability_weight * out.sum_manipulability -
+	out.weighted_cost = (params.travel_in_cost ? out.travel_cost : 0.0) - params.manipulability_weight * out.sum_manipulability -
 		params.log_manipulability_weight * out.sum_log_manipulability +
 		params.unreachable_penalty * (out.num_total - out.num_reachable) + out.miss_cost;
 	return out;
@@ -837,17 +903,17 @@ InnerSolution BestOfNInnerSolve(
 	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
 	const std::vector<std::vector<double>>& seed_per_viewpoint, const std::vector<double>& home_joints,
 	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params,
-	const std::vector<int>* warm_order, int max_solutions)
+	const std::vector<int>* warm_order, int max_solutions, const std::vector<int>* fixed_order = nullptr)
 {
 	const int n = std::max(1, params.gtsp_num_restart);
 	InnerSolution best = InnerSolve(
 		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seed_per_viewpoint,
-		home_joints, home_tcp_local, base, params, warm_order, max_solutions);
+		home_joints, home_tcp_local, base, params, warm_order, max_solutions, fixed_order);
 	for (int i = 1; i < n; ++i)
 	{
 		InnerSolution cand = InnerSolve(
 			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seed_per_viewpoint,
-			home_joints, home_tcp_local, base, params, warm_order, max_solutions);
+			home_joints, home_tcp_local, base, params, warm_order, max_solutions, fixed_order);
 		if (cand.weighted_cost < best.weighted_cost)
 			best = std::move(cand);
 	}
@@ -1009,7 +1075,7 @@ Eigen::Matrix<double, 5, 1> AnalyticGradient(
 
 	const size_t dof = home_joints.size();
 	Eigen::Matrix<double, 5, 1> g = Eigen::Matrix<double, 5, 1>::Zero();
-	for (size_t k = 0; k < n; ++k)
+	for (size_t k = 0; k < n && params.manipulability_gradient; ++k)
 	{
 		// d(-lambda w - mu log w)/db = -(lambda + mu / w) (dq/db)^T dw/dq
 		const double w = std::max(kMinManipulability, Manipulability(state, jmg, tool0_link, joints[k]));
@@ -1061,6 +1127,8 @@ Eigen::Matrix<double, 5, 1> AnalyticGradient(
 	Eigen::MatrixXd zero_dq = Eigen::MatrixXd::Zero(dof, 5);
 	Eigen::MatrixXd zero_dp = Eigen::MatrixXd::Zero(3, 5);
 
+	if (!params.travel_gradient)
+		return g;  // descend on manipulability and miss gaps only; travel still counts in the cost
 	if (n > 0)
 	{
 		Eigen::Vector3d p0 = (xform * tour_poses_obj[tour[0]]).translation();
@@ -1250,6 +1318,8 @@ BaseGradientResult SolveBaseGradient(
 	for (Eigen::Isometry3d& t : tour_poses_obj)
 		t.translation() -= object_translation_nominal;
 	const int n = static_cast<int>(tour_poses_obj.size());
+	std::vector<int> input_order(static_cast<size_t>(n));  // viewpoints in the order given (lock_input_order)
+	std::iota(input_order.begin(), input_order.end(), 0);
 
 	moveit::core::RobotState state(robot_model);
 	state.setToDefaultValues();
@@ -1291,6 +1361,14 @@ BaseGradientResult SolveBaseGradient(
 	auto run_descent = [&](ObjectPlacement base, int restart_idx, const InnerSolution* warm) -> RestartResult {
 		base = ProjectToBounds(base, params.bounds);
 		params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
+		params.log_manipulability_weight = params_in.log_manipulability_weight;
+		// manipulability_after_reach: misses only (lambda = mu = 0) until every viewpoint is reached.
+		bool manipulability_on = !params.manipulability_after_reach;
+		if (!manipulability_on)
+		{
+			params.manipulability_weight = 0.0;
+			params.log_manipulability_weight = 0.0;
+		}
 		std::vector<ObjectPlacement> base_history{base};
 		std::vector<std::vector<double>> seeds =
 			warm ? SeedsFromSolution(*warm, fallback_seed, static_cast<size_t>(n))
@@ -1317,8 +1395,8 @@ BaseGradientResult SolveBaseGradient(
 		auto record = [&](const ObjectPlacement& b, const InnerSolution& s) {
 			// Re-score at the final weight so points found during annealing compare fairly.
 			InnerSolution sf = s;
-			sf.weighted_cost = s.travel_cost - lambda_final * s.sum_manipulability -
-				params.log_manipulability_weight * s.sum_log_manipulability +
+			sf.weighted_cost = (params.travel_in_cost ? s.travel_cost : 0.0) - lambda_final * s.sum_manipulability -
+				params_in.log_manipulability_weight * s.sum_log_manipulability +
 				params.unreachable_penalty * (s.num_total - s.num_reachable) + s.miss_cost;
 			result.history.push_back(
 				{static_cast<double>(restart_idx), b.x, b.y, b.z, b.roll, b.pitch, sf.weighted_cost});
@@ -1336,7 +1414,7 @@ BaseGradientResult SolveBaseGradient(
 		InnerSolution cur = BestOfNInnerSolve(
 			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds,
 			start_reference_joints, home_tcp_local, base, params, warm ? &warm->tour : nullptr,
-			params.max_solutions_per_candidate);
+			params.max_solutions_per_candidate, params.lock_input_order ? &input_order : nullptr);
 		result.num_inner_solves += std::max(1, params.gtsp_num_restart);
 
 		if (cur.tour.empty())
@@ -1361,12 +1439,105 @@ BaseGradientResult SolveBaseGradient(
 			cur.sum_log_manipulability, cur.miss_cost, cur.num_reachable, n, cur.num_rescued,
 			cur.num_no_free);
 
+		// Cost at the final weight, so solutions found at different weights compare fairly.
+		auto cost_at_final_weight = [&](const InnerSolution& sol) {
+			return (params.travel_in_cost ? sol.travel_cost : 0.0) - lambda_final * sol.sum_manipulability -
+				params_in.log_manipulability_weight * sol.sum_log_manipulability +
+				params.unreachable_penalty * (sol.num_total - sol.num_reachable) + sol.miss_cost;
+		};
+		// Refine at a fixed placement: more full solves, each warm-started from the best so far, scored at the
+		// final weight. With freeze_order the viewpoint order is kept and only the arm poses are re-picked.
+		// Real cost: plan every leg with OMPL and sum the joint motion along the planned paths (inf if a leg fails).
+		const bool use_real_cost = params.real_cost_planning_time > 0.0;
+		auto real_cost_of = [&](const ObjectPlacement& at, const InnerSolution& sol) {
+			SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
+			const std::vector<double> legs = PlanTourJointPathLengths(
+				node, robot_model, planning_scene_monitor, sol.joints, start_reference_joints, group_name,
+				params.real_cost_planning_time, params.real_cost_attempts);
+			double total = 0.0;
+			for (double leg : legs)
+			{
+				if (leg < 0.0)
+					return std::numeric_limits<double>::infinity();
+				total += leg;
+			}
+			return total;
+		};
+		// Lowest real cost if enabled, else lowest L2 travel; never fewer viewpoints reached.
+		auto refine = [&](const ObjectPlacement& at, InnerSolution best_sol, int num_solves) {
+			// Travel-only tours: no manipulability preference when picking arm poses.
+			const double saved_weight = params.manipulability_weight;
+			const double saved_log_weight = params.log_manipulability_weight;
+			params.manipulability_weight = 0.0;
+			params.log_manipulability_weight = 0.0;
+			best_sol.weighted_cost = cost_at_final_weight(best_sol);
+			if (use_real_cost && best_sol.real_cost < 0.0)
+				best_sol.real_cost = real_cost_of(at, best_sol);
+			for (int i = 0; i < num_solves && rclcpp::ok(); ++i)
+			{
+				const std::vector<std::vector<double>> refine_seeds =
+					SeedsFromSolution(best_sol, fallback_seed, static_cast<size_t>(n));
+				const std::vector<int>* order_lock = params.lock_input_order ? &input_order
+					: params.freeze_order										   ? &best_sol.tour
+																				   : nullptr;
+				InnerSolution s = InnerSolve(
+					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, refine_seeds,
+					start_reference_joints, home_tcp_local, at, params, &best_sol.tour,
+					params.max_solutions_per_candidate, order_lock);
+				result.num_inner_solves += 1;
+				if (s.num_reachable < best_sol.num_reachable)
+					continue;
+				if (use_real_cost)
+				{
+					s.real_cost = real_cost_of(at, s);
+					if (s.real_cost < best_sol.real_cost)
+						best_sol = std::move(s);
+				}
+				else if (s.travel_cost < best_sol.travel_cost)
+					best_sol = std::move(s);
+			}
+			params.manipulability_weight = saved_weight;
+			params.log_manipulability_weight = saved_log_weight;
+			return best_sol;
+		};
+
+		bool refined_at_reach = false;
 		for (int outer = 0; outer < params.max_outer_iterations && rclcpp::ok() && !cur.tour.empty(); ++outer)
 		{
+			// Option "stay at A": the first time everything is reached, log what refining right here would give.
+			if (params.refine_at_reach > 0 && cur.all_reachable && !refined_at_reach)
+			{
+				refined_at_reach = true;
+				InnerSolution start = cur;
+				if (use_real_cost)
+					start.real_cost = real_cost_of(base, start);
+				const InnerSolution at_reach = refine(base, start, params.refine_at_reach);
+				RCLCPP_INFO(
+					node->get_logger(),
+					"  restart %d: refined %d solves at first all-reached abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  "
+					"real %.2f -> %.2f",
+					restart_idx + 1, params.refine_at_reach, base.x, base.y, base.z, start.travel_cost,
+					at_reach.travel_cost, start.real_cost, at_reach.real_cost);
+			}
+			if (params.stop_when_all_reached && cur.all_reachable)
+			{
+				RCLCPP_INFO(node->get_logger(), "  restart %d: all viewpoints reached -- stopping", restart_idx + 1);
+				break;
+			}
 			if (outer > 0)
 			{
 				// Hold the weight high (reach recovery) while any viewpoint is missed; decay it otherwise.
-				if (!cur.all_reachable)
+				if (!manipulability_on)
+				{
+					if (cur.all_reachable)
+					{
+						manipulability_on = true;
+						params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
+						params.log_manipulability_weight = params_in.log_manipulability_weight;
+						RCLCPP_INFO(node->get_logger(), "  restart %d: all reached -- manipulability on", restart_idx + 1);
+					}
+				}
+				else if (!cur.all_reachable)
 					params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
 				else
 					params.manipulability_weight = std::max(
@@ -1375,7 +1546,7 @@ BaseGradientResult SolveBaseGradient(
 				if (params.manipulability_weight - lambda_final <
 					0.05 * (params_in.manipulability_weight_initial - lambda_final))
 					params.manipulability_weight = lambda_final;
-				cur.weighted_cost = cur.travel_cost - params.manipulability_weight * cur.sum_manipulability -
+				cur.weighted_cost = (params.travel_in_cost ? cur.travel_cost : 0.0) - params.manipulability_weight * cur.sum_manipulability -
 					params.log_manipulability_weight * cur.sum_log_manipulability +
 					params.unreachable_penalty * (cur.num_total - cur.num_reachable) + cur.miss_cost;
 			}
@@ -1437,9 +1608,19 @@ BaseGradientResult SolveBaseGradient(
 				else if (!last_good[vi].empty())
 					seeds[vi] = last_good[vi];
 			}
-			const InnerSolution here_quick = InnerSolve(
-				state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds,
-				start_reference_joints, home_tcp_local, base, params, &cur.tour, 1);
+			// Locked viewpoint order: the input order from the start (lock_input_order), or the current order
+			// once everything is reached (freeze_order). Only arm poses are re-picked; null = GTSP reorders.
+			const std::vector<int> locked_order = cur.tour;
+			const std::vector<int>* order_lock = params.lock_input_order ? &input_order
+				: (params.freeze_order && cur.all_reachable)			   ? &locked_order
+																		   : nullptr;
+			auto solve_at = [&](const ObjectPlacement& at, int max_solutions) {
+				return InnerSolve(
+					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, start_reference_joints,
+					home_tcp_local, at, params, &cur.tour, max_solutions, order_lock);
+			};
+			auto quick_solve = [&](const ObjectPlacement& at) { return solve_at(at, 1); };
+			const InnerSolution here_quick = quick_solve(base);
 			result.num_inner_solves += 1;
 			double step = params.initial_step;
 			bool accepted = false;
@@ -1457,12 +1638,11 @@ BaseGradientResult SolveBaseGradient(
 					 base.roll + step * dir_u(3) / rot_scale, base.pitch + step * dir_u(4) / rot_scale},
 					params.bounds);
 				// weighted_cost carries the unreachable penalty, so a probe that drops a viewpoint fails.
-				InnerSolution probe = InnerSolve(
-					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds,
-					start_reference_joints, home_tcp_local, cand, params, &cur.tour, 1);
+				InnerSolution probe = quick_solve(cand);
 				result.num_inner_solves += 1;
-				// Never trade away a reached viewpoint, whatever the cost says.
-				if (probe.num_reachable >= cur.num_reachable &&
+				// Never trade away a reached viewpoint, whatever the cost says. Compared with the quick solve
+				// here (same IK effort), so a viewpoint the quick solve merely failed to find doesn't block the step.
+				if (probe.num_reachable >= here_quick.num_reachable &&
 					probe.weighted_cost < here_quick.weighted_cost)
 				{
 					accepted = true;
@@ -1470,18 +1650,19 @@ BaseGradientResult SolveBaseGradient(
 					next = std::move(probe);
 					break;
 				}
-				if (probe.num_reachable < cur.num_reachable && num_steers < kMaxSteers)
+				if (params.steering && probe.num_reachable < here_quick.num_reachable && num_steers < kMaxSteers)
 				{
 					bool steered = false;
 					for (int v : probe.missed_vp)
 					{
-						const auto it = std::find(cur.tour.begin(), cur.tour.end(), v);
-						if (it == cur.tour.end())
-							continue;  // already missed at the current offset
+						const auto it = std::find(here_quick.tour.begin(), here_quick.tour.end(), v);
+						if (it == here_quick.tour.end())
+							continue;  // already missed at the current placement
 						const Eigen::Vector3d p =
 							(MakePlacement(base) * tour_poses_obj[static_cast<size_t>(v)]).translation();
 						Eigen::Matrix<double, 5, 1> h = to_u(ManipulabilityOffsetGradient(
-							state, jmg, tool0_link, base, p, cur.joints[static_cast<size_t>(it - cur.tour.begin())],
+							state, jmg, tool0_link, base, p,
+							here_quick.joints[static_cast<size_t>(it - here_quick.tour.begin())],
 							params.jacobian_damping));
 						if (dir_u.dot(h) >= 0.0)
 							continue;  // the step doesn't lower its manipulability: lost for another reason
@@ -1514,7 +1695,7 @@ BaseGradientResult SolveBaseGradient(
 				committed = BestOfNInnerSolve(
 					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds,
 					start_reference_joints, home_tcp_local, b_new, params, &next.tour,
-					params.max_solutions_per_candidate);
+					params.max_solutions_per_candidate, order_lock);
 				result.num_inner_solves += std::max(1, params.gtsp_num_restart);
 				if (next.weighted_cost < committed.weighted_cost)
 					committed = std::move(next);
@@ -1602,6 +1783,22 @@ BaseGradientResult SolveBaseGradient(
 				RCLCPP_INFO(node->get_logger(), "  restart %d: placement settled -- converged", restart_idx + 1);
 				break;
 			}
+		}
+
+		// Option "keep descending": refine wherever the descent ended.
+		if (params.refine_solves > 0 && !rr.sol.tour.empty())
+		{
+			InnerSolution start = rr.sol;
+			if (use_real_cost)
+				start.real_cost = real_cost_of(rr.placement, start);
+			rr.sol = refine(rr.placement, start, params.refine_solves);  // best of start and the refine solves
+			rr.cost = cost_at_final_weight(rr.sol);
+			rr.ok = rr.sol.all_reachable;
+			RCLCPP_INFO(
+				node->get_logger(),
+				"  restart %d: refined %d solves at final abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  real %.2f -> %.2f",
+				restart_idx + 1, params.refine_solves, rr.placement.x, rr.placement.y, rr.placement.z, start.travel_cost,
+				rr.sol.travel_cost, start.real_cost, rr.sol.real_cost);
 		}
 
 		return rr;  // record() runs at least once, so rr holds this restart's best-cost solution
