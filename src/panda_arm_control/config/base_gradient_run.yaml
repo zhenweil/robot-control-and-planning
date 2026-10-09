@@ -28,5 +28,7 @@
     bg_manipulability_weight_initial: 100.0  # lambda during the descent
     bg_manipulability_weight: 10.0            # final lambda; also used to pick the reported best placement
     bg_log_manipulability_weight: 0.0        # mu
+    bg_manipulability_include_missed: true   # missed viewpoints count with their closest IK pose
+    bg_self_clearance_weight: 1000.0         # penalty for arm links closer than the threshold; 0 = off
+    bg_self_clearance_threshold: 0.10        # m
     bg_miss_gap_weight: 10.0
-    bg_reach_room_weight: 1000.0             # push missed viewpoints out of joint limits / collisions; 0 = off

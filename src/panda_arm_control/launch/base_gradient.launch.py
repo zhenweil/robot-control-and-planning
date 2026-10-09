@@ -136,11 +136,6 @@ def generate_launch_description():
         "miss_gap_weight", default_value="5000.0", description="Weight on missed viewpoints' closest-IK gap (0 = no miss gradient)."
     )
     miss_gap_weight = ParameterValue(LaunchConfiguration("miss_gap_weight"), value_type=float)
-    reach_room_weight_arg = DeclareLaunchArgument(
-        "reach_room_weight", default_value="0.0",
-        description="Weight on missed viewpoints' blocked joints/pairs (gives the arm room); 0 = off.",
-    )
-    reach_room_weight = ParameterValue(LaunchConfiguration("reach_room_weight"), value_type=float)
     freeze_order_arg = DeclareLaunchArgument(
         "freeze_order", default_value="false",
         description="Once all viewpoints are reached, keep the viewpoint order fixed (arm poses still re-picked).",
@@ -267,7 +262,6 @@ def generate_launch_description():
         "bg_log_manipulability_weight": log_manipulability_weight,
         # A missed viewpoint costs the penalty + this * its closest-IK pose gap (m), capped at the cap.
         "bg_miss_gap_weight": miss_gap_weight,
-        "bg_reach_room_weight": reach_room_weight,
         "bg_miss_gap_cap": 0.15,
         # Collision-aware closest IK for missed viewpoints: clearance margin (m), iterations, starts.
         "bg_closest_ik_margin": 0.02,
@@ -416,7 +410,6 @@ def generate_launch_description():
             manipulability_weight_initial_arg,
             log_manipulability_weight_arg,
             miss_gap_weight_arg,
-            reach_room_weight_arg,
             freeze_order_arg,
             lock_input_order_arg,
             manipulability_after_reach_arg,

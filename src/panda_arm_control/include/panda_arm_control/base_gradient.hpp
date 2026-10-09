@@ -37,6 +37,12 @@ struct BaseGradientParams
 	double manipulability_weight_initial = 40.0;
 	double manipulability_weight_decay = 0.8;
 	double log_manipulability_weight = 2.0;
+	// Missed viewpoints add their closest-IK pose's manipulability too (cost and gradient).
+	bool manipulability_include_missed = false;
+	// Self-clearance: each arm pose costs weight * sum over arm-arm pairs closer than the threshold of
+	// (threshold - distance)^2, so folded postures cost more. 0 = off.
+	double self_clearance_weight = 0.0;
+	double self_clearance_threshold = 0.10;  // m
 	// A missed viewpoint costs unreachable_penalty + miss_gap_weight * min(gap, miss_gap_cap), where gap
 	// is its closest-IK pose gap (m, rotation scaled by rot_metric_scale): gives misses a gradient.
 	double miss_gap_weight = 5000.0;
@@ -47,10 +53,6 @@ struct BaseGradientParams
 	double closest_ik_margin = 0.02;
 	int closest_ik_iters = 60;
 	int closest_ik_starts = 5;
-
-	// Missed viewpoint: how far the step that would reach it pushes joints past limits or pairs inside the
-	// margin, at its closest pose; the gradient moves the object to give the arm room. 0 = off.
-	double reach_room_weight = 0.0;
 
 	double unreachable_penalty = 50.0;
 

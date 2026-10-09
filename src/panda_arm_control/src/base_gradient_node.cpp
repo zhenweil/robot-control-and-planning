@@ -52,7 +52,9 @@ struct Params
 	double bg_manipulability_weight_decay = 0.8;
 	double bg_log_manipulability_weight = 2.0;
 	double bg_miss_gap_weight = 5000.0;
-	double bg_reach_room_weight = 0.0;
+	bool bg_manipulability_include_missed = false;
+	double bg_self_clearance_weight = 0.0;
+	double bg_self_clearance_threshold = 0.10;
 	double bg_miss_gap_cap = 0.15;
 	double bg_closest_ik_margin = 0.02;
 	int bg_closest_ik_iters = 60;
@@ -251,7 +253,9 @@ private:
 		this->declareIfNeeded("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->declareIfNeeded("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
 		this->declareIfNeeded("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
-		this->declareIfNeeded("bg_reach_room_weight", this->params.bg_reach_room_weight);
+		this->declareIfNeeded("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
+		this->declareIfNeeded("bg_self_clearance_weight", this->params.bg_self_clearance_weight);
+		this->declareIfNeeded("bg_self_clearance_threshold", this->params.bg_self_clearance_threshold);
 		this->declareIfNeeded("bg_miss_gap_cap", this->params.bg_miss_gap_cap);
 		this->declareIfNeeded("bg_closest_ik_margin", this->params.bg_closest_ik_margin);
 		this->declareIfNeeded("bg_closest_ik_iters", this->params.bg_closest_ik_iters);
@@ -329,7 +333,9 @@ private:
 		this->get_parameter("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->get_parameter("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
 		this->get_parameter("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
-		this->get_parameter("bg_reach_room_weight", this->params.bg_reach_room_weight);
+		this->get_parameter("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
+		this->get_parameter("bg_self_clearance_weight", this->params.bg_self_clearance_weight);
+		this->get_parameter("bg_self_clearance_threshold", this->params.bg_self_clearance_threshold);
 		this->get_parameter("bg_miss_gap_cap", this->params.bg_miss_gap_cap);
 		this->get_parameter("bg_closest_ik_margin", this->params.bg_closest_ik_margin);
 		this->get_parameter("bg_closest_ik_iters", this->params.bg_closest_ik_iters);
@@ -425,7 +431,9 @@ private:
 		bg.manipulability_weight_decay = this->params.bg_manipulability_weight_decay;
 		bg.log_manipulability_weight = this->params.bg_log_manipulability_weight;
 		bg.miss_gap_weight = this->params.bg_miss_gap_weight;
-		bg.reach_room_weight = this->params.bg_reach_room_weight;
+		bg.manipulability_include_missed = this->params.bg_manipulability_include_missed;
+		bg.self_clearance_weight = this->params.bg_self_clearance_weight;
+		bg.self_clearance_threshold = this->params.bg_self_clearance_threshold;
 		bg.miss_gap_cap = this->params.bg_miss_gap_cap;
 		bg.closest_ik_margin = this->params.bg_closest_ik_margin;
 		bg.closest_ik_iters = this->params.bg_closest_ik_iters;
