@@ -52,6 +52,7 @@ struct Params
 	double bg_manipulability_weight_decay = 0.8;
 	double bg_log_manipulability_weight = 2.0;
 	double bg_miss_gap_weight = 5000.0;
+	double bg_reach_room_weight = 0.0;
 	double bg_miss_gap_cap = 0.15;
 	double bg_closest_ik_margin = 0.02;
 	int bg_closest_ik_iters = 60;
@@ -84,7 +85,9 @@ struct Params
 	bool bg_manipulability_after_reach = false;
 	double bg_real_cost_planning_time = 0.0;
 	int bg_real_cost_attempts = 3;
+	bool bg_planned_travel_in_cost = false;
 	bool bg_steering = true;
+	bool bg_trace_line_search = false;
 	int bg_refine_at_reach = 0;
 
 	bool bg_fd_gradient_check = false;
@@ -248,6 +251,7 @@ private:
 		this->declareIfNeeded("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->declareIfNeeded("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
 		this->declareIfNeeded("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
+		this->declareIfNeeded("bg_reach_room_weight", this->params.bg_reach_room_weight);
 		this->declareIfNeeded("bg_miss_gap_cap", this->params.bg_miss_gap_cap);
 		this->declareIfNeeded("bg_closest_ik_margin", this->params.bg_closest_ik_margin);
 		this->declareIfNeeded("bg_closest_ik_iters", this->params.bg_closest_ik_iters);
@@ -277,7 +281,9 @@ private:
 		this->declareIfNeeded("bg_manipulability_after_reach", this->params.bg_manipulability_after_reach);
 		this->declareIfNeeded("bg_real_cost_planning_time", this->params.bg_real_cost_planning_time);
 		this->declareIfNeeded("bg_real_cost_attempts", this->params.bg_real_cost_attempts);
+		this->declareIfNeeded("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->declareIfNeeded("bg_steering", this->params.bg_steering);
+		this->declareIfNeeded("bg_trace_line_search", this->params.bg_trace_line_search);
 		this->declareIfNeeded("bg_refine_at_reach", this->params.bg_refine_at_reach);
 		this->declareIfNeeded("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
 		this->declareIfNeeded("bg_fd_epsilon", this->params.bg_fd_epsilon);
@@ -323,6 +329,7 @@ private:
 		this->get_parameter("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->get_parameter("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
 		this->get_parameter("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
+		this->get_parameter("bg_reach_room_weight", this->params.bg_reach_room_weight);
 		this->get_parameter("bg_miss_gap_cap", this->params.bg_miss_gap_cap);
 		this->get_parameter("bg_closest_ik_margin", this->params.bg_closest_ik_margin);
 		this->get_parameter("bg_closest_ik_iters", this->params.bg_closest_ik_iters);
@@ -352,7 +359,9 @@ private:
 		this->get_parameter("bg_manipulability_after_reach", this->params.bg_manipulability_after_reach);
 		this->get_parameter("bg_real_cost_planning_time", this->params.bg_real_cost_planning_time);
 		this->get_parameter("bg_real_cost_attempts", this->params.bg_real_cost_attempts);
+		this->get_parameter("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->get_parameter("bg_steering", this->params.bg_steering);
+		this->get_parameter("bg_trace_line_search", this->params.bg_trace_line_search);
 		this->get_parameter("bg_refine_at_reach", this->params.bg_refine_at_reach);
 		this->get_parameter("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
 		this->get_parameter("bg_fd_epsilon", this->params.bg_fd_epsilon);
@@ -416,6 +425,7 @@ private:
 		bg.manipulability_weight_decay = this->params.bg_manipulability_weight_decay;
 		bg.log_manipulability_weight = this->params.bg_log_manipulability_weight;
 		bg.miss_gap_weight = this->params.bg_miss_gap_weight;
+		bg.reach_room_weight = this->params.bg_reach_room_weight;
 		bg.miss_gap_cap = this->params.bg_miss_gap_cap;
 		bg.closest_ik_margin = this->params.bg_closest_ik_margin;
 		bg.closest_ik_iters = this->params.bg_closest_ik_iters;
@@ -446,7 +456,9 @@ private:
 		bg.manipulability_after_reach = this->params.bg_manipulability_after_reach;
 		bg.real_cost_planning_time = this->params.bg_real_cost_planning_time;
 		bg.real_cost_attempts = this->params.bg_real_cost_attempts;
+		bg.planned_travel_in_cost = this->params.bg_planned_travel_in_cost;
 		bg.steering = this->params.bg_steering;
+		bg.trace_line_search = this->params.bg_trace_line_search;
 		bg.refine_at_reach = this->params.bg_refine_at_reach;
 		bg.random_seed = this->params.random_seed;
 		bg.fd_gradient_check = this->params.bg_fd_gradient_check;

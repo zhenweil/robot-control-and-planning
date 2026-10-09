@@ -1,5 +1,7 @@
+import os
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -130,6 +132,15 @@ def generate_launch_description():
         "log_manipulability_weight", default_value="2.0", description="mu (log-manipulability barrier weight)."
     )
     log_manipulability_weight = ParameterValue(LaunchConfiguration("log_manipulability_weight"), value_type=float)
+    miss_gap_weight_arg = DeclareLaunchArgument(
+        "miss_gap_weight", default_value="5000.0", description="Weight on missed viewpoints' closest-IK gap (0 = no miss gradient)."
+    )
+    miss_gap_weight = ParameterValue(LaunchConfiguration("miss_gap_weight"), value_type=float)
+    reach_room_weight_arg = DeclareLaunchArgument(
+        "reach_room_weight", default_value="0.0",
+        description="Weight on missed viewpoints' blocked joints/pairs (gives the arm room); 0 = off.",
+    )
+    reach_room_weight = ParameterValue(LaunchConfiguration("reach_room_weight"), value_type=float)
     freeze_order_arg = DeclareLaunchArgument(
         "freeze_order", default_value="false",
         description="Once all viewpoints are reached, keep the viewpoint order fixed (arm poses still re-picked).",
@@ -154,10 +165,20 @@ def generate_launch_description():
         "real_cost_attempts", default_value="3", description="Planning attempts per leg for the real cost."
     )
     real_cost_attempts = ParameterValue(LaunchConfiguration("real_cost_attempts"), value_type=int)
+    planned_travel_in_cost_arg = DeclareLaunchArgument(
+        "planned_travel_in_cost", default_value="false",
+        description="Travel in the cost = OMPL-planned joint travel; overrides travel_in_cost (needs real_cost_planning_time > 0).",
+    )
+    planned_travel_in_cost = ParameterValue(LaunchConfiguration("planned_travel_in_cost"), value_type=bool)
     steering_arg = DeclareLaunchArgument(
         "steering", default_value="true", description="Steer the step around viewpoints it would lose."
     )
     steering = ParameterValue(LaunchConfiguration("steering"), value_type=bool)
+    trace_line_search_arg = DeclareLaunchArgument(
+        "trace_line_search", default_value="false",
+        description="Log every line-search probe and full solve against the current point.",
+    )
+    trace_line_search = ParameterValue(LaunchConfiguration("trace_line_search"), value_type=bool)
     refine_at_reach_arg = DeclareLaunchArgument(
         "refine_at_reach", default_value="0",
         description="Log N refine solves at the first all-reached placement; the descent then continues.",
@@ -245,7 +266,8 @@ def generate_launch_description():
         # Reach-margin barrier: objective also subtracts this * sum of log(manipulability).
         "bg_log_manipulability_weight": log_manipulability_weight,
         # A missed viewpoint costs the penalty + this * its closest-IK pose gap (m), capped at the cap.
-        "bg_miss_gap_weight": 5000.0,
+        "bg_miss_gap_weight": miss_gap_weight,
+        "bg_reach_room_weight": reach_room_weight,
         "bg_miss_gap_cap": 0.15,
         # Collision-aware closest IK for missed viewpoints: clearance margin (m), iterations, starts.
         "bg_closest_ik_margin": 0.02,
@@ -282,7 +304,9 @@ def generate_launch_description():
         "bg_manipulability_after_reach": manipulability_after_reach,
         "bg_real_cost_planning_time": real_cost_planning_time,
         "bg_real_cost_attempts": real_cost_attempts,
+        "bg_planned_travel_in_cost": planned_travel_in_cost,
         "bg_steering": steering,
+        "bg_trace_line_search": trace_line_search,
         "bg_refine_at_reach": refine_at_reach,
         "bg_fd_gradient_check": fd_gradient_check,
         "bg_fd_epsilon": 1e-4,
@@ -300,16 +324,26 @@ def generate_launch_description():
         [FindPackageShare("panda_arm_control"), "config", "object_pose.yaml"]
     )
 
-    base_gradient_node = Node(
-        package="panda_arm_control",
-        executable="base_gradient",
-        name="base_gradient",
-        output="screen",
-        parameters=[moveit_config.to_dict(), base_gradient_params, object_pose_config],
-        # Makes MoveIt's IK (KDL) deterministic -- it otherwise re-seeds from /dev/urandom on
-        # retries, which is the main run-to-run inconsistency in the result.
-        additional_env={"RANDOM_SEED": random_seed},
+    params_file_arg = DeclareLaunchArgument(
+        "params_file", default_value="",
+        description="Optional YAML of bg_* node parameters; loaded last, so it overrides the launch arguments.",
     )
+
+    def make_base_gradient_node(context):
+        params_file = LaunchConfiguration("params_file").perform(context)
+        extra = [os.path.expanduser(params_file)] if params_file else []
+        return [Node(
+            package="panda_arm_control",
+            executable="base_gradient",
+            name="base_gradient",
+            output="screen",
+            parameters=[moveit_config.to_dict(), base_gradient_params, object_pose_config, *extra],
+            # Makes MoveIt's IK (KDL) deterministic -- it otherwise re-seeds from /dev/urandom on
+            # retries, which is the main run-to-run inconsistency in the result.
+            additional_env={"RANDOM_SEED": random_seed},
+        )]
+
+    base_gradient_node = OpaqueFunction(function=make_base_gradient_node)
 
     rviz_config = PathJoinSubstitution(
         [FindPackageShare("panda_arm_control"), "config", "viewpoint_planner.rviz"]
@@ -381,17 +415,22 @@ def generate_launch_description():
             travel_in_cost_arg,
             manipulability_weight_initial_arg,
             log_manipulability_weight_arg,
+            miss_gap_weight_arg,
+            reach_room_weight_arg,
             freeze_order_arg,
             lock_input_order_arg,
             manipulability_after_reach_arg,
             real_cost_planning_time_arg,
             real_cost_attempts_arg,
+            planned_travel_in_cost_arg,
             steering_arg,
+            trace_line_search_arg,
             refine_at_reach_arg,
             *position_bound_args,
             *initial_position_args,
             output_dir_arg,
             tour_input_dir_arg,
+            params_file_arg,
             base_gradient_node,
             robot_state_publisher_node,
             joint_state_publisher_node,

@@ -48,6 +48,10 @@ struct BaseGradientParams
 	int closest_ik_iters = 60;
 	int closest_ik_starts = 5;
 
+	// Missed viewpoint: how far the step that would reach it pushes joints past limits or pairs inside the
+	// margin, at its closest pose; the gradient moves the object to give the arm room. 0 = off.
+	double reach_room_weight = 0.0;
+
 	double unreachable_penalty = 50.0;
 
 	// Parameters for GTSP
@@ -81,7 +85,10 @@ struct BaseGradientParams
 	// > 0: refine picks tours by real cost (OMPL-planned joint travel); seconds per planning attempt.
 	double real_cost_planning_time = 0.0;
 	int real_cost_attempts = 3;  // planning attempts per leg; the shortest joint path is kept
+	// Travel in the cost = planned joint travel instead of the L2 estimate, whatever travel_in_cost says (needs real_cost_planning_time > 0).
+	bool planned_travel_in_cost = false;
 	bool steering = true;  // steer the step around viewpoints it would lose (false: only shrink the step)
+	bool trace_line_search = false;  // log every line-search probe and full solve against the current point
 	int refine_at_reach = 0;  // log N refine solves at the first all-reached placement (descent continues)
 
 	int random_seed = 42;

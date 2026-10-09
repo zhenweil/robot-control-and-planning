@@ -1,0 +1,32 @@
+# Example run settings for base_gradient.launch.py params_file:=...
+# Node parameter names (bg_ prefix); loaded last, so these override the launch arguments.
+# Positions and bounds are abs (m, base frame).
+/**:
+  ros__parameters:
+    # Start position and bounds
+    bg_initial_x: 0.0
+    bg_initial_y: -0.2
+    bg_initial_z: 0.1094
+    bg_x_min: -0.6
+    bg_x_max: 0.6
+    bg_y_min: -0.6
+    bg_y_max: 0.6
+    bg_z_min: -0.2
+    bg_z_max: 0.2
+
+    # Descent
+    bg_descent_num_restart: 1
+    bg_stop_when_all_reached: true
+    bg_steering: true
+    bg_trace_line_search: true
+
+    # Cost
+    bg_travel_gradient: false
+    bg_travel_in_cost: false
+    bg_planned_travel_in_cost: true
+    bg_real_cost_planning_time: 0.5
+    bg_manipulability_weight_initial: 100.0  # lambda during the descent
+    bg_manipulability_weight: 10.0            # final lambda; also used to pick the reported best placement
+    bg_log_manipulability_weight: 0.0        # mu
+    bg_miss_gap_weight: 10.0
+    bg_reach_room_weight: 1000.0             # push missed viewpoints out of joint limits / collisions; 0 = off
