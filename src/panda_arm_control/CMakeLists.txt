@@ -22,6 +22,7 @@ find_package(geometric_shapes REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(random_numbers REQUIRED)
+find_package(ompl REQUIRED)
 find_package(jsoncpp REQUIRED)
 # osqp_vendor (ros-humble-osqp-vendor) makes upstream OSQP's own CMake package findable.
 find_package(osqp REQUIRED)
@@ -119,6 +120,9 @@ endforeach()
 
 # bstar_placement's B* implementation solves a sequence of linear programs with OSQP.
 target_link_libraries(bstar_placement osqp::osqp)
+
+# base_gradient seeds OMPL (planned travel) from RANDOM_SEED so runs repeat.
+target_link_libraries(base_gradient ompl::ompl)
 
 install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}

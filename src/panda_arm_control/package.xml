@@ -19,6 +19,7 @@
   <depend>visualization_msgs</depend>
   <depend>ament_index_cpp</depend>
   <depend>random_numbers</depend>
+  <depend>ompl</depend>
   <depend>libvtk9-dev</depend>
   <depend>libjsoncpp-dev</depend>
   <depend>osqp_vendor</depend>

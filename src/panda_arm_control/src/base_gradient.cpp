@@ -2107,6 +2107,11 @@ BaseGradientResult SolveBaseGradient(
 			// Steering: when a probe loses a reached viewpoint, remove the part of the direction that lowers its
 			// manipulability (reach edge) or, failing that, grows its closest-IK gap at the probe (limit, collision).
 			std::vector<Eigen::Matrix<double, 5, 1>> blocked;  // orthonormal, step metric
+			// More viewpoints reached wins; cost only breaks ties. Used for probes and the full solve.
+			auto better = [](const InnerSolution& a, const InnerSolution& b) {
+				return a.num_reachable > b.num_reachable ||
+					(a.num_reachable == b.num_reachable && a.weighted_cost < b.weighted_cost);
+			};
 			int num_steers = 0;
 			const int kMaxSteers = 3;
 			for (int ls = 0; ls < params.max_line_search_iters;)
@@ -2136,15 +2141,19 @@ BaseGradientResult SolveBaseGradient(
 				}
 				// Never trade away a reached viewpoint, whatever the cost says. Compared with the quick solve
 				// here (same IK effort), so a viewpoint the quick solve merely failed to find doesn't block the step.
-				if (probe.num_reachable >= here_quick.num_reachable &&
-					probe.weighted_cost < here_quick.weighted_cost)
+				if (better(probe, here_quick))
 				{
 					accepted = true;
 					b_new = cand;
 					next = std::move(probe);
 					break;
 				}
-				if (params.steering && probe.num_reachable < here_quick.num_reachable && num_steers < kMaxSteers)
+				// Steer whenever a reached viewpoint is lost, even if the probe gained another.
+				bool lost_any = false;
+				for (int v : here_quick.tour)
+					if (std::find(probe.tour.begin(), probe.tour.end(), v) == probe.tour.end())
+						lost_any = true;
+				if (params.steering && lost_any && num_steers < kMaxSteers)
 				{
 					bool steered = false;
 					for (int v : probe.missed_vp)
@@ -2217,16 +2226,15 @@ BaseGradientResult SolveBaseGradient(
 					params.max_solutions_per_candidate, order_lock);
 				result.num_inner_solves += std::max(1, params.gtsp_num_restart);
 				add_planned_travel(b_new, committed);
-				if (next.weighted_cost < committed.weighted_cost)
+				if (better(next, committed))
 					committed = std::move(next);
+				const bool keep = better(committed, cur);
 				if (params.trace_line_search)
 					RCLCPP_INFO(
 						node->get_logger(), "    full solve: reached %d vs %d current, cost %.2f vs %.2f current -> %s",
 						committed.num_reachable, cur.num_reachable, committed.weighted_cost, cur.weighted_cost,
-						(committed.weighted_cost > cur.weighted_cost || committed.num_reachable < cur.num_reachable)
-							? "rejected"
-							: "accepted");
-				if (committed.weighted_cost > cur.weighted_cost || committed.num_reachable < cur.num_reachable)
+						keep ? "accepted" : "rejected");
+				if (!keep)
 					accepted = false;  // quick probe looked better but the full solve isn't
 			}
 
@@ -2255,6 +2263,7 @@ BaseGradientResult SolveBaseGradient(
 			du(4) *= rot_scale;
 			double base_move = du.norm();
 			double rel_impr = (cur.weighted_cost - committed.weighted_cost) / std::max(std::abs(cur.weighted_cost), 1e-9);
+			const bool gained = committed.num_reachable > cur.num_reachable;  // progress even if the cost rose
 
 			base = b_new;
 			cur = std::move(committed);
@@ -2275,7 +2284,7 @@ BaseGradientResult SolveBaseGradient(
 				node, params, object_pose_obj, tour_poses_obj, base_history,
 				Eigen::Vector3d(-g.head<3>()), base, state, jmg, cur);
 
-			if (rel_impr < params.convergence_tolerance_cost)
+			if (!gained && rel_impr < params.convergence_tolerance_cost)
 			{
 				if (++stall_count >= std::max(1, params.patience))
 				{
@@ -2296,7 +2305,7 @@ BaseGradientResult SolveBaseGradient(
 				stall_count = 0;
 			}
 
-			if (base_move < params.convergence_tolerance_offset && rel_impr < params.convergence_tolerance_cost)
+			if (!gained && base_move < params.convergence_tolerance_offset && rel_impr < params.convergence_tolerance_cost)
 			{
 				if (annealing)
 				{

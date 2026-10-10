@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
@@ -11,6 +12,7 @@
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_state/robot_state.h>
+#include <ompl/util/RandomNumbers.h>
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
@@ -559,6 +561,13 @@ private:
 
 int main(int argc, char* argv[])
 {
+	// Seed OMPL before any planner exists (it only takes a seed once), so planned travel repeats run to run.
+	if (const char* seed = std::getenv("RANDOM_SEED"))
+	{
+		const unsigned long s = std::strtoul(seed, nullptr, 10);
+		if (s != 0)
+			ompl::RNG::setSeed(static_cast<std::uint_fast32_t>(s));
+	}
 	rclcpp::init(argc, argv);
 	auto node = std::make_shared<BaseGradientNode>();
 
