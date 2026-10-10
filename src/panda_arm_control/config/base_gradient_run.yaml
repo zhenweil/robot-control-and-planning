@@ -19,7 +19,7 @@
 
     # Descent
     bg_descent_num_restart: 1
-    bg_stop_when_all_reached: false
+    bg_stop_when_all_reached: true
     bg_room_then_reach: true                 # when stuck: aim at a missed viewpoint; if a blocker is lost, give it room first
     bg_room_budget: 30.0                     # how much the cost may rise during room moves
     bg_track_probes: true                    # probes follow the current arm poses; new arm poses are searched only at accepted spots
@@ -47,6 +47,7 @@
     bg_log_manipulability_weight: 0.0        # mu (off: soft-min instead)
     bg_softmin_manipulability_weight: 1000.0 # pull from the worst poses' manipulability; 0 = off
     bg_softmin_tau: 0.01                     # small = only the worst pose, large = closer to the average
+    bg_manipulability_after_reach: true      # comfort terms (manipulability, soft-min) off while any viewpoint is missed
     bg_manipulability_include_missed: true   # missed viewpoints count with their closest IK pose
     bg_manipulability_limit_sharpness: 20.0  # joints near a limit count less in manipulability; 0 = plain
     bg_self_clearance_weight: 0.2            # -sum log(arm-arm pair distance); 0 = off

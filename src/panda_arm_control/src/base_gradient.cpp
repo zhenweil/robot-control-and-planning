@@ -2068,12 +2068,16 @@ BaseGradientResult SolveBaseGradient(
 		params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
 		params.log_manipulability_weight = params_in.log_manipulability_weight;
 		// manipulability_after_reach: misses only (lambda = mu = 0) until every viewpoint is reached.
+		// manipulability_after_reach: comfort terms (lambda, mu, soft-min) off while any viewpoint is missed, so the
+		// step follows the miss gaps instead of being outvoted; back on once everything is reached.
 		bool manipulability_on = !params.manipulability_after_reach;
-		if (!manipulability_on)
-		{
+		auto comfort_off = [&]() {
 			params.manipulability_weight = 0.0;
 			params.log_manipulability_weight = 0.0;
-		}
+			params.softmin_manipulability_weight = 0.0;
+		};
+		if (!manipulability_on)
+			comfort_off();
 		std::vector<ObjectPlacement> base_history{base};
 		std::vector<std::vector<double>> seeds =
 			warm ? SeedsFromSolution(*warm, fallback_seed, static_cast<size_t>(n))
@@ -2145,7 +2149,7 @@ BaseGradientResult SolveBaseGradient(
 			InnerSolution sf = s;
 			sf.weighted_cost = travel_term(s) - lambda_final * s.sum_manipulability -
 				params_in.log_manipulability_weight * s.sum_log_manipulability -
-				params.softmin_manipulability_weight * s.softmin_manipulability +
+				params_in.softmin_manipulability_weight * s.softmin_manipulability +
 				params.unreachable_penalty * (s.num_total - s.num_reachable) + s.miss_cost + s.clearance_cost + s.limit_cost;
 			result.history.push_back(
 				{static_cast<double>(restart_idx), b.x, b.y, b.z, b.roll, b.pitch, b.yaw, sf.weighted_cost});
@@ -2261,7 +2265,7 @@ BaseGradientResult SolveBaseGradient(
 		auto cost_at_final_weight = [&](const InnerSolution& sol) {
 			return travel_term(sol) - lambda_final * sol.sum_manipulability -
 				params_in.log_manipulability_weight * sol.sum_log_manipulability -
-				params.softmin_manipulability_weight * sol.softmin_manipulability +
+				params_in.softmin_manipulability_weight * sol.softmin_manipulability +
 				params.unreachable_penalty * (sol.num_total - sol.num_reachable) + sol.miss_cost + sol.clearance_cost + sol.limit_cost;
 		};
 		// Refine at a fixed placement: more full solves, each warm-started from the best so far, scored at the
@@ -2330,14 +2334,21 @@ BaseGradientResult SolveBaseGradient(
 			if (outer > 0)
 			{
 				// Hold the weight high (reach recovery) while any viewpoint is missed; decay it otherwise.
-				if (!manipulability_on)
+				if (params.manipulability_after_reach && manipulability_on && !cur.all_reachable)
+				{
+					manipulability_on = false;
+					comfort_off();
+					RCLCPP_INFO(node->get_logger(), "  restart %d: viewpoint missed -- comfort terms off", restart_idx + 1);
+				}
+				else if (!manipulability_on)
 				{
 					if (cur.all_reachable)
 					{
 						manipulability_on = true;
 						params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
 						params.log_manipulability_weight = params_in.log_manipulability_weight;
-						RCLCPP_INFO(node->get_logger(), "  restart %d: all reached -- manipulability on", restart_idx + 1);
+						params.softmin_manipulability_weight = params_in.softmin_manipulability_weight;
+						RCLCPP_INFO(node->get_logger(), "  restart %d: all reached -- comfort terms on", restart_idx + 1);
 					}
 				}
 				else if (!cur.all_reachable)
@@ -2346,7 +2357,7 @@ BaseGradientResult SolveBaseGradient(
 					params.manipulability_weight = std::max(
 						lambda_final, params.manipulability_weight * params_in.manipulability_weight_decay);
 				// Snap to the final weight once within 5% of the starting gap, so a final weight of 0 ends.
-				if (params.manipulability_weight - lambda_final <
+				if (manipulability_on && params.manipulability_weight - lambda_final <
 					0.05 * (params_in.manipulability_weight_initial - lambda_final))
 					params.manipulability_weight = lambda_final;
 				cur.weighted_cost = travel_term(cur) - params.manipulability_weight * cur.sum_manipulability -
@@ -2482,19 +2493,31 @@ BaseGradientResult SolveBaseGradient(
 			// Steering: when a probe loses a reached viewpoint, remove the part of the direction that lowers its
 			// manipulability (reach edge) or, failing that, grows its closest-IK gap at the probe (limit, collision).
 			std::vector<Eigen::Matrix<double, 6, 1>> blocked;  // orthonormal, step metric
+			// Cost for comparisons: while either side misses a viewpoint, without planned travel -- it jumps when an
+			// arm pose switches family and the gradient doesn't see it, so it mustn't veto reaching. Reaching first.
+			auto cmp_cost = [&](const InnerSolution& s, bool reach_phase) {
+				if (!reach_phase || s.real_cost < 0.0)
+					return s.weighted_cost;
+				return s.weighted_cost - (s.real_cost - (params.travel_in_cost ? s.travel_cost : 0.0));
+			};
+			auto reaching = [](const InnerSolution& a, const InnerSolution& b) {
+				return !a.all_reachable || !b.all_reachable;
+			};
 			// More viewpoints reached wins; cost only breaks ties.
-			auto better = [](const InnerSolution& a, const InnerSolution& b) {
+			auto better = [&](const InnerSolution& a, const InnerSolution& b) {
+				const bool r = reaching(a, b);
 				return a.num_reachable > b.num_reachable ||
-					(a.num_reachable == b.num_reachable && a.weighted_cost < b.weighted_cost);
+					(a.num_reachable == b.num_reachable && cmp_cost(a, r) < cmp_cost(b, r));
 			};
 			// Accepting a move: same rule, but tolerate a cost rise up to cost_slack (planned-travel noise), and
 			// losing up to miss_tolerance viewpoints when the cost (which charges each miss) still drops.
 			const double slack = std::max(0.0, params.cost_slack);
 			const int tol = std::max(0, params.miss_tolerance);
-			auto acceptable = [slack, tol](const InnerSolution& a, const InnerSolution& b) {
-				return a.num_reachable > b.num_reachable ||
-					(a.num_reachable == b.num_reachable && a.weighted_cost < b.weighted_cost + slack) ||
-					(a.num_reachable >= b.num_reachable - tol && a.weighted_cost < b.weighted_cost);
+			auto acceptable = [&](const InnerSolution& a, const InnerSolution& b) {
+				const bool r = reaching(a, b);
+				const double ca = cmp_cost(a, r), cb = cmp_cost(b, r);
+				return a.num_reachable > b.num_reachable || (a.num_reachable == b.num_reachable && ca < cb + slack) ||
+					(a.num_reachable >= b.num_reachable - tol && ca < cb);
 			};
 			// Viewpoint v is reached here but missed at cand: the direction (step metric) whose opposite loses it --
 			// its manipulability slope (reach edge) or, failing that, its gap slope at cand. Zero if neither fits step_dir.
@@ -2861,7 +2884,7 @@ BaseGradientResult SolveBaseGradient(
 							const bool ok =
 								lost_from(here_quick, probe).empty() && probe.num_reachable > here_quick.num_reachable;
 							const bool walk = !ok && lost.empty() &&
-								probe.weighted_cost <= here_quick.weighted_cost + params.room_budget;
+								cmp_cost(probe, true) <= cmp_cost(here_quick, true) + params.room_budget;
 							if (params.trace_line_search)
 								RCLCPP_INFO(
 									node->get_logger(),
@@ -2917,7 +2940,8 @@ BaseGradientResult SolveBaseGradient(
 							if (lost.empty())
 								add_planned_travel(cand, rp);
 							const bool gained = lost_from(here_quick, rp).empty() && rp.num_reachable > here_quick.num_reachable;
-							const bool ok = lost.empty() && rp.weighted_cost <= here_quick.weighted_cost + params.room_budget;
+							const bool ok =
+								lost.empty() && cmp_cost(rp, true) <= cmp_cost(here_quick, true) + params.room_budget;
 							if (params.trace_line_search)
 								RCLCPP_INFO(
 									node->get_logger(),
