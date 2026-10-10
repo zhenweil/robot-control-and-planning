@@ -122,7 +122,7 @@ endforeach()
 target_link_libraries(bstar_placement osqp::osqp)
 
 # base_gradient seeds OMPL (planned travel) from RANDOM_SEED so runs repeat.
-target_link_libraries(base_gradient ompl::ompl)
+target_link_libraries(base_gradient ompl::ompl osqp::osqp)  # osqp: reach-rule step QP
 
 install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}

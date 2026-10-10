@@ -6,22 +6,36 @@
     # Start position and bounds
     bg_initial_x: 0.0
     bg_initial_y: -0.2
-    bg_initial_z: 0.1094
+    bg_initial_z: 0.11
     bg_x_min: -0.6
     bg_x_max: 0.6
     bg_y_min: -0.6
     bg_y_max: 0.6
     bg_z_min: -0.2
     bg_z_max: 0.2
+    bg_yaw_min: -3.1416                      # rad: spin about base z through the object's position; min == max locks it
+    bg_yaw_max: 3.1416
+    bg_yaw_after_translation: false          # false = spin from the start; true = only once translation stops improving
 
     # Descent
     bg_descent_num_restart: 1
-    bg_stop_when_all_reached: true
+    bg_stop_when_all_reached: false
+    bg_room_then_reach: true                 # when stuck: aim at a missed viewpoint; if a blocker is lost, give it room first
+    bg_room_budget: 30.0                     # how much the cost may rise during room moves
+    bg_track_probes: true                    # probes follow the current arm poses; new arm poses are searched only at accepted spots
+    bg_reach_rules: false                    # a QP picks each step: reached viewpoints keep room, missed gaps shrink first
+    bg_rule_limit_room: 0.02                 # share of a joint's range a reached pose must keep from its limit
+    bg_rule_clearance: 0.005                 # m a reached pose must keep between arm links and from the object
     bg_steering: true
+    bg_miss_tolerance: 1                     # a move may lose this many reached viewpoints if total cost drops; best seen is returned
+    bg_reach_probe: true                     # when stuck with misses, try each missed viewpoint's own gap direction
     bg_trace_line_search: true
     bg_initial_step: 0.05                    # m: largest object move per iteration (first probe)
     bg_step_shrink: 0.5                     # each failed probe tries step * this
     bg_max_line_search_iters: 4              # probes per iteration before giving up
+
+    # IK: a fixed number of attempts instead of a time limit, so the same random_seed repeats the run
+    ik_attempts: 30
 
     # Cost
     bg_travel_gradient: false
@@ -39,3 +53,4 @@
     bg_joint_limit_weight: 10.0              # penalty as joints near their limits; 0 = off
     bg_joint_limit_zone: 0.15                # share of a joint's range from its limit where the penalty starts
     bg_miss_gap_weight: 200.0
+    bg_cost_slack: 2.0                       # accept a move if cost rises by at most this (planned-travel noise); 0 = strict

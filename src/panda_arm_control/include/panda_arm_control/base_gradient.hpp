@@ -11,7 +11,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 
-// Absolute object position bounds (m, base frame); roll/pitch tilt about the object's position.
+// Absolute object position bounds (m, base frame); roll/pitch tilt and yaw spin (about base z) about the object's position.
 struct BaseGradientBounds
 {
 	double x_min = -0.1, x_max = 1.1;
@@ -19,13 +19,15 @@ struct BaseGradientBounds
 	double z_min = -0.05, z_max = 0.35;
 	double roll_min = -0.35, roll_max = 0.35;	// radians (~20 deg)
 	double pitch_min = -0.35, pitch_max = 0.35;  // radians
+	double yaw_min = 0.0, yaw_max = 0.0;		 // radians; equal = locked
 };
 
 struct BaseGradientParams
 {
 	BaseGradientBounds bounds;
 	// Absolute start position (m, base frame), NaN = nominal; start tilt (rad).
-	double initial_x = NAN, initial_y = NAN, initial_z = NAN, initial_roll = 0.0, initial_pitch = 0.0;
+	double initial_x = NAN, initial_y = NAN, initial_z = NAN, initial_roll = 0.0, initial_pitch = 0.0,
+		   initial_yaw = 0.0;
 
 	// Weights for GTSP
 	double joint_distance_weight = 1.0;
@@ -57,6 +59,8 @@ struct BaseGradientParams
 	// is its closest-IK pose gap (m, rotation scaled by rot_metric_scale): gives misses a gradient.
 	double miss_gap_weight = 5000.0;
 	double miss_gap_cap = 0.15;
+	// Planned travel is noisy: with equal viewpoints reached, accept a move whose cost rises by at most this. 0 = strict.
+	double cost_slack = 0.0;
 
 	// Collision-aware closest IK for missed viewpoints: keeps arm-arm and arm-object pairs at least
 	// closest_ik_margin apart; iterations per start, and starts (warm seed + random) per viewpoint.
@@ -69,6 +73,8 @@ struct BaseGradientParams
 	// Parameters for GTSP
 	int max_solutions_per_candidate = 4; // number of IK solutions per viewpoint
 	double ik_timeout = 0.15;
+	// > 0: each IK call is this many single KDL attempts instead of ik_timeout seconds, so runs repeat.
+	int ik_attempts = 0;
 	int ik_retries_per_point = 10;
 	int gtsp_two_opt_rounds = 5;
 	int gtsp_num_restart = 2;
@@ -100,6 +106,23 @@ struct BaseGradientParams
 	// Travel in the cost = planned joint travel instead of the L2 estimate, whatever travel_in_cost says (needs real_cost_planning_time > 0).
 	bool planned_travel_in_cost = false;
 	bool steering = true;  // steer the step around viewpoints it would lose (false: only shrink the step)
+	// Hold yaw at its start until translation (and tilt) stop improving, then descend on all of them.
+	bool yaw_after_translation = true;
+	bool reach_probe = false;
+	// A move may lose up to this many reached viewpoints if the total cost drops; the best placement seen is returned.
+	int miss_tolerance = 0;
+	// Reach rules: a QP picks each step so reached viewpoints keep joint room (share of range) and clearance (m)
+	// above these floors, missed gaps shrink first, then the cost drops. Replaces the line search and steering.
+	bool reach_rules = false;
+	// Probes track the current arm poses (one warm IK attempt per viewpoint, fixed order) instead of a fresh search.
+	bool track_probes = false;
+	// Room-then-reach steering: one-sided walls learned from lost viewpoints; when stuck, aim at a missed viewpoint,
+	// and if a blocker is lost, first move to give it room (cost may rise by room_budget), then aim again.
+	bool room_then_reach = false;
+	double room_budget = 30.0;
+	bool tracking = false;  // internal: set on the params copy used for tracked solves
+	double rule_limit_room = 0.02;
+	double rule_clearance = 0.005;  // when stuck with misses, try a step along each missed viewpoint's own gap direction
 	bool trace_line_search = false;  // log every line-search probe and full solve against the current point
 	int refine_at_reach = 0;  // log N refine solves at the first all-reached placement (descent continues)
 
@@ -122,7 +145,7 @@ struct BaseGradientResult
 	int num_reachable = 0;
 	int num_total = 0;
 	// Absolute object position (m, base frame) and tilt about it (rad), relative to nominal orientation.
-	double x = 0.0, y = 0.0, z = 0.0, roll = 0.0, pitch = 0.0;
+	double x = 0.0, y = 0.0, z = 0.0, roll = 0.0, pitch = 0.0, yaw = 0.0;
 
 	// Input-pose indices in visit order (the inner GTSP's tour).
 	std::vector<int> tour_order;
@@ -134,9 +157,9 @@ struct BaseGradientResult
 
 	int num_inner_solves = 0;
 
-	// {restart, x, y, z, roll, pitch, weighted_cost} after each outer iteration across all
+	// {restart, x, y, z, roll, pitch, yaw, weighted_cost} after each outer iteration across all
 	// restarts -- for plotting the descents.
-	std::vector<std::array<double, 7>> history;
+	std::vector<std::array<double, 8>> history;
 };
 
 // Finds the object placement (abs x, y, z, roll, pitch) that minimizes tour joint travel, alternating
@@ -157,7 +180,8 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 
 // Rigid transform taking nominal (abs) object/viewpoint poses to the placement at abs (x, y, z), tilted.
 Eigen::Isometry3d PlacementTransform(
-	const Eigen::Vector3d& object_translation_nominal, double x, double y, double z, double roll, double pitch);
+	const Eigen::Vector3d& object_translation_nominal, double x, double y, double z, double roll, double pitch,
+	double yaw = 0.0);
 
 // Moves the scene's "object" to abs (x, y, z), tilted; only valid once the real object is re-fixtured to match.
 void ApplyObjectPlacementToScene(
@@ -167,7 +191,8 @@ void ApplyObjectPlacementToScene(
 	double y,
 	double z,
 	double roll,
-	double pitch);
+	double pitch,
+	double yaw = 0.0);
 
 // Object mesh + tour polyline/waypoints re-expressed in the recommended base's frame (same idea
 // as BuildBstarPlacementMarkerArray). frame_id is "world".

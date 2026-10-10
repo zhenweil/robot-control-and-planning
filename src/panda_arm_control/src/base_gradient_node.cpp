@@ -42,8 +42,10 @@ struct Params
 	double bg_z_min = -0.05, bg_z_max = 0.35;
 	double bg_roll_min = -0.35, bg_roll_max = 0.35;	  // rad (~20 deg) -- object tip
 	double bg_pitch_min = -0.35, bg_pitch_max = 0.35;  // rad -- object tilt
+	double bg_yaw_min = 0.0, bg_yaw_max = 0.0;		  // rad -- object spin about z; equal = locked
+	bool bg_yaw_after_translation = true;
 	double bg_initial_x = 0.5, bg_initial_y = 0.0, bg_initial_z = 0.15;
-	double bg_initial_roll = 0.0, bg_initial_pitch = 0.0;
+	double bg_initial_roll = 0.0, bg_initial_pitch = 0.0, bg_initial_yaw = 0.0;
 	double bg_rot_metric_scale = 0.3;  // m per rad, blends translation & tip/tilt in the step
 
 	double bg_joint_distance_weight = 1.0;
@@ -54,6 +56,7 @@ struct Params
 	double bg_manipulability_weight_decay = 0.8;
 	double bg_log_manipulability_weight = 2.0;
 	double bg_miss_gap_weight = 5000.0;
+	double bg_cost_slack = 0.0;
 	bool bg_manipulability_include_missed = false;
 	double bg_self_clearance_weight = 0.0;
 	double bg_joint_limit_weight = 0.0;
@@ -95,6 +98,14 @@ struct Params
 	int bg_real_cost_attempts = 3;
 	bool bg_planned_travel_in_cost = false;
 	bool bg_steering = true;
+	bool bg_reach_probe = false;
+	int bg_miss_tolerance = 0;
+	bool bg_reach_rules = false;
+	bool bg_track_probes = false;
+	bool bg_room_then_reach = false;
+	double bg_room_budget = 30.0;
+	double bg_rule_limit_room = 0.02;
+	double bg_rule_clearance = 0.005;
 	bool bg_trace_line_search = false;
 	int bg_refine_at_reach = 0;
 
@@ -102,6 +113,7 @@ struct Params
 	double bg_fd_epsilon = 1e-4;
 
 	double ik_timeout = 0.15;
+	int ik_attempts = 0;
 	int random_seed = 42;
 	double visualize_progress_delay_sec = 0.0;
 
@@ -244,11 +256,15 @@ private:
 		this->declareIfNeeded("bg_roll_max", this->params.bg_roll_max);
 		this->declareIfNeeded("bg_pitch_min", this->params.bg_pitch_min);
 		this->declareIfNeeded("bg_pitch_max", this->params.bg_pitch_max);
+		this->declareIfNeeded("bg_yaw_min", this->params.bg_yaw_min);
+		this->declareIfNeeded("bg_yaw_max", this->params.bg_yaw_max);
+		this->declareIfNeeded("bg_yaw_after_translation", this->params.bg_yaw_after_translation);
 		this->declareIfNeeded("bg_initial_x", this->params.bg_initial_x);
 		this->declareIfNeeded("bg_initial_y", this->params.bg_initial_y);
 		this->declareIfNeeded("bg_initial_z", this->params.bg_initial_z);
 		this->declareIfNeeded("bg_initial_roll", this->params.bg_initial_roll);
 		this->declareIfNeeded("bg_initial_pitch", this->params.bg_initial_pitch);
+		this->declareIfNeeded("bg_initial_yaw", this->params.bg_initial_yaw);
 		this->declareIfNeeded("bg_rot_metric_scale", this->params.bg_rot_metric_scale);
 		this->declareIfNeeded("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->declareIfNeeded("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
@@ -259,6 +275,7 @@ private:
 		this->declareIfNeeded("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->declareIfNeeded("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
 		this->declareIfNeeded("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
+		this->declareIfNeeded("bg_cost_slack", this->params.bg_cost_slack);
 		this->declareIfNeeded("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
 		this->declareIfNeeded("bg_self_clearance_weight", this->params.bg_self_clearance_weight);
 		this->declareIfNeeded("bg_joint_limit_weight", this->params.bg_joint_limit_weight);
@@ -297,11 +314,20 @@ private:
 		this->declareIfNeeded("bg_real_cost_attempts", this->params.bg_real_cost_attempts);
 		this->declareIfNeeded("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->declareIfNeeded("bg_steering", this->params.bg_steering);
+		this->declareIfNeeded("bg_reach_probe", this->params.bg_reach_probe);
+		this->declareIfNeeded("bg_miss_tolerance", this->params.bg_miss_tolerance);
+		this->declareIfNeeded("bg_reach_rules", this->params.bg_reach_rules);
+		this->declareIfNeeded("bg_track_probes", this->params.bg_track_probes);
+		this->declareIfNeeded("bg_room_then_reach", this->params.bg_room_then_reach);
+		this->declareIfNeeded("bg_room_budget", this->params.bg_room_budget);
+		this->declareIfNeeded("bg_rule_limit_room", this->params.bg_rule_limit_room);
+		this->declareIfNeeded("bg_rule_clearance", this->params.bg_rule_clearance);
 		this->declareIfNeeded("bg_trace_line_search", this->params.bg_trace_line_search);
 		this->declareIfNeeded("bg_refine_at_reach", this->params.bg_refine_at_reach);
 		this->declareIfNeeded("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
 		this->declareIfNeeded("bg_fd_epsilon", this->params.bg_fd_epsilon);
 		this->declareIfNeeded("ik_timeout", this->params.ik_timeout);
+		this->declareIfNeeded("ik_attempts", this->params.ik_attempts);
 		this->declareIfNeeded("random_seed", this->params.random_seed);
 		this->declareIfNeeded("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
 		this->declareIfNeeded("execute_on_robot", this->params.execute_on_robot);
@@ -329,11 +355,15 @@ private:
 		this->get_parameter("bg_roll_max", this->params.bg_roll_max);
 		this->get_parameter("bg_pitch_min", this->params.bg_pitch_min);
 		this->get_parameter("bg_pitch_max", this->params.bg_pitch_max);
+		this->get_parameter("bg_yaw_min", this->params.bg_yaw_min);
+		this->get_parameter("bg_yaw_max", this->params.bg_yaw_max);
+		this->get_parameter("bg_yaw_after_translation", this->params.bg_yaw_after_translation);
 		this->get_parameter("bg_initial_x", this->params.bg_initial_x);
 		this->get_parameter("bg_initial_y", this->params.bg_initial_y);
 		this->get_parameter("bg_initial_z", this->params.bg_initial_z);
 		this->get_parameter("bg_initial_roll", this->params.bg_initial_roll);
 		this->get_parameter("bg_initial_pitch", this->params.bg_initial_pitch);
+		this->get_parameter("bg_initial_yaw", this->params.bg_initial_yaw);
 		this->get_parameter("bg_rot_metric_scale", this->params.bg_rot_metric_scale);
 		this->get_parameter("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->get_parameter("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
@@ -343,6 +373,7 @@ private:
 		this->get_parameter("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->get_parameter("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
 		this->get_parameter("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
+		this->get_parameter("bg_cost_slack", this->params.bg_cost_slack);
 		this->get_parameter("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
 		this->get_parameter("bg_self_clearance_weight", this->params.bg_self_clearance_weight);
 		this->get_parameter("bg_joint_limit_weight", this->params.bg_joint_limit_weight);
@@ -381,11 +412,20 @@ private:
 		this->get_parameter("bg_real_cost_attempts", this->params.bg_real_cost_attempts);
 		this->get_parameter("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->get_parameter("bg_steering", this->params.bg_steering);
+		this->get_parameter("bg_reach_probe", this->params.bg_reach_probe);
+		this->get_parameter("bg_miss_tolerance", this->params.bg_miss_tolerance);
+		this->get_parameter("bg_reach_rules", this->params.bg_reach_rules);
+		this->get_parameter("bg_track_probes", this->params.bg_track_probes);
+		this->get_parameter("bg_room_then_reach", this->params.bg_room_then_reach);
+		this->get_parameter("bg_room_budget", this->params.bg_room_budget);
+		this->get_parameter("bg_rule_limit_room", this->params.bg_rule_limit_room);
+		this->get_parameter("bg_rule_clearance", this->params.bg_rule_clearance);
 		this->get_parameter("bg_trace_line_search", this->params.bg_trace_line_search);
 		this->get_parameter("bg_refine_at_reach", this->params.bg_refine_at_reach);
 		this->get_parameter("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
 		this->get_parameter("bg_fd_epsilon", this->params.bg_fd_epsilon);
 		this->get_parameter("ik_timeout", this->params.ik_timeout);
+		this->get_parameter("ik_attempts", this->params.ik_attempts);
 		this->get_parameter("random_seed", this->params.random_seed);
 		this->get_parameter("visualize_progress_delay_sec", this->params.visualize_progress_delay_sec);
 		this->get_parameter("execute_on_robot", this->params.execute_on_robot);
@@ -431,11 +471,15 @@ private:
 		bg.bounds.roll_max = this->params.bg_roll_max;
 		bg.bounds.pitch_min = this->params.bg_pitch_min;
 		bg.bounds.pitch_max = this->params.bg_pitch_max;
+		bg.bounds.yaw_min = this->params.bg_yaw_min;
+		bg.bounds.yaw_max = this->params.bg_yaw_max;
+		bg.yaw_after_translation = this->params.bg_yaw_after_translation;
 		bg.initial_x = this->params.bg_initial_x;
 		bg.initial_y = this->params.bg_initial_y;
 		bg.initial_z = this->params.bg_initial_z;
 		bg.initial_roll = this->params.bg_initial_roll;
 		bg.initial_pitch = this->params.bg_initial_pitch;
+		bg.initial_yaw = this->params.bg_initial_yaw;
 		bg.rot_metric_scale = this->params.bg_rot_metric_scale;
 		bg.joint_distance_weight = this->params.bg_joint_distance_weight;
 		bg.cartesian_distance_weight = this->params.bg_cartesian_distance_weight;
@@ -445,6 +489,7 @@ private:
 		bg.manipulability_weight_decay = this->params.bg_manipulability_weight_decay;
 		bg.log_manipulability_weight = this->params.bg_log_manipulability_weight;
 		bg.miss_gap_weight = this->params.bg_miss_gap_weight;
+		bg.cost_slack = this->params.bg_cost_slack;
 		bg.manipulability_include_missed = this->params.bg_manipulability_include_missed;
 		bg.self_clearance_weight = this->params.bg_self_clearance_weight;
 		bg.joint_limit_weight = this->params.bg_joint_limit_weight;
@@ -459,6 +504,7 @@ private:
 		bg.unreachable_penalty = this->params.bg_unreachable_penalty;
 		bg.max_solutions_per_candidate = this->params.bg_max_solutions_per_candidate;
 		bg.ik_timeout = this->params.ik_timeout;
+		bg.ik_attempts = this->params.ik_attempts;
 		bg.ik_retries_per_point = this->params.bg_ik_retries_per_point;
 		bg.gtsp_num_restart = this->params.bg_gtsp_num_restart;
 		bg.gtsp_two_opt_rounds = this->params.bg_gtsp_two_opt_rounds;
@@ -484,6 +530,14 @@ private:
 		bg.real_cost_attempts = this->params.bg_real_cost_attempts;
 		bg.planned_travel_in_cost = this->params.bg_planned_travel_in_cost;
 		bg.steering = this->params.bg_steering;
+		bg.reach_probe = this->params.bg_reach_probe;
+		bg.miss_tolerance = this->params.bg_miss_tolerance;
+		bg.reach_rules = this->params.bg_reach_rules;
+		bg.track_probes = this->params.bg_track_probes;
+		bg.room_then_reach = this->params.bg_room_then_reach;
+		bg.room_budget = this->params.bg_room_budget;
+		bg.rule_limit_room = this->params.bg_rule_limit_room;
+		bg.rule_clearance = this->params.bg_rule_clearance;
 		bg.trace_line_search = this->params.bg_trace_line_search;
 		bg.refine_at_reach = this->params.bg_refine_at_reach;
 		bg.random_seed = this->params.random_seed;
@@ -523,15 +577,16 @@ private:
 			RCLCPP_WARN(
 				this->get_logger(),
 				"execute_on_robot: driving the REAL robot against the object placed at abs (%.4f, %.4f, %.4f) m + "
-				"tip %.2f deg / tilt %.2f deg in software -- only correct if the physical object is actually "
+				"tip %.2f deg / tilt %.2f deg / spin %.2f deg in software -- only correct if the physical object is actually "
 				"fixtured to match.",
-				result.x, result.y, result.z, result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI);
+				result.x, result.y, result.z, result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI,
+				result.yaw * 180.0 / M_PI);
 
 			ApplyObjectPlacementToScene(
-				local_scene, object_rotation_world, result.x, result.y, result.z, result.roll, result.pitch);
+				local_scene, object_rotation_world, result.x, result.y, result.z, result.roll, result.pitch, result.yaw);
 
 			const Eigen::Isometry3d object_offset = PlacementTransform(
-				object_translation_world, result.x, result.y, result.z, result.roll, result.pitch);
+				object_translation_world, result.x, result.y, result.z, result.roll, result.pitch, result.yaw);
 
 			std::vector<ViewpointCandidate> owned(result.tour_order.size());
 			std::vector<const ViewpointCandidate*> selected;
