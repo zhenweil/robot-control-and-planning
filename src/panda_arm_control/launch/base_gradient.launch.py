@@ -234,18 +234,11 @@ def generate_launch_description():
         # selected_robot_poses.json -- this node's input.
         "tour_input_dir": tour_input_dir,
         "output_dir": output_dir,
-        # Object position bounds (abs, m) and tilt bounds (rad). Yaw excluded (redundant with joint 1).
+        # Object position bounds (abs, m); the object keeps its nominal orientation.
         **position_bounds,
-        # Tilt locked at 0: position-only search for now.
-        "bg_roll_min": 0.0,
-        "bg_roll_max": 0.0,
-        "bg_pitch_min": 0.0,
-        "bg_pitch_max": 0.0,
-        # Where the descent starts (abs position) and its starting tilt.
+        # Where the descent starts (abs position).
         **initial_position,
-        "bg_initial_roll": 0.0,
-        "bg_initial_pitch": 0.0,
-        # Meters per radian: how tip/tilt trades off against translation in the descent step.
+        # Meters per radian: weighs a missed viewpoint's angle gap against its distance gap.
         "bg_rot_metric_scale": 0.3,
         # Objective weights (see base_gradient.hpp). Cartesian term has no gradient; kept for
         # inner-GTSP ordering parity with the rest of the pipeline.

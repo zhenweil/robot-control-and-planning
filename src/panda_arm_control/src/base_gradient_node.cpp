@@ -36,17 +36,12 @@ struct Params
 	std::string tour_input_dir = "/tmp/viewpoint_planner_output";
 	std::string output_dir = "/tmp/base_gradient_output";
 
-	// Object position bounds and start, abs (m, base frame); roll/pitch are tilt (rad).
+	// Object position bounds and start, abs (m, base frame).
 	double bg_x_min = -0.1, bg_x_max = 1.1;
 	double bg_y_min = -0.6, bg_y_max = 0.6;
 	double bg_z_min = -0.05, bg_z_max = 0.35;
-	double bg_roll_min = -0.35, bg_roll_max = 0.35;	  // rad (~20 deg) -- object tip
-	double bg_pitch_min = -0.35, bg_pitch_max = 0.35;  // rad -- object tilt
-	double bg_yaw_min = 0.0, bg_yaw_max = 0.0;		  // rad -- object spin about z; equal = locked
-	bool bg_yaw_after_translation = true;
 	double bg_initial_x = 0.5, bg_initial_y = 0.0, bg_initial_z = 0.15;
-	double bg_initial_roll = 0.0, bg_initial_pitch = 0.0, bg_initial_yaw = 0.0;
-	double bg_rot_metric_scale = 0.3;  // m per rad, blends translation & tip/tilt in the step
+	double bg_rot_metric_scale = 0.3;  // m per rad: weighs a missed viewpoint's angle gap against its distance gap
 
 	double bg_joint_distance_weight = 1.0;
 	double bg_cartesian_distance_weight = 0.0;
@@ -252,19 +247,9 @@ private:
 		this->declareIfNeeded("bg_y_max", this->params.bg_y_max);
 		this->declareIfNeeded("bg_z_min", this->params.bg_z_min);
 		this->declareIfNeeded("bg_z_max", this->params.bg_z_max);
-		this->declareIfNeeded("bg_roll_min", this->params.bg_roll_min);
-		this->declareIfNeeded("bg_roll_max", this->params.bg_roll_max);
-		this->declareIfNeeded("bg_pitch_min", this->params.bg_pitch_min);
-		this->declareIfNeeded("bg_pitch_max", this->params.bg_pitch_max);
-		this->declareIfNeeded("bg_yaw_min", this->params.bg_yaw_min);
-		this->declareIfNeeded("bg_yaw_max", this->params.bg_yaw_max);
-		this->declareIfNeeded("bg_yaw_after_translation", this->params.bg_yaw_after_translation);
 		this->declareIfNeeded("bg_initial_x", this->params.bg_initial_x);
 		this->declareIfNeeded("bg_initial_y", this->params.bg_initial_y);
 		this->declareIfNeeded("bg_initial_z", this->params.bg_initial_z);
-		this->declareIfNeeded("bg_initial_roll", this->params.bg_initial_roll);
-		this->declareIfNeeded("bg_initial_pitch", this->params.bg_initial_pitch);
-		this->declareIfNeeded("bg_initial_yaw", this->params.bg_initial_yaw);
 		this->declareIfNeeded("bg_rot_metric_scale", this->params.bg_rot_metric_scale);
 		this->declareIfNeeded("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->declareIfNeeded("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
@@ -351,19 +336,9 @@ private:
 		this->get_parameter("bg_y_max", this->params.bg_y_max);
 		this->get_parameter("bg_z_min", this->params.bg_z_min);
 		this->get_parameter("bg_z_max", this->params.bg_z_max);
-		this->get_parameter("bg_roll_min", this->params.bg_roll_min);
-		this->get_parameter("bg_roll_max", this->params.bg_roll_max);
-		this->get_parameter("bg_pitch_min", this->params.bg_pitch_min);
-		this->get_parameter("bg_pitch_max", this->params.bg_pitch_max);
-		this->get_parameter("bg_yaw_min", this->params.bg_yaw_min);
-		this->get_parameter("bg_yaw_max", this->params.bg_yaw_max);
-		this->get_parameter("bg_yaw_after_translation", this->params.bg_yaw_after_translation);
 		this->get_parameter("bg_initial_x", this->params.bg_initial_x);
 		this->get_parameter("bg_initial_y", this->params.bg_initial_y);
 		this->get_parameter("bg_initial_z", this->params.bg_initial_z);
-		this->get_parameter("bg_initial_roll", this->params.bg_initial_roll);
-		this->get_parameter("bg_initial_pitch", this->params.bg_initial_pitch);
-		this->get_parameter("bg_initial_yaw", this->params.bg_initial_yaw);
 		this->get_parameter("bg_rot_metric_scale", this->params.bg_rot_metric_scale);
 		this->get_parameter("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->get_parameter("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
@@ -467,19 +442,9 @@ private:
 		bg.bounds.y_max = this->params.bg_y_max;
 		bg.bounds.z_min = this->params.bg_z_min;
 		bg.bounds.z_max = this->params.bg_z_max;
-		bg.bounds.roll_min = this->params.bg_roll_min;
-		bg.bounds.roll_max = this->params.bg_roll_max;
-		bg.bounds.pitch_min = this->params.bg_pitch_min;
-		bg.bounds.pitch_max = this->params.bg_pitch_max;
-		bg.bounds.yaw_min = this->params.bg_yaw_min;
-		bg.bounds.yaw_max = this->params.bg_yaw_max;
-		bg.yaw_after_translation = this->params.bg_yaw_after_translation;
 		bg.initial_x = this->params.bg_initial_x;
 		bg.initial_y = this->params.bg_initial_y;
 		bg.initial_z = this->params.bg_initial_z;
-		bg.initial_roll = this->params.bg_initial_roll;
-		bg.initial_pitch = this->params.bg_initial_pitch;
-		bg.initial_yaw = this->params.bg_initial_yaw;
 		bg.rot_metric_scale = this->params.bg_rot_metric_scale;
 		bg.joint_distance_weight = this->params.bg_joint_distance_weight;
 		bg.cartesian_distance_weight = this->params.bg_cartesian_distance_weight;
@@ -549,7 +514,7 @@ private:
 		bg.visualize_progress_delay_sec = this->params.visualize_progress_delay_sec;
 
 		RCLCPP_INFO(
-			this->get_logger(), "Descending the object offset (x, y, z, tip, tilt) for a %zu-pose tour...",
+			this->get_logger(), "Descending the object position (x, y, z) for a %zu-pose tour...",
 			tour_tcp_poses.size());
 
 		BaseGradientResult result = SolveBaseGradient(
@@ -576,17 +541,14 @@ private:
 		{
 			RCLCPP_WARN(
 				this->get_logger(),
-				"execute_on_robot: driving the REAL robot against the object placed at abs (%.4f, %.4f, %.4f) m + "
-				"tip %.2f deg / tilt %.2f deg / spin %.2f deg in software -- only correct if the physical object is actually "
-				"fixtured to match.",
-				result.x, result.y, result.z, result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI,
-				result.yaw * 180.0 / M_PI);
+				"execute_on_robot: driving the REAL robot against the object placed at abs (%.4f, %.4f, %.4f) m in "
+				"software -- only correct if the physical object is actually fixtured to match.",
+				result.x, result.y, result.z);
 
-			ApplyObjectPlacementToScene(
-				local_scene, object_rotation_world, result.x, result.y, result.z, result.roll, result.pitch, result.yaw);
+			ApplyObjectPlacementToScene(local_scene, object_rotation_world, result.x, result.y, result.z);
 
-			const Eigen::Isometry3d object_offset = PlacementTransform(
-				object_translation_world, result.x, result.y, result.z, result.roll, result.pitch, result.yaw);
+			const Eigen::Isometry3d object_offset =
+				PlacementTransform(object_translation_world, result.x, result.y, result.z);
 
 			std::vector<ViewpointCandidate> owned(result.tour_order.size());
 			std::vector<const ViewpointCandidate*> selected;

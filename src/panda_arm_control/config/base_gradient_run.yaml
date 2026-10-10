@@ -13,9 +13,6 @@
     bg_y_max: 0.6
     bg_z_min: -0.2
     bg_z_max: 0.2
-    bg_yaw_min: -3.1416                      # rad: spin about base z through the object's position; min == max locks it
-    bg_yaw_max: 3.1416
-    bg_yaw_after_translation: false          # false = spin from the start; true = only once translation stops improving
 
     # Descent
     bg_descent_num_restart: 1

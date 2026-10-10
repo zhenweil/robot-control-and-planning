@@ -11,23 +11,19 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 
-// Absolute object position bounds (m, base frame); roll/pitch tilt and yaw spin (about base z) about the object's position.
+// Absolute object position bounds (m, base frame). The object keeps its nominal orientation.
 struct BaseGradientBounds
 {
 	double x_min = -0.1, x_max = 1.1;
 	double y_min = -0.6, y_max = 0.6;
 	double z_min = -0.05, z_max = 0.35;
-	double roll_min = -0.35, roll_max = 0.35;	// radians (~20 deg)
-	double pitch_min = -0.35, pitch_max = 0.35;  // radians
-	double yaw_min = 0.0, yaw_max = 0.0;		 // radians; equal = locked
 };
 
 struct BaseGradientParams
 {
 	BaseGradientBounds bounds;
-	// Absolute start position (m, base frame), NaN = nominal; start tilt (rad).
-	double initial_x = NAN, initial_y = NAN, initial_z = NAN, initial_roll = 0.0, initial_pitch = 0.0,
-		   initial_yaw = 0.0;
+	// Absolute start position (m, base frame), NaN = nominal.
+	double initial_x = NAN, initial_y = NAN, initial_z = NAN;
 
 	// Weights for GTSP
 	double joint_distance_weight = 1.0;
@@ -87,7 +83,7 @@ struct BaseGradientParams
 	double step_shrink = 0.25;
 	int max_line_search_iters = 4;
 	double jacobian_damping = 1e-3;  // lambda in the damped pseudo-inverse J^T (J J^T + lambda^2 I)^-1
-	double rot_metric_scale = 0.3;   // meters per radian, for blending translation & tip/tilt steps
+	double rot_metric_scale = 0.3;   // meters per radian: weighs a missed viewpoint's angle gap against its distance gap
 
 	double convergence_tolerance_offset = 0.002;  // stop optimization when object moves < 2mm
 	double convergence_tolerance_cost = 1e-3;	  // stop optimization when cost improvement < 0.1%
@@ -106,8 +102,6 @@ struct BaseGradientParams
 	// Travel in the cost = planned joint travel instead of the L2 estimate, whatever travel_in_cost says (needs real_cost_planning_time > 0).
 	bool planned_travel_in_cost = false;
 	bool steering = true;  // steer the step around viewpoints it would lose (false: only shrink the step)
-	// Hold yaw at its start until translation (and tilt) stop improving, then descend on all of them.
-	bool yaw_after_translation = true;
 	bool reach_probe = false;
 	// A move may lose up to this many reached viewpoints if the total cost drops; the best placement seen is returned.
 	int miss_tolerance = 0;
@@ -144,8 +138,8 @@ struct BaseGradientResult
 	bool ok = false;  // true iff every input pose is reachable at the returned placement
 	int num_reachable = 0;
 	int num_total = 0;
-	// Absolute object position (m, base frame) and tilt about it (rad), relative to nominal orientation.
-	double x = 0.0, y = 0.0, z = 0.0, roll = 0.0, pitch = 0.0, yaw = 0.0;
+	// Absolute object position (m, base frame); orientation stays nominal.
+	double x = 0.0, y = 0.0, z = 0.0;
 
 	// Input-pose indices in visit order (the inner GTSP's tour).
 	std::vector<int> tour_order;
@@ -157,12 +151,12 @@ struct BaseGradientResult
 
 	int num_inner_solves = 0;
 
-	// {restart, x, y, z, roll, pitch, yaw, weighted_cost} after each outer iteration across all
+	// {restart, x, y, z, weighted_cost} after each outer iteration across all
 	// restarts -- for plotting the descents.
-	std::vector<std::array<double, 8>> history;
+	std::vector<std::array<double, 5>> history;
 };
 
-// Finds the object placement (abs x, y, z, roll, pitch) that minimizes tour joint travel, alternating
+// Finds the object position (abs x, y, z) that minimizes tour joint travel, alternating
 // GTSP solves with gradient-descent steps; restores the object's scene pose before returning.
 BaseGradientResult SolveBaseGradient(
 	const rclcpp::Node::SharedPtr& node,
@@ -178,21 +172,16 @@ BaseGradientResult SolveBaseGradient(
 // Writes base_gradient_result.json to output_dir.
 void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientResult& result);
 
-// Rigid transform taking nominal (abs) object/viewpoint poses to the placement at abs (x, y, z), tilted.
-Eigen::Isometry3d PlacementTransform(
-	const Eigen::Vector3d& object_translation_nominal, double x, double y, double z, double roll, double pitch,
-	double yaw = 0.0);
+// Rigid transform taking nominal (abs) object/viewpoint poses to the placement at abs (x, y, z).
+Eigen::Isometry3d PlacementTransform(const Eigen::Vector3d& object_translation_nominal, double x, double y, double z);
 
-// Moves the scene's "object" to abs (x, y, z), tilted; only valid once the real object is re-fixtured to match.
+// Moves the scene's "object" to abs (x, y, z); only valid once the real object is re-fixtured to match.
 void ApplyObjectPlacementToScene(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Matrix3d& object_rotation_nominal,
 	double x,
 	double y,
-	double z,
-	double roll,
-	double pitch,
-	double yaw = 0.0);
+	double z);
 
 // Object mesh + tour polyline/waypoints re-expressed in the recommended base's frame (same idea
 // as BuildBstarPlacementMarkerArray). frame_id is "world".

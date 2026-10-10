@@ -28,16 +28,12 @@
 namespace
 {
 
-// Object placement: absolute position (x, y, z, base frame) plus tilt about that position (roll about
-// base x, pitch about base y) and spin (yaw about base z), relative to the nominal orientation.
+// Object placement: absolute position (x, y, z, base frame); the orientation stays nominal.
 struct ObjectPlacement
 {
 	double x = 0.0;
 	double y = 0.0;
 	double z = 0.0;
-	double roll = 0.0;
-	double pitch = 0.0;
-	double yaw = 0.0;
 };
 
 // Maps poses given relative to the object's position (base-frame axes, "_obj") to absolute poses.
@@ -45,9 +41,6 @@ Eigen::Isometry3d MakePlacement(const ObjectPlacement& p)
 {
 	Eigen::Isometry3d t = Eigen::Isometry3d::Identity();
 	t.translation() = Eigen::Vector3d(p.x, p.y, p.z);
-	t.linear() = (Eigen::AngleAxisd(p.yaw, Eigen::Vector3d::UnitZ()) * Eigen::AngleAxisd(p.pitch, Eigen::Vector3d::UnitY()) *
-				  Eigen::AngleAxisd(p.roll, Eigen::Vector3d::UnitX()))
-					 .toRotationMatrix();
 	return t;
 }
 
@@ -102,26 +95,19 @@ ObjectPlacement ProjectToBounds(ObjectPlacement p, const BaseGradientBounds& b)
 	p.x = std::clamp(p.x, b.x_min, b.x_max);
 	p.y = std::clamp(p.y, b.y_min, b.y_max);
 	p.z = std::clamp(p.z, b.z_min, b.z_max);
-	p.roll = std::clamp(p.roll, b.roll_min, b.roll_max);
-	p.pitch = std::clamp(p.pitch, b.pitch_min, b.pitch_max);
-	p.yaw = std::clamp(p.yaw, b.yaw_min, b.yaw_max);
 	return p;
 }
 
-Eigen::Matrix<double, 6, 1> ToOffsetVec(const ObjectPlacement& a, const ObjectPlacement& b)  // a - b, component-wise
+Eigen::Vector3d ToOffsetVec(const ObjectPlacement& a, const ObjectPlacement& b)  // a - b, component-wise
 {
-	Eigen::Matrix<double, 6, 1> v;
-	v << a.x - b.x, a.y - b.y, a.z - b.z, a.roll - b.roll, a.pitch - b.pitch, a.yaw - b.yaw;
-	return v;
+	return Eigen::Vector3d(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
-// Gaussian kick around `center`: sigma_m meters on x/y/z, sigma_m/rot_scale rad on roll/pitch.
-ObjectPlacement PerturbOffset(const ObjectPlacement& center, std::mt19937& rng, double sigma_m, double rot_scale)
+// Gaussian kick around `center`: sigma_m meters on x/y/z.
+ObjectPlacement PerturbOffset(const ObjectPlacement& center, std::mt19937& rng, double sigma_m)
 {
 	std::normal_distribution<double> nm(0.0, sigma_m);
-	std::normal_distribution<double> nr(0.0, sigma_m / std::max(1e-6, rot_scale));
-	return {center.x + nm(rng), center.y + nm(rng), center.z + nm(rng), center.roll + nr(rng),
-			center.pitch + nr(rng), center.yaw + nr(rng)};
+	return {center.x + nm(rng), center.y + nm(rng), center.z + nm(rng)};
 }
 
 double JointL2Distance(const std::vector<double>& a, const std::vector<double>& b)
@@ -1332,36 +1318,20 @@ TrackResult TrackTour(
 	return r;
 }
 
-// Jacobian of a viewpoint's pose w.r.t. the object placement: 6x6, rows [position; rotation],
-// columns x, y, z, roll, pitch, yaw, in the base frame.
-Eigen::Matrix<double, 6, 6> PlacementJacobian(
-	const ObjectPlacement& base, const Eigen::Vector3d& viewpoint_position)
+// Jacobian of a viewpoint's pose w.r.t. the object position: 6x3, rows [position; rotation]. Moving the object
+// moves every viewpoint by the same amount and leaves its orientation alone.
+Eigen::Matrix<double, 6, 3> PlacementJacobian()
 {
-	const Eigen::Vector3d object_center(base.x, base.y, base.z);
-	// Rotation is yaw(z) * pitch(y) * roll(x): each axis is carried by the rotations applied after it.
-	const Eigen::Matrix3d yaw_rot = Eigen::AngleAxisd(base.yaw, Eigen::Vector3d::UnitZ()).toRotationMatrix();
-	const Eigen::Vector3d roll_axis =
-		yaw_rot * Eigen::AngleAxisd(base.pitch, Eigen::Vector3d::UnitY()).toRotationMatrix() * Eigen::Vector3d::UnitX();
-	const Eigen::Vector3d pitch_axis = yaw_rot * Eigen::Vector3d::UnitY();
-	const Eigen::Vector3d yaw_axis = Eigen::Vector3d::UnitZ();
-	const Eigen::Vector3d lever_arm = viewpoint_position - object_center;  // tilt swings the viewpoint around the center
-	Eigen::Matrix<double, 6, 6> jacobian = Eigen::Matrix<double, 6, 6>::Zero();
-	jacobian.block<3, 3>(0, 0).setIdentity();
-	jacobian.block<3, 1>(0, 3) = roll_axis.cross(lever_arm);
-	jacobian.block<3, 1>(3, 3) = roll_axis;
-	jacobian.block<3, 1>(0, 4) = pitch_axis.cross(lever_arm);
-	jacobian.block<3, 1>(3, 4) = pitch_axis;
-	jacobian.block<3, 1>(0, 5) = yaw_axis.cross(lever_arm);
-	jacobian.block<3, 1>(3, 5) = yaw_axis;
+	Eigen::Matrix<double, 6, 3> jacobian = Eigen::Matrix<double, 6, 3>::Zero();
+	jacobian.topRows<3>().setIdentity();
 	return jacobian;
 }
 
 // dw/db: how an object placement change moves one viewpoint's manipulability, the arm tracking it from q.
 // Its positive side keeps the viewpoint away from the reach edge.
-Eigen::Matrix<double, 6, 1> ManipulabilityOffsetGradient(
+Eigen::Vector3d ManipulabilityOffsetGradient(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const moveit::core::LinkModel* tool0_link, const ObjectPlacement& base, const Eigen::Vector3d& target_pos,
-	const std::vector<double>& q, double damping, double limit_sharpness)
+	const moveit::core::LinkModel* tool0_link, const std::vector<double>& q, double damping, double limit_sharpness)
 {
 	state.setJointGroupPositions(jmg, q);
 	state.update();
@@ -1370,7 +1340,7 @@ Eigen::Matrix<double, 6, 1> ManipulabilityOffsetGradient(
 	Eigen::MatrixXd JJt = J * J.transpose();
 	JJt.diagonal().array() += damping * damping;
 	const Eigen::MatrixXd dq_db =
-		J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6)) * PlacementJacobian(base, target_pos);
+		J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6)) * PlacementJacobian();
 	return dq_db.transpose() * ManipulabilityJointGradient(state, jmg, tool0_link, q, limit_sharpness);
 }
 
@@ -1383,7 +1353,7 @@ Eigen::Matrix<double, 6, 1> ManipulabilityOffsetGradient(
 // keep n . d >= 0. Moving along n gives vp room. Forgotten once the object is far from where it was learned.
 struct Wall
 {
-	Eigen::Matrix<double, 6, 1> n = Eigen::Matrix<double, 6, 1>::Zero();
+	Eigen::Vector3d n = Eigen::Vector3d::Zero();
 	ObjectPlacement at;
 	int vp = -1;
 };
@@ -1392,19 +1362,19 @@ struct ReachRule
 {
 	double value = 0.0;
 	double floor = 0.0;
-	Eigen::Matrix<double, 6, 1> grad = Eigen::Matrix<double, 6, 1>::Zero();  // d(value)/db
+	Eigen::Vector3d grad = Eigen::Vector3d::Zero();  // d(value)/db
 	Eigen::VectorXd grad_z;	 // d(value)/dz: z moves the arm in its null space (hand fixed), e.g. an elbow swing
 	int z_off = 0;			 // where this pose's z starts among all poses' z
 	int vp = -1;
 	std::string what;
 };
 
-// Rules for reached viewpoint vp, arm pose q, viewpoint at target_pos. The scene's object must sit at `base`.
+// Rules for reached viewpoint vp, arm pose q. The scene's object must sit at the placement being checked.
 // The arm follows the viewpoint (dq = J_pinv P db) plus null-space motion N z; returns z's size (N's columns).
 int ReachedPoseRules(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, moveit::core::RobotState& state,
-	const moveit::core::JointModelGroup* jmg, const moveit::core::LinkModel* tool0_link, const ObjectPlacement& base,
-	const Eigen::Vector3d& target_pos, const std::vector<double>& q, int vp, const BaseGradientParams& params,
+	const moveit::core::JointModelGroup* jmg, const moveit::core::LinkModel* tool0_link,
+	const std::vector<double>& q, int vp, const BaseGradientParams& params,
 	int z_off, std::vector<ReachRule>& rules)
 {
 	const double kClearZone = 0.03;  // m: pairs closer than this get a rule
@@ -1415,7 +1385,7 @@ int ReachedPoseRules(
 	Eigen::MatrixXd JJt = J * J.transpose();
 	JJt.diagonal().array() += params.jacobian_damping * params.jacobian_damping;
 	const Eigen::MatrixXd dq_db =
-		J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6)) * PlacementJacobian(base, target_pos);
+		J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6)) * PlacementJacobian();
 	// Null space of J: joint motions that keep the hand still.
 	Eigen::JacobiSVD<Eigen::MatrixXd> svd(J, Eigen::ComputeFullV);
 	const Eigen::VectorXd& sv = svd.singularValues();
@@ -1466,7 +1436,7 @@ int ReachedPoseRules(
 				if (d.distance >= kClearZone)
 					continue;
 				Eigen::RowVectorXd row_q = Eigen::RowVectorXd::Zero(jmg->getVariableCount());
-				Eigen::Matrix<double, 6, 1> grad_obj = Eigen::Matrix<double, 6, 1>::Zero();
+				Eigen::Vector3d grad_obj = Eigen::Vector3d::Zero();
 				for (int side = 0; side < 2; ++side)
 				{
 					// distance ~ distance0 + normal.(dp1 - dp0)
@@ -1474,8 +1444,7 @@ int ReachedPoseRules(
 					if (d.body_types[side] == collision_detection::BodyType::WORLD_OBJECT)
 					{
 						if (d.link_names[side] == "object")
-							grad_obj += sign *
-								(PlacementJacobian(base, d.nearest_points[side]).topRows<3>().transpose() * d.normal);
+							grad_obj += sign * d.normal;  // the object's point moves with the object
 						continue;
 					}
 					const moveit::core::LinkModel* link = model->getLinkModel(d.link_names[side]);
@@ -1522,16 +1491,16 @@ int ReachedPoseRules(
 // s.t. rule_row.[d; z] >= rule_lo, gap + gap_h.d <= s, 0 <= s <= gap, box_lo <= d <= box_hi, |z_i| <= z_max.
 bool SolveReachStep(
 	const std::vector<Eigen::VectorXd>& rule_row, const std::vector<double>& rule_lo,
-	const std::vector<Eigen::Matrix<double, 6, 1>>& gap_h, const std::vector<double>& gap,
-	const Eigen::Matrix<double, 6, 1>& g, double c, double rho, const Eigen::Matrix<double, 6, 1>& box_lo,
-	const Eigen::Matrix<double, 6, 1>& box_hi, int nz, double z_max, Eigen::Matrix<double, 6, 1>& d, Eigen::VectorXd& z,
+	const std::vector<Eigen::Vector3d>& gap_h, const std::vector<double>& gap,
+	const Eigen::Vector3d& g, double c, double rho, const Eigen::Vector3d& box_lo,
+	const Eigen::Vector3d& box_hi, int nz, double z_max, Eigen::Vector3d& d, Eigen::VectorXd& z,
 	std::string& status)
 {
 	const int nr = static_cast<int>(rule_row.size());
 	const int nm = static_cast<int>(gap_h.size());
-	const int ns = 6 + nz;  // slacks start here
+	const int ns = 3 + nz;  // slacks start here
 	const int nv = ns + nm;
-	const int nc = nr + 2 * nm + 6 + nz;
+	const int nc = nr + 2 * nm + 3 + nz;
 	std::vector<Eigen::Triplet<double>> trip;
 	std::vector<c_float> lo(static_cast<size_t>(nc)), hi(static_cast<size_t>(nc));
 	int row = 0;
@@ -1545,7 +1514,7 @@ bool SolveReachStep(
 	}
 	for (int m = 0; m < nm; ++m, ++row)
 	{
-		for (int k = 0; k < 6; ++k)
+		for (int k = 0; k < 3; ++k)
 			if (gap_h[m](k) != 0.0)
 				trip.emplace_back(row, k, gap_h[m](k));
 		trip.emplace_back(row, ns + m, -1.0);
@@ -1559,7 +1528,7 @@ bool SolveReachStep(
 		lo[row] = 0.0;
 		hi[row] = gap[m];
 	}
-	for (int k = 0; k < 6; ++k, ++row)
+	for (int k = 0; k < 3; ++k, ++row)
 	{
 		trip.emplace_back(row, k, 1.0);
 		lo[row] = box_lo(k);
@@ -1567,7 +1536,7 @@ bool SolveReachStep(
 	}
 	for (int k = 0; k < nz; ++k, ++row)
 	{
-		trip.emplace_back(row, 6 + k, 1.0);
+		trip.emplace_back(row, 3 + k, 1.0);
 		lo[row] = -z_max;
 		hi[row] = z_max;
 	}
@@ -1583,14 +1552,14 @@ bool SolveReachStep(
 	for (int j = 0; j < ns; ++j)
 	{
 		Pi[static_cast<size_t>(j)] = j;
-		if (j < 6)
+		if (j < 3)
 			Px[static_cast<size_t>(j)] = c;
 	}
 	std::vector<c_int> Pp(static_cast<size_t>(nv + 1));
 	for (int j = 0; j <= nv; ++j)
 		Pp[static_cast<size_t>(j)] = std::min(j, ns);
 	std::vector<c_float> q_lin(static_cast<size_t>(nv), rho);
-	for (int k = 0; k < 6; ++k)
+	for (int k = 0; k < 3; ++k)
 		q_lin[static_cast<size_t>(k)] = g(k);
 
 	csc A_csc{static_cast<c_int>(Ax.size()), nc, nv, Ap.data(), Ai.data(), Ax.data(), -1};
@@ -1621,11 +1590,11 @@ bool SolveReachStep(
 		if (work->info->status_val == OSQP_SOLVED || work->info->status_val == OSQP_SOLVED_INACCURATE ||
 			work->info->status_val == OSQP_MAX_ITER_REACHED)
 		{
-			for (int k = 0; k < 6; ++k)
+			for (int k = 0; k < 3; ++k)
 				d(k) = std::clamp(static_cast<double>(work->solution->x[k]), box_lo(k), box_hi(k));
 			z.resize(nz);
 			for (int k = 0; k < nz; ++k)
-				z(k) = work->solution->x[6 + k];
+				z(k) = work->solution->x[3 + k];
 			ok = true;
 		}
 	}
@@ -1636,12 +1605,12 @@ bool SolveReachStep(
 
 // ---------------------------------------------------------------------------------------------
 // Analytic gradient of the cost (travel, manipulability terms, missed-viewpoint gaps) w.r.t. the object
-// placement (x, y, z, roll, pitch, yaw). Joints follow a moved viewpoint as dq/db = J_pinv * placement_jacobian
+// position (x, y, z). Joints follow a moved viewpoint as dq/db = J_pinv * placement_jacobian
 // (damped pseudo-inverse of the tool Jacobian); each edge, manipulability term and miss gap is chained
 // through that. The home pose doesn't move with the object.
 // ---------------------------------------------------------------------------------------------
 
-Eigen::Matrix<double, 6, 1> AnalyticGradient(
+Eigen::Vector3d AnalyticGradient(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const moveit::core::LinkModel* tool0_link, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
 	const std::vector<int>& tour, const std::vector<std::vector<double>>& joints, const std::vector<double>& home_joints,
@@ -1655,15 +1624,13 @@ Eigen::Matrix<double, 6, 1> AnalyticGradient(
 	Eigen::Isometry3d xform = MakePlacement(base);
 	const double lambda2 = params.jacobian_damping * params.jacobian_damping;
 
-	// Per visit position: dq/db (dof x 5) and dp/db (3 x 5).
+	// Per visit position: dq/db (dof x 3) and dp/db (3 x 3).
 	std::vector<Eigen::MatrixXd> dq_db(n);
 	std::vector<Eigen::MatrixXd> dp_db(n);
+	const Eigen::Matrix<double, 6, 3> placement_jacobian = PlacementJacobian();
 
 	for (size_t k = 0; k < n; ++k)
 	{
-		const Eigen::Matrix<double, 6, 6> placement_jacobian =
-			PlacementJacobian(base, (xform * tour_poses_obj[tour[k]]).translation());
-
 		state.setJointGroupPositions(jmg, joints[k]);
 		state.update();
 		Eigen::MatrixXd J;  // 6 x dof, [linear; angular] in the model (base) frame
@@ -1673,20 +1640,20 @@ Eigen::Matrix<double, 6, 1> AnalyticGradient(
 		JJt.diagonal().array() += lambda2;
 		Eigen::MatrixXd J_pinv = J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6));
 
-		dq_db[k] = J_pinv * placement_jacobian;		   // dof x 5
-		dp_db[k] = placement_jacobian.topRows<3>();	   // 3 x 5
+		dq_db[k] = J_pinv * placement_jacobian;		   // dof x 3
+		dp_db[k] = placement_jacobian.topRows<3>();	   // 3 x 3
 	}
 
 	const size_t dof = home_joints.size();
-	Eigen::Matrix<double, 6, 1> g = Eigen::Matrix<double, 6, 1>::Zero();
+	Eigen::Vector3d g = Eigen::Vector3d::Zero();
 	// Soft-min term: per pose w and dw/db, combined once all poses are in.
 	std::vector<double> softmin_w;
-	std::vector<Eigen::Matrix<double, 6, 1>> softmin_dw_db;
+	std::vector<Eigen::Vector3d> softmin_dw_db;
 	for (size_t k = 0; k < n && params.manipulability_gradient; ++k)
 	{
 		// d(-lambda w - mu log w)/db = -(lambda + mu / w) (dq/db)^T dw/dq
 		const double w = std::max(kMinManipulability, Manipulability(state, jmg, tool0_link, joints[k], params.manipulability_limit_sharpness));
-		const Eigen::Matrix<double, 6, 1> dw_db = dq_db[k].transpose() *
+		const Eigen::Vector3d dw_db = dq_db[k].transpose() *
 			ManipulabilityJointGradient(state, jmg, tool0_link, joints[k], params.manipulability_limit_sharpness);
 		g -= (params.manipulability_weight + params.log_manipulability_weight / w) * dw_db;
 		softmin_w.push_back(w);
@@ -1703,8 +1670,6 @@ Eigen::Matrix<double, 6, 1> AnalyticGradient(
 		const std::vector<double>& q = missed_q[m];
 		if (q.empty())
 			continue;
-		const Eigen::Vector3d viewpoint_position =
-			(xform * tour_poses_obj[static_cast<size_t>(missed_vp[m])]).translation();
 		state.setJointGroupPositions(jmg, q);
 		state.update();
 		Eigen::MatrixXd J;
@@ -1712,11 +1677,11 @@ Eigen::Matrix<double, 6, 1> AnalyticGradient(
 		Eigen::MatrixXd JJt = J * J.transpose();
 		JJt.diagonal().array() += lambda2;
 		const Eigen::MatrixXd J_pinv = J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6));
-		const Eigen::MatrixXd dq_db_missed = J_pinv * PlacementJacobian(base, viewpoint_position);
+		const Eigen::MatrixXd dq_db_missed = J_pinv * placement_jacobian;
 		const double w = std::max(kMinManipulability, Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness));
 		if (params.manipulability_gradient)
 		{
-			const Eigen::Matrix<double, 6, 1> dw_db = dq_db_missed.transpose() *
+			const Eigen::Vector3d dw_db = dq_db_missed.transpose() *
 				ManipulabilityJointGradient(state, jmg, tool0_link, q, params.manipulability_limit_sharpness);
 			g -= (params.manipulability_weight + params.log_manipulability_weight / w) * dw_db;
 			softmin_w.push_back(w);
@@ -1746,10 +1711,7 @@ Eigen::Matrix<double, 6, 1> AnalyticGradient(
 			continue;
 		Eigen::Matrix<double, 6, 1> weighted_error = pose_error;
 		weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-		const Eigen::Vector3d viewpoint_position =
-			(xform * tour_poses_obj[static_cast<size_t>(missed_vp[m])]).translation();
-		g += params.miss_gap_weight * PlacementJacobian(base, viewpoint_position).transpose() *
-			weighted_error / gap;
+		g += params.miss_gap_weight * placement_jacobian.transpose() * weighted_error / gap;
 	}
 
 	auto add_edge = [&](const std::vector<double>& qa, const std::vector<double>& qb, const Eigen::MatrixXd& dqa,
@@ -1758,7 +1720,7 @@ Eigen::Matrix<double, 6, 1> AnalyticGradient(
 		Eigen::VectorXd dq(dof);
 		for (size_t i = 0; i < dof; ++i)
 			dq(i) = qa[i] - qb[i];
-		Eigen::MatrixXd ddiff = dqa - dqb;  // dof x 5
+		Eigen::MatrixXd ddiff = dqa - dqb;  // dof x 3
 
 		double nrm = dq.norm();
 		if (nrm > 1e-9)
@@ -1777,8 +1739,8 @@ Eigen::Matrix<double, 6, 1> AnalyticGradient(
 			g += params.cartesian_distance_weight * ((dpa - dpb).transpose() * (du / dn));
 	};
 
-	Eigen::MatrixXd zero_dq = Eigen::MatrixXd::Zero(dof, 6);
-	Eigen::MatrixXd zero_dp = Eigen::MatrixXd::Zero(3, 6);
+	Eigen::MatrixXd zero_dq = Eigen::MatrixXd::Zero(dof, 3);
+	Eigen::MatrixXd zero_dp = Eigen::MatrixXd::Zero(3, 3);
 
 	if (!params.travel_gradient)
 		return g;  // descend on manipulability and miss gaps only; travel still counts in the cost
@@ -1797,7 +1759,7 @@ Eigen::Matrix<double, 6, 1> AnalyticGradient(
 }
 
 // Central-difference gradient of the objective via re-tracked IK -- cross-check only.
-Eigen::Matrix<double, 6, 1> FiniteDifferenceGradient(
+Eigen::Vector3d FiniteDifferenceGradient(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
@@ -1805,12 +1767,12 @@ Eigen::Matrix<double, 6, 1> FiniteDifferenceGradient(
 	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params)
 {
 	const double eps = params.fd_epsilon;
-	Eigen::Matrix<double, 6, 1> g = Eigen::Matrix<double, 6, 1>::Constant(std::nan(""));
-	for (int axis = 0; axis < 6; ++axis)
+	Eigen::Vector3d g = Eigen::Vector3d::Constant(std::nan(""));
+	for (int axis = 0; axis < 3; ++axis)
 	{
 		ObjectPlacement bp = base, bm = base;
 		auto component = [](ObjectPlacement& o, int a) -> double& {
-			return a == 0 ? o.x : a == 1 ? o.y : a == 2 ? o.z : a == 3 ? o.roll : a == 4 ? o.pitch : o.yaw;
+			return a == 0 ? o.x : a == 1 ? o.y : o.z;
 		};
 		double* pp = &component(bp, axis);
 		double* pm = &component(bm, axis);
@@ -2038,7 +2000,6 @@ BaseGradientResult SolveBaseGradient(
 	BaseGradientResult result;
 	result.num_total = n;
 
-	const double rot_scale = std::max(1e-6, params.rot_metric_scale);  // m per rad, for the step metric
 	const std::vector<double>& fallback_seed = start_reference_joints;
 
 	auto joint_path_len = [&](const InnerSolution& s) {
@@ -2084,16 +2045,6 @@ BaseGradientResult SolveBaseGradient(
 				 : std::vector<std::vector<double>>(static_cast<size_t>(n), fallback_seed);
 		int stall_count = 0;
 		std::vector<Wall> walls;  // room-then-reach steering: remembered across iterations while nearby
-		// Yaw joins the descent once translation stops improving (or from the start), unless its bounds lock it.
-		bool yaw_active = !params.yaw_after_translation;
-		auto unlock_yaw = [&]() {
-			if (yaw_active || params.bounds.yaw_min == params.bounds.yaw_max)
-				return false;
-			yaw_active = true;
-			stall_count = 0;
-			RCLCPP_INFO(node->get_logger(), "  restart %d: translation stopped improving -- adding spin about z", restart_idx + 1);
-			return true;
-		};
 		// Each viewpoint's joints from the last time it was reached: seeds its closest-IK gap once missed.
 		std::vector<std::vector<double>> last_good(static_cast<size_t>(n));
 		// Each missed viewpoint's last closest-IK pose: seeds the next closest IK so the gap stays continuous.
@@ -2152,7 +2103,7 @@ BaseGradientResult SolveBaseGradient(
 				params_in.softmin_manipulability_weight * s.softmin_manipulability +
 				params.unreachable_penalty * (s.num_total - s.num_reachable) + s.miss_cost + s.clearance_cost + s.limit_cost;
 			result.history.push_back(
-				{static_cast<double>(restart_idx), b.x, b.y, b.z, b.roll, b.pitch, b.yaw, sf.weighted_cost});
+				{static_cast<double>(restart_idx), b.x, b.y, b.z, sf.weighted_cost});
 			// Best seen: most viewpoints reached, then cost (moves may lose viewpoints under miss_tolerance).
 			if (sf.num_reachable > rr.sol.num_reachable ||
 				(sf.num_reachable == rr.sol.num_reachable && sf.weighted_cost < rr.cost))
@@ -2255,9 +2206,8 @@ BaseGradientResult SolveBaseGradient(
 		};
 		RCLCPP_INFO(
 			node->get_logger(),
-			"restart %d/%d iter 0: abs (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f spin %.1f deg  reachable %d/%d",
-			restart_idx + 1, std::max(1, params.descent_num_restart), base.x, base.y, base.z, base.roll * 180.0 / M_PI,
-			base.pitch * 180.0 / M_PI, base.yaw * 180.0 / M_PI, cur.num_reachable, n);
+			"restart %d/%d iter 0: abs (%.4f, %.4f, %.4f) m  reachable %d/%d",
+			restart_idx + 1, std::max(1, params.descent_num_restart), base.x, base.y, base.z, cur.num_reachable, n);
 		log_cost_terms(cur);
 		log_missed(base, cur);
 
@@ -2369,7 +2319,7 @@ BaseGradientResult SolveBaseGradient(
 			// so the descent ends at the final objective without waiting out the decay.
 			const bool annealing = params.manipulability_weight > lambda_final * (1.0 + 1e-6);
 
-			Eigen::Matrix<double, 6, 1> g = AnalyticGradient(
+			Eigen::Vector3d g = AnalyticGradient(
 				state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, start_reference_joints,
 				home_tcp_local, base, params, cur.missed_vp, cur.missed_gap, cur.missed_q, cur.clearance_grad,
 				cur.missed_clearance_grad, cur.limit_grad, cur.missed_limit_grad);
@@ -2390,8 +2340,8 @@ BaseGradientResult SolveBaseGradient(
 						limit ? cur.limit_grad : std::vector<Eigen::VectorXd>{},
 						limit ? cur.missed_limit_grad : std::vector<Eigen::VectorXd>{});
 				};
-				auto describe = [](const Eigen::Matrix<double, 6, 1>& gp) {
-					const Eigen::Vector3d d = -gp.head<3>();
+				auto describe = [](const Eigen::Vector3d& gp) {
+					const Eigen::Vector3d d = -gp;
 					const double nrm = d.norm();
 					const Eigen::Vector3d u = nrm > 1e-9 ? Eigen::Vector3d(d / nrm) : Eigen::Vector3d::Zero();
 					char buf[96];
@@ -2407,49 +2357,40 @@ BaseGradientResult SolveBaseGradient(
 			}
 			if (params.fd_gradient_check)
 			{
-				Eigen::Matrix<double, 6, 1> g_fd = FiniteDifferenceGradient(
+				Eigen::Vector3d g_fd = FiniteDifferenceGradient(
 					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, cur.tour,
 					cur.joints, start_reference_joints, home_tcp_local, base, params);
 				RCLCPP_INFO(
 					node->get_logger(),
-					"    grad check [x y z roll pitch yaw]  analytic (%+.4f %+.4f %+.4f %+.4f %+.4f %+.4f)  "
-					"central-diff (%+.4f %+.4f %+.4f %+.4f %+.4f %+.4f)",
-					g(0), g(1), g(2), g(3), g(4), g(5), g_fd(0), g_fd(1), g_fd(2), g_fd(3), g_fd(4), g_fd(5));
+					"    grad check [x y z]  analytic (%+.4f %+.4f %+.4f)  central-diff (%+.4f %+.4f %+.4f)", g(0), g(1),
+					g(2), g_fd(0), g_fd(1), g_fd(2));
 			}
 
-			// Descend in a metric where 1 rad of tip/tilt/spin equals rot_scale meters. Locked axes (min == max,
-			// or yaw before it joins) get no share of the step.
+			// Locked axes (min == max) get no share of the step.
 			const BaseGradientBounds& bb = params.bounds;
-			auto to_u = [&](Eigen::Matrix<double, 6, 1> v) {
-				v(3) /= rot_scale;
-				v(4) /= rot_scale;
-				v(5) /= rot_scale;
+			auto to_u = [&](Eigen::Vector3d v) {
+				if (bb.x_min == bb.x_max)
+					v(0) = 0.0;
+				if (bb.y_min == bb.y_max)
+					v(1) = 0.0;
 				if (bb.z_min == bb.z_max)
 					v(2) = 0.0;
-				if (bb.roll_min == bb.roll_max)
-					v(3) = 0.0;
-				if (bb.pitch_min == bb.pitch_max)
-					v(4) = 0.0;
-				if (bb.yaw_min == bb.yaw_max || !yaw_active)
-					v(5) = 0.0;
 				return v;
 			};
-			const Eigen::Matrix<double, 6, 1> g_u = to_u(g);
+			const Eigen::Vector3d g_u = to_u(g);
 			double gnorm = g_u.norm();
 			if (gnorm < 1e-6)
 			{
-				if (unlock_yaw())
-					continue;
 				RCLCPP_INFO(node->get_logger(), "  restart %d: gradient ~ 0 -- converged", restart_idx + 1);
 				PublishProgress(
 					node, params, object_pose_obj, tour_poses_obj, base_history,
-					Eigen::Vector3d(-g.head<3>()), base, state, jmg, cur);
+					Eigen::Vector3d(-g), base, state, jmg, cur);
 				break;
 			}
 
 			// Backtracking line search. Each probe is one solve, compared with one solve at the current point
 			// (same effort); the accepted offset gets a best-of-N solve, kept only if it beats the current one.
-			Eigen::Matrix<double, 6, 1> dir_u = -g_u / gnorm;
+			Eigen::Vector3d dir_u = -g_u / gnorm;
 			seeds = SeedsFromSolution(cur, fallback_seed, static_cast<size_t>(n));
 			for (int v : cur.missed_vp)
 			{
@@ -2492,7 +2433,7 @@ BaseGradientResult SolveBaseGradient(
 			InnerSolution next;
 			// Steering: when a probe loses a reached viewpoint, remove the part of the direction that lowers its
 			// manipulability (reach edge) or, failing that, grows its closest-IK gap at the probe (limit, collision).
-			std::vector<Eigen::Matrix<double, 6, 1>> blocked;  // orthonormal, step metric
+			std::vector<Eigen::Vector3d> blocked;  // orthonormal, step metric
 			// Cost for comparisons: while either side misses a viewpoint, without planned travel -- it jumps when an
 			// arm pose switches family and the gradient doesn't see it, so it mustn't veto reaching. Reaching first.
 			auto cmp_cost = [&](const InnerSolution& s, bool reach_phase) {
@@ -2521,17 +2462,15 @@ BaseGradientResult SolveBaseGradient(
 			};
 			// Viewpoint v is reached here but missed at cand: the direction (step metric) whose opposite loses it --
 			// its manipulability slope (reach edge) or, failing that, its gap slope at cand. Zero if neither fits step_dir.
-			// `from`/`from_sol`: the spot the step starts at and its solution (where v is reached).
-			auto loss_direction = [&](int v, const ObjectPlacement& from, const InnerSolution& from_sol,
-									  const ObjectPlacement& cand, const InnerSolution& probe,
-									  const Eigen::Matrix<double, 6, 1>& step_dir) {
-				const Eigen::Matrix<double, 6, 1> none = Eigen::Matrix<double, 6, 1>::Zero();
+			// `from_sol`: the solution where the step starts (v is reached there).
+			auto loss_direction = [&](int v, const InnerSolution& from_sol, const InnerSolution& probe,
+									  const Eigen::Vector3d& step_dir) {
+				const Eigen::Vector3d none = Eigen::Vector3d::Zero();
 				const auto it = std::find(from_sol.tour.begin(), from_sol.tour.end(), v);
 				if (it == from_sol.tour.end())
 					return none;  // already missed where the step starts
-				const Eigen::Vector3d p = (MakePlacement(from) * tour_poses_obj[static_cast<size_t>(v)]).translation();
-				Eigen::Matrix<double, 6, 1> h = to_u(ManipulabilityOffsetGradient(
-					state, jmg, tool0_link, from, p, from_sol.joints[static_cast<size_t>(it - from_sol.tour.begin())],
+				Eigen::Vector3d h = to_u(ManipulabilityOffsetGradient(
+					state, jmg, tool0_link, from_sol.joints[static_cast<size_t>(it - from_sol.tour.begin())],
 					params.jacobian_damping, params.manipulability_limit_sharpness));
 				if (step_dir.dot(h) < 0.0)
 					return h;
@@ -2546,15 +2485,14 @@ BaseGradientResult SolveBaseGradient(
 					return none;
 				Eigen::Matrix<double, 6, 1> weighted_error = pose_error;
 				weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-				const Eigen::Vector3d pc = (MakePlacement(cand) * tour_poses_obj[static_cast<size_t>(v)]).translation();
-				h = -to_u(PlacementJacobian(cand, pc).transpose() * weighted_error / gap);
+				h = -to_u(PlacementJacobian().transpose() * weighted_error / gap);
 				return step_dir.dot(h) < 0.0 ? h : none;  // the step doesn't grow its gap either
 			};
 			// Add v's loss direction to `blk`, orthonormalized. False if it adds nothing new.
-			auto block = [&](std::vector<Eigen::Matrix<double, 6, 1>>& blk, int v, const ObjectPlacement& cand,
-							 const InnerSolution& probe, const Eigen::Matrix<double, 6, 1>& step_dir) {
-				Eigen::Matrix<double, 6, 1> h = loss_direction(v, base, here_quick, cand, probe, step_dir);
-				for (const Eigen::Matrix<double, 6, 1>& e : blk)
+			auto block = [&](std::vector<Eigen::Vector3d>& blk, int v, const InnerSolution& probe,
+							 const Eigen::Vector3d& step_dir) {
+				Eigen::Vector3d h = loss_direction(v, here_quick, probe, step_dir);
+				for (const Eigen::Vector3d& e : blk)
 					h -= h.dot(e) * e;
 				if (h.norm() < 1e-9)
 					return false;
@@ -2565,14 +2503,12 @@ BaseGradientResult SolveBaseGradient(
 			// (unit) that keeps n . d >= 0 for every wall (zero if none is left).
 			const double kWallRadius = 0.1;  // step metric (m): walls learned farther away no longer apply
 			auto u_dist = [&](const ObjectPlacement& a, const ObjectPlacement& b) {
-				Eigen::Matrix<double, 6, 1> v = ToOffsetVec(a, b);
-				v.tail<3>() *= rot_scale;
-				return v.norm();
+				return ToOffsetVec(a, b).norm();
 			};
 			walls.erase(
 				std::remove_if(walls.begin(), walls.end(), [&](const Wall& w) { return u_dist(w.at, base) > kWallRadius; }),
 				walls.end());
-			auto aim_within_walls = [&](const Eigen::Matrix<double, 6, 1>& a) {
+			auto aim_within_walls = [&](const Eigen::Vector3d& a) {
 				if (walls.empty())
 					return a;
 				std::vector<Eigen::VectorXd> rows;
@@ -2582,22 +2518,22 @@ BaseGradientResult SolveBaseGradient(
 					rows.push_back(w.n);
 					lo.push_back(0.0);
 				}
-				Eigen::Matrix<double, 6, 1> box_lo, box_hi;
-				for (int k = 0; k < 6; ++k)
+				Eigen::Vector3d box_lo, box_hi;
+				for (int k = 0; k < 3; ++k)
 				{
-					const bool locked = to_u(Eigen::Matrix<double, 6, 1>::Unit(k))(k) == 0.0;
+					const bool locked = to_u(Eigen::Vector3d::Unit(k))(k) == 0.0;
 					box_lo(k) = locked ? 0.0 : -1.0;
 					box_hi(k) = locked ? 0.0 : 1.0;
 				}
-				Eigen::Matrix<double, 6, 1> d = Eigen::Matrix<double, 6, 1>::Zero();
+				Eigen::Vector3d d = Eigen::Vector3d::Zero();
 				Eigen::VectorXd z;
 				std::string status;
 				// min -a.d + |d|^2 / 2 within the walls: a projected onto the allowed side.
 				if (!SolveReachStep(rows, lo, {}, {}, -a, 1.0, 0.0, box_lo, box_hi, 0, 0.0, d, z, status))
-					return Eigen::Matrix<double, 6, 1>(Eigen::Matrix<double, 6, 1>::Zero());
+					return Eigen::Vector3d(Eigen::Vector3d::Zero());
 				return d;
 			};
-			auto add_wall = [&](int v, const Eigen::Matrix<double, 6, 1>& h, const ObjectPlacement& at) {
+			auto add_wall = [&](int v, const Eigen::Vector3d& h, const ObjectPlacement& at) {
 				if (h.norm() < 1e-9)
 					return false;
 				// One wall per viewpoint: the newest replaces the old one, so stale walls can't contradict it.
@@ -2606,13 +2542,13 @@ BaseGradientResult SolveBaseGradient(
 				walls.push_back({h.normalized(), at, v});
 				if (params.trace_line_search)
 					RCLCPP_INFO(
-						node->get_logger(), "    wall: vp %d, room side (%+.2f, %+.2f, %+.2f) spin %+.2f, %zu walls", v,
-						walls.back().n(0), walls.back().n(1), walls.back().n(2), walls.back().n(5), walls.size());
+						node->get_logger(), "    wall: vp %d, room side (%+.2f, %+.2f, %+.2f), %zu walls", v,
+						walls.back().n(0), walls.back().n(1), walls.back().n(2), walls.size());
 				return true;
 			};
 			if (params.room_then_reach && !walls.empty())
 			{
-				const Eigen::Matrix<double, 6, 1> d = aim_within_walls(dir_u);
+				const Eigen::Vector3d d = aim_within_walls(dir_u);
 				if (d.norm() >= 0.1)
 					dir_u = d.normalized();  // stay off known walls
 			}
@@ -2622,9 +2558,7 @@ BaseGradientResult SolveBaseGradient(
 			for (int ls = 0; !params.reach_rules && ls < params.max_line_search_iters;)
 			{
 				ObjectPlacement cand = ProjectToBounds(
-					{base.x + step * dir_u(0), base.y + step * dir_u(1), base.z + step * dir_u(2),
-					 base.roll + step * dir_u(3) / rot_scale, base.pitch + step * dir_u(4) / rot_scale,
-					 base.yaw + step * dir_u(5) / rot_scale},
+					{base.x + step * dir_u(0), base.y + step * dir_u(1), base.z + step * dir_u(2)},
 					params.bounds);
 				// weighted_cost carries the unreachable penalty, so a probe that drops a viewpoint fails.
 				InnerSolution probe = quick_solve(cand);
@@ -2664,11 +2598,11 @@ BaseGradientResult SolveBaseGradient(
 					// One-sided walls: block only the side that loses each viewpoint, then re-aim the descent.
 					bool steered = false;
 					for (int v : probe.missed_vp)
-						steered = add_wall(v, loss_direction(v, base, here_quick, cand, probe, dir_u), base) || steered;
+						steered = add_wall(v, loss_direction(v, here_quick, probe, dir_u), base) || steered;
 					if (steered)
 					{
 						++num_steers;
-						const Eigen::Matrix<double, 6, 1> d = aim_within_walls(-g_u / gnorm);
+						const Eigen::Vector3d d = aim_within_walls(-g_u / gnorm);
 						if (d.norm() < 0.1)
 						{
 							if (params.trace_line_search)
@@ -2687,12 +2621,12 @@ BaseGradientResult SolveBaseGradient(
 				{
 					bool steered = false;
 					for (int v : probe.missed_vp)
-						steered = block(blocked, v, cand, probe, dir_u) || steered;
+						steered = block(blocked, v, probe, dir_u) || steered;
 					if (steered)
 					{
 						++num_steers;
-						Eigen::Matrix<double, 6, 1> d = -g_u / gnorm;
-						for (const Eigen::Matrix<double, 6, 1>& e : blocked)
+						Eigen::Vector3d d = -g_u / gnorm;
+						for (const Eigen::Vector3d& e : blocked)
 							d -= d.dot(e) * e;
 						if (d.norm() < 0.1)
 						{
@@ -2732,20 +2666,17 @@ BaseGradientResult SolveBaseGradient(
 					continue;
 				Eigen::Matrix<double, 6, 1> weighted_error = pose_error;
 				weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-				const Eigen::Vector3d p = (MakePlacement(base) * tour_poses_obj[static_cast<size_t>(v)]).translation();
-				const Eigen::Matrix<double, 6, 1> h = -to_u(PlacementJacobian(base, p).transpose() * weighted_error);
+				const Eigen::Vector3d h = -to_u(PlacementJacobian().transpose() * weighted_error);
 				if (h.norm() < 1e-9)
 					continue;
-				Eigen::Matrix<double, 6, 1> d = h.normalized();
-				std::vector<Eigen::Matrix<double, 6, 1>> reach_blocked;
+				Eigen::Vector3d d = h.normalized();
+				std::vector<Eigen::Vector3d> reach_blocked;
 				int reach_steers = 0;
 				double rstep = std::min(gap, params.initial_step);
 				for (int k = 0; k < 2 && !accepted;)
 				{
 					ObjectPlacement cand = ProjectToBounds(
-						{base.x + rstep * d(0), base.y + rstep * d(1), base.z + rstep * d(2),
-						 base.roll + rstep * d(3) / rot_scale, base.pitch + rstep * d(4) / rot_scale,
-						 base.yaw + rstep * d(5) / rot_scale},
+						{base.x + rstep * d(0), base.y + rstep * d(1), base.z + rstep * d(2)},
 						params.bounds);
 					InnerSolution probe = quick_solve(cand);
 					result.num_inner_solves += 1;
@@ -2776,12 +2707,12 @@ BaseGradientResult SolveBaseGradient(
 					{
 						bool steered = false;
 						for (int r : probe.missed_vp)
-							steered = block(reach_blocked, r, cand, probe, d) || steered;
+							steered = block(reach_blocked, r, probe, d) || steered;
 						if (steered)
 						{
 							++reach_steers;
-							Eigen::Matrix<double, 6, 1> dd = h.normalized();
-							for (const Eigen::Matrix<double, 6, 1>& e : reach_blocked)
+							Eigen::Vector3d dd = h.normalized();
+							for (const Eigen::Vector3d& e : reach_blocked)
 								dd -= dd.dot(e) * e;
 							if (dd.norm() < 0.1)
 								break;  // nothing left of the reach direction
@@ -2817,10 +2748,9 @@ BaseGradientResult SolveBaseGradient(
 						out += " " + std::to_string(x);
 					return out.empty() ? std::string(" none") : out;
 				};
-				auto shifted = [&](const ObjectPlacement& at, const Eigen::Matrix<double, 6, 1>& d, double size) {
+				auto shifted = [&](const ObjectPlacement& at, const Eigen::Vector3d& d, double size) {
 					return ProjectToBounds(
-						{at.x + size * d(0), at.y + size * d(1), at.z + size * d(2), at.roll + size * d(3) / rot_scale,
-						 at.pitch + size * d(4) / rot_scale, at.yaw + size * d(5) / rot_scale},
+						{at.x + size * d(0), at.y + size * d(1), at.z + size * d(2)},
 						params.bounds);
 				};
 				// Missed viewpoints, smallest gap first.
@@ -2858,18 +2788,17 @@ BaseGradientResult SolveBaseGradient(
 							break;
 						Eigen::Matrix<double, 6, 1> weighted_error = pose_error;
 						weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-						const Eigen::Vector3d tp = (MakePlacement(at) * tour_poses_obj[static_cast<size_t>(target)]).translation();
-						const Eigen::Matrix<double, 6, 1> aim_raw = -to_u(PlacementJacobian(at, tp).transpose() * weighted_error);
+						const Eigen::Vector3d aim_raw = -to_u(PlacementJacobian().transpose() * weighted_error);
 						if (aim_raw.norm() < 1e-9)
 							break;
-						const Eigen::Matrix<double, 6, 1> aim_d = aim_within_walls(aim_raw.normalized());
+						const Eigen::Vector3d aim_d = aim_within_walls(aim_raw.normalized());
 						if (aim_d.norm() < 0.1)
 						{
 							if (params.trace_line_search)
 								RCLCPP_INFO(node->get_logger(), "    aim vp %d: walls leave no way toward it", target);
 							break;
 						}
-						const Eigen::Matrix<double, 6, 1> aim = aim_d.normalized();
+						const Eigen::Vector3d aim = aim_d.normalized();
 						std::vector<int> lost_all;
 						bool walked = false;
 						for (double size : {params.initial_step, 0.5 * params.initial_step})
@@ -2909,7 +2838,7 @@ BaseGradientResult SolveBaseGradient(
 								break;
 							}
 							for (int v : lost)
-								if (add_wall(v, loss_direction(v, at, here_at, cand, probe, aim), at))
+								if (add_wall(v, loss_direction(v, here_at, probe, aim), at))
 									lost_all.push_back(v);
 							if (!lost.empty())
 								break;  // walls learned: make room rather than shrink
@@ -2922,14 +2851,14 @@ BaseGradientResult SolveBaseGradient(
 							break;  // no loss, no gain, over budget: nothing to make room for
 
 						// Room: along the new walls' room side (kept within all walls); no viewpoint lost, cost within budget.
-						Eigen::Matrix<double, 6, 1> room_raw = Eigen::Matrix<double, 6, 1>::Zero();
+						Eigen::Vector3d room_raw = Eigen::Vector3d::Zero();
 						for (size_t w = walls.size() - lost_all.size(); w < walls.size(); ++w)
 							room_raw += walls[w].n;
-						const Eigen::Matrix<double, 6, 1> room_d =
+						const Eigen::Vector3d room_d =
 							room_raw.norm() > 1e-9 ? aim_within_walls(room_raw.normalized()) : room_raw;
 						if (room_d.norm() < 0.1)
 							break;
-						const Eigen::Matrix<double, 6, 1> room = room_d.normalized();
+						const Eigen::Vector3d room = room_d.normalized();
 						bool moved = false;
 						for (double size : {params.initial_step, 0.5 * params.initial_step})
 						{
@@ -2995,20 +2924,18 @@ BaseGradientResult SolveBaseGradient(
 				{
 					const int v = here_quick.tour[k];
 					nz += ReachedPoseRules(
-						planning_scene_monitor, state, jmg, tool0_link, base,
-						(xform * tour_poses_obj[static_cast<size_t>(v)]).translation(), here_quick.joints[k], v, params,
-						nz, rules);
+						planning_scene_monitor, state, jmg, tool0_link, here_quick.joints[k], v, params, nz, rules);
 				}
 				const double kZMax = 0.3;  // rad: largest null-space joint motion per pose per step
 				std::vector<Eigen::VectorXd> rule_row;
-				std::vector<Eigen::Matrix<double, 6, 1>> gap_h;
+				std::vector<Eigen::Vector3d> gap_h;
 				std::vector<double> rule_lo, gaps;
 				std::vector<int> gap_vp;
 				for (const ReachRule& r : rules)
 				{
-					Eigen::VectorXd row = Eigen::VectorXd::Zero(6 + nz);
-					row.head<6>() = to_u(r.grad);
-					row.segment(6 + r.z_off, r.grad_z.size()) = r.grad_z;
+					Eigen::VectorXd row = Eigen::VectorXd::Zero(3 + nz);
+					row.head<3>() = to_u(r.grad);
+					row.segment(3 + r.z_off, r.grad_z.size()) = r.grad_z;
 					rule_row.push_back(row);
 					rule_lo.push_back(r.floor - r.value);
 				}
@@ -3020,8 +2947,7 @@ BaseGradientResult SolveBaseGradient(
 						continue;
 					Eigen::Matrix<double, 6, 1> weighted_error = here_quick.missed_gap[m];
 					weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-					const Eigen::Vector3d p = (xform * tour_poses_obj[static_cast<size_t>(v)]).translation();
-					gap_h.push_back(to_u(PlacementJacobian(base, p).transpose() * weighted_error / gap));
+					gap_h.push_back(to_u(PlacementJacobian().transpose() * weighted_error / gap));
 					gaps.push_back(gap);
 					gap_vp.push_back(v);
 				}
@@ -3030,23 +2956,22 @@ BaseGradientResult SolveBaseGradient(
 						node->get_logger(), "    reach rules: %zu rules on %zu reached viewpoints (%d null-space motions), %zu missed gaps",
 						rules.size(), here_quick.tour.size(), nz, gaps.size());
 
-				// Box in the step metric: trust radius, placement bounds, locked axes.
-				const double scale[6] = {1.0, 1.0, 1.0, rot_scale, rot_scale, rot_scale};
-				const ObjectPlacement lo_b{bb.x_min, bb.y_min, bb.z_min, bb.roll_min, bb.pitch_min, bb.yaw_min};
-				const ObjectPlacement hi_b{bb.x_max, bb.y_max, bb.z_max, bb.roll_max, bb.pitch_max, bb.yaw_max};
-				const Eigen::Matrix<double, 6, 1> to_lo = ToOffsetVec(lo_b, base), to_hi = ToOffsetVec(hi_b, base);
+				// Box: trust radius, placement bounds, locked axes.
+				const ObjectPlacement lo_b{bb.x_min, bb.y_min, bb.z_min};
+				const ObjectPlacement hi_b{bb.x_max, bb.y_max, bb.z_max};
+				const Eigen::Vector3d to_lo = ToOffsetVec(lo_b, base), to_hi = ToOffsetVec(hi_b, base);
 				const double big = std::max(1.0, gnorm);
 				double delta = params.initial_step;
 				for (int ls = 0; ls < params.max_line_search_iters && !accepted; ++ls, delta *= params.step_shrink)
 				{
-					Eigen::Matrix<double, 6, 1> box_lo, box_hi;
-					for (int k = 0; k < 6; ++k)
+					Eigen::Vector3d box_lo, box_hi;
+					for (int k = 0; k < 3; ++k)
 					{
-						const bool locked = to_u(Eigen::Matrix<double, 6, 1>::Unit(k))(k) == 0.0;
-						box_lo(k) = locked ? 0.0 : std::min(0.0, std::max(-delta, to_lo(k) * scale[k]));
-						box_hi(k) = locked ? 0.0 : std::max(0.0, std::min(delta, to_hi(k) * scale[k]));
+						const bool locked = to_u(Eigen::Vector3d::Unit(k))(k) == 0.0;
+						box_lo(k) = locked ? 0.0 : std::min(0.0, std::max(-delta, to_lo(k)));
+						box_hi(k) = locked ? 0.0 : std::max(0.0, std::min(delta, to_hi(k)));
 					}
-					Eigen::Matrix<double, 6, 1> d = Eigen::Matrix<double, 6, 1>::Zero();
+					Eigen::Vector3d d = Eigen::Vector3d::Zero();
 					Eigen::VectorXd z;
 					std::string qp_status;
 					// Objective scaled by 1/big (same answer, better conditioned): gaps weigh 100x the cost slope.
@@ -3067,8 +2992,7 @@ BaseGradientResult SolveBaseGradient(
 						break;
 					}
 					ObjectPlacement cand = ProjectToBounds(
-						{base.x + d(0), base.y + d(1), base.z + d(2), base.roll + d(3) / rot_scale,
-						 base.pitch + d(4) / rot_scale, base.yaw + d(5) / rot_scale},
+						{base.x + d(0), base.y + d(1), base.z + d(2)},
 						params.bounds);
 					InnerSolution probe = quick_solve(cand);
 					result.num_inner_solves += 1;
@@ -3082,7 +3006,7 @@ BaseGradientResult SolveBaseGradient(
 						int num_tight = 0;
 						for (size_t i = 0; i < rules.size(); ++i)
 						{
-							Eigen::VectorXd x(6 + nz);
+							Eigen::VectorXd x(3 + nz);
 							x << d, z;
 							const double v = rules[i].value + rule_row[i].dot(x);
 							if (v - rules[i].floor <= 0.05 * std::abs(rules[i].value - rules[i].floor) + 1e-6 && num_tight++ < 6)
@@ -3102,11 +3026,10 @@ BaseGradientResult SolveBaseGradient(
 								lost += " " + std::to_string(v);
 						RCLCPP_INFO(
 							node->get_logger(),
-							"    rule step box=%.4f m |d|=%.4f dir (%+.2f, %+.2f, %+.2f) spin %+.2f deg abs (%.4f, %.4f, %.4f): "
+							"    rule step box=%.4f m |d|=%.4f dir (%+.2f, %+.2f, %+.2f) abs (%.4f, %.4f, %.4f): "
 							"reached %d vs %d here, gap sum %.1f vs %.1f mm, cost %.2f vs %.2f here, null-space max %.2f rad  lost:%s -> %s",
-							delta, d.norm(), d(0) / std::max(1e-12, d.head<3>().norm()),
-							d(1) / std::max(1e-12, d.head<3>().norm()), d(2) / std::max(1e-12, d.head<3>().norm()),
-							d(5) / rot_scale * 180.0 / M_PI, cand.x, cand.y, cand.z, probe.num_reachable,
+							delta, d.norm(), d(0) / std::max(1e-12, d.norm()), d(1) / std::max(1e-12, d.norm()),
+							d(2) / std::max(1e-12, d.norm()), cand.x, cand.y, cand.z, probe.num_reachable,
 							here_quick.num_reachable, 1e3 * probe.gap_sum, 1e3 * here_quick.gap_sum, probe.weighted_cost,
 							here_quick.weighted_cost, z.size() ? z.cwiseAbs().maxCoeff() : 0.0, lost.empty() ? " none" : lost.c_str(),
 							ok ? "accepted" : "rejected");
@@ -3152,8 +3075,6 @@ BaseGradientResult SolveBaseGradient(
 				params.manipulability_weight = lambda_final;
 				continue;
 			}
-			if (!accepted && unlock_yaw())
-				continue;
 			if (!accepted)
 			{
 				if (cur.all_reachable)
@@ -3164,15 +3085,11 @@ BaseGradientResult SolveBaseGradient(
 						restart_idx + 1, cur.num_reachable, n);
 				PublishProgress(
 					node, params, object_pose_obj, tour_poses_obj, base_history,
-					Eigen::Vector3d(-g.head<3>()), base, state, jmg, cur);
+					Eigen::Vector3d(-g), base, state, jmg, cur);
 				break;
 			}
 
-			Eigen::Matrix<double, 6, 1> du = ToOffsetVec(b_new, base);
-			du(3) *= rot_scale;
-			du(4) *= rot_scale;
-			du(5) *= rot_scale;
-			double base_move = du.norm();
+			double base_move = ToOffsetVec(b_new, base).norm();
 			double rel_impr = (cur.weighted_cost - committed.weighted_cost) / std::max(std::abs(cur.weighted_cost), 1e-9);
 			// Progress even if the cost rose: a viewpoint gained, or (reach rules) missed gaps shrank.
 			const bool gained = committed.num_reachable > cur.num_reachable ||
@@ -3187,16 +3104,15 @@ BaseGradientResult SolveBaseGradient(
 
 			RCLCPP_INFO(
 				node->get_logger(),
-				"restart %d/%d iter %d/%d: abs (%.4f, %.4f, %.4f) m  tip %.1f tilt %.1f spin %.1f deg  reachable %d/%d  "
-				"|grad|=%.4f  step=%.4f m",
+				"restart %d/%d iter %d/%d: abs (%.4f, %.4f, %.4f) m  reachable %d/%d  |grad|=%.4f  step=%.4f m",
 				restart_idx + 1, std::max(1, params.descent_num_restart), outer + 1, params.max_outer_iterations, base.x,
-				base.y, base.z, base.roll * 180.0 / M_PI, base.pitch * 180.0 / M_PI, base.yaw * 180.0 / M_PI, cur.num_reachable, n, gnorm, step);
+				base.y, base.z, cur.num_reachable, n, gnorm, step);
 			log_cost_terms(cur);
 			log_missed(base, cur);
 
 			PublishProgress(
 				node, params, object_pose_obj, tour_poses_obj, base_history,
-				Eigen::Vector3d(-g.head<3>()), base, state, jmg, cur);
+				Eigen::Vector3d(-g), base, state, jmg, cur);
 
 			if (!gained && rel_impr < params.convergence_tolerance_cost)
 			{
@@ -3208,8 +3124,6 @@ BaseGradientResult SolveBaseGradient(
 						stall_count = 0;
 						continue;
 					}
-					if (unlock_yaw())
-						continue;
 					RCLCPP_INFO(
 						node->get_logger(), "  restart %d: %d iterations with <%.1e relative gain -- stopping early",
 						restart_idx + 1, stall_count, params.convergence_tolerance_cost);
@@ -3229,8 +3143,6 @@ BaseGradientResult SolveBaseGradient(
 					stall_count = 0;
 					continue;
 				}
-				if (unlock_yaw())
-					continue;
 				RCLCPP_INFO(node->get_logger(), "  restart %d: placement settled -- converged", restart_idx + 1);
 				break;
 			}
@@ -3265,9 +3177,8 @@ BaseGradientResult SolveBaseGradient(
 			(r == 0) ? ObjectPlacement{
 						   std::isnan(params.initial_x) ? object_translation_nominal.x() : params.initial_x,
 						   std::isnan(params.initial_y) ? object_translation_nominal.y() : params.initial_y,
-						   std::isnan(params.initial_z) ? object_translation_nominal.z() : params.initial_z,
-						   params.initial_roll, params.initial_pitch, params.initial_yaw}
-					 : PerturbOffset(overall.placement, rng, params.descent_restart_perturbation, rot_scale);
+						   std::isnan(params.initial_z) ? object_translation_nominal.z() : params.initial_z}
+					 : PerturbOffset(overall.placement, rng, params.descent_restart_perturbation);
 		RestartResult rr = run_descent(start, r, r == 0 ? nullptr : &overall.sol);
 
 		// weighted_cost carries the unreachable penalty, so lower cost == better (a fully-
@@ -3276,12 +3187,11 @@ BaseGradientResult SolveBaseGradient(
 
 		RCLCPP_INFO(
 			node->get_logger(),
-			"restart %d/%d done: total cost=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, %.4f, %.4f) m"
-			"  tip %.1f tilt %.1f spin %.1f deg%s",
+			"restart %d/%d done: total cost=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, %.4f, %.4f) m%s",
 			r + 1, descent_num_restart, rr.cost,
 			rr.sol.travel_cost + params.unreachable_penalty * (n - rr.sol.num_reachable), rr.sol.sum_manipulability,
 			rr.sol.num_reachable, n,
-			rr.placement.x, rr.placement.y, rr.placement.z, rr.placement.roll * 180.0 / M_PI, rr.placement.pitch * 180.0 / M_PI, rr.placement.yaw * 180.0 / M_PI, (r > 0 && improved) ? "  <-- new best" : "");
+			rr.placement.x, rr.placement.y, rr.placement.z, (r > 0 && improved) ? "  <-- new best" : "");
 
 		if (improved)
 			overall = rr;
@@ -3291,9 +3201,6 @@ BaseGradientResult SolveBaseGradient(
 	result.x = overall.placement.x;
 	result.y = overall.placement.y;
 	result.z = overall.placement.z;
-	result.roll = overall.placement.roll;
-	result.pitch = overall.placement.pitch;
-	result.yaw = overall.placement.yaw;
 	result.tour_order = fin.tour;
 	result.joint_solutions = fin.joints;
 	// Report the honest tour cost -- strip the unreachable penalty baked in for comparison.
@@ -3309,17 +3216,15 @@ BaseGradientResult SolveBaseGradient(
 	if (result.ok)
 		RCLCPP_INFO(
 			node->get_logger(),
-			"Done. Object abs (%.4f, %.4f, %.4f) m, tip %.2f deg, tilt %.2f deg, spin %.2f deg -- reaches "
+			"Done. Object abs (%.4f, %.4f, %.4f) m -- reaches "
 			"all %d poses, tour joint path %.4f rad, travel %.2f, sum_w %.3f (weighted cost %.4f).",
-			result.x, result.y, result.z, result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI, result.yaw * 180.0 / M_PI, n,
+			result.x, result.y, result.z, n,
 			result.total_joint_path_length, fin.travel_cost, fin.sum_manipulability, result.total_weighted_cost);
 	else
 		RCLCPP_WARN(
 			node->get_logger(),
-			"Done. Object abs (%.4f, %.4f, %.4f) m, tip %.2f deg, tilt %.2f deg, spin %.2f deg -- reaches "
-			"only %d/%d poses.",
-			result.x, result.y, result.z, result.roll * 180.0 / M_PI, result.pitch * 180.0 / M_PI,
-			result.yaw * 180.0 / M_PI, result.num_reachable, n);
+			"Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses.", result.x, result.y, result.z,
+			result.num_reachable, n);
 
 	return result;
 }
@@ -3335,9 +3240,6 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 	root["x"] = result.x;
 	root["y"] = result.y;
 	root["z"] = result.z;
-	root["roll"] = result.roll;
-	root["pitch"] = result.pitch;
-	root["yaw"] = result.yaw;
 	root["total_joint_path_length"] = result.total_joint_path_length;
 	root["total_weighted_cost"] = result.total_weighted_cost;
 
@@ -3364,10 +3266,7 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 		entry["x"] = h[1];
 		entry["y"] = h[2];
 		entry["z"] = h[3];
-		entry["roll"] = h[4];
-		entry["pitch"] = h[5];
-		entry["yaw"] = h[6];
-		entry["weighted_cost"] = h[7];
+		entry["weighted_cost"] = h[4];
 		history.append(entry);
 	}
 	root["history"] = history;
@@ -3382,21 +3281,18 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 	printf("Saved base gradient result JSON: %s\n", json_path.c_str());
 }
 
-Eigen::Isometry3d PlacementTransform(
-	const Eigen::Vector3d& object_translation_nominal, double x, double y, double z, double roll, double pitch,
-	double yaw)
+Eigen::Isometry3d PlacementTransform(const Eigen::Vector3d& object_translation_nominal, double x, double y, double z)
 {
-	return MakePlacement(ObjectPlacement{x, y, z, roll, pitch, yaw}) * Eigen::Translation3d(-object_translation_nominal);
+	return MakePlacement(ObjectPlacement{x, y, z}) * Eigen::Translation3d(-object_translation_nominal);
 }
 
 void ApplyObjectPlacementToScene(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Matrix3d& object_rotation_nominal, double x, double y, double z, double roll, double pitch,
-	double yaw)
+	const Eigen::Matrix3d& object_rotation_nominal, double x, double y, double z)
 {
 	SetObjectPose(
 		planning_scene_monitor,
-		MakePlacement(ObjectPlacement{x, y, z, roll, pitch, yaw}) * MakeIsometry(Eigen::Vector3d::Zero(), object_rotation_nominal));
+		MakePlacement(ObjectPlacement{x, y, z}) * MakeIsometry(Eigen::Vector3d::Zero(), object_rotation_nominal));
 }
 
 visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
@@ -3407,8 +3303,7 @@ visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
 	visualization_msgs::msg::MarkerArray markers;
 	int id = 0;
 
-	const Eigen::Isometry3d xform = PlacementTransform(
-		object_translation_nominal, result.x, result.y, result.z, result.roll, result.pitch, result.yaw);
+	const Eigen::Isometry3d xform = PlacementTransform(object_translation_nominal, result.x, result.y, result.z);
 	const Eigen::Isometry3d object_pose_nominal = MakeIsometry(object_translation_nominal, object_rotation_nominal);
 
 	visualization_msgs::msg::Marker mesh_marker;
