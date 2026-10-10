@@ -19,16 +19,23 @@
     bg_stop_when_all_reached: true
     bg_steering: true
     bg_trace_line_search: true
+    bg_initial_step: 0.05                    # m: largest object move per iteration (first probe)
+    bg_step_shrink: 0.5                     # each failed probe tries step * this
+    bg_max_line_search_iters: 4              # probes per iteration before giving up
 
     # Cost
     bg_travel_gradient: false
     bg_travel_in_cost: false
     bg_planned_travel_in_cost: true
     bg_real_cost_planning_time: 0.5
-    bg_manipulability_weight_initial: 100.0  # lambda during the descent
-    bg_manipulability_weight: 10.0            # final lambda; also used to pick the reported best placement
-    bg_log_manipulability_weight: 0.0        # mu
+    bg_manipulability_weight_initial: 30.0  # lambda during the descent
+    bg_manipulability_weight: 1.0            # final lambda; also used to pick the reported best placement
+    bg_log_manipulability_weight: 0.0        # mu (off: soft-min instead)
+    bg_softmin_manipulability_weight: 1000.0 # pull from the worst poses' manipulability; 0 = off
+    bg_softmin_tau: 0.01                     # small = only the worst pose, large = closer to the average
     bg_manipulability_include_missed: true   # missed viewpoints count with their closest IK pose
-    bg_self_clearance_weight: 1000.0         # penalty for arm links closer than the threshold; 0 = off
-    bg_self_clearance_threshold: 0.10        # m
+    bg_manipulability_limit_sharpness: 20.0  # joints near a limit count less in manipulability; 0 = plain
+    bg_self_clearance_weight: 0.2            # -sum log(arm-arm pair distance); 0 = off
+    bg_joint_limit_weight: 10.0              # penalty as joints near their limits; 0 = off
+    bg_joint_limit_zone: 0.15                # share of a joint's range from its limit where the penalty starts
     bg_miss_gap_weight: 10.0

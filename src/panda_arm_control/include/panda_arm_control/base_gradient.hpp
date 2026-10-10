@@ -39,10 +39,20 @@ struct BaseGradientParams
 	double log_manipulability_weight = 2.0;
 	// Missed viewpoints add their closest-IK pose's manipulability too (cost and gradient).
 	bool manipulability_include_missed = false;
-	// Self-clearance: each arm pose costs weight * sum over arm-arm pairs closer than the threshold of
-	// (threshold - distance)^2, so folded postures cost more. 0 = off.
+	// Range-aware manipulability: each joint's Jacobian column is scaled by 1 - exp(-k (q-lo)(hi-q)/range^2),
+	// so joints near a limit count less. k = this; 0 = plain manipulability.
+	double manipulability_limit_sharpness = 0.0;
+	// Soft-min manipulability: cost -= weight * (-tau log sum exp(-w / tau)), ~ the worst poses' w. Their
+	// shares of the push add up to 1, so one bad pose can't take over (unlike log). 0 = off.
+	double softmin_manipulability_weight = 0.0;
+	double softmin_tau = 0.01;
+	// Self-clearance: each arm pose costs -weight * sum over all arm-arm pairs of log(distance), so the
+	// gradient always spreads the links apart (folded postures cost more). 0 = off.
 	double self_clearance_weight = 0.0;
-	double self_clearance_threshold = 0.10;  // m
+	// Joint-limit room: each arm pose costs weight * sum over joints within `zone` (share of range) of a limit of
+	// ((zone - f) / zone)^2, f = share of range to the nearest limit. Warns before a joint runs out. 0 = off.
+	double joint_limit_weight = 0.0;
+	double joint_limit_zone = 0.15;
 	// A missed viewpoint costs unreachable_penalty + miss_gap_weight * min(gap, miss_gap_cap), where gap
 	// is its closest-IK pose gap (m, rotation scaled by rot_metric_scale): gives misses a gradient.
 	double miss_gap_weight = 5000.0;
