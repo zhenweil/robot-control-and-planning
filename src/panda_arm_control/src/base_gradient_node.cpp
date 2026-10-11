@@ -93,7 +93,6 @@ struct Params
 	int bg_real_cost_attempts = 3;
 	bool bg_planned_travel_in_cost = false;
 	bool bg_steering = true;
-	bool bg_reach_probe = false;
 	int bg_miss_tolerance = 0;
 	bool bg_track_probes = false;
 	bool bg_room_then_reach = false;
@@ -295,7 +294,6 @@ private:
 		this->declareIfNeeded("bg_real_cost_attempts", this->params.bg_real_cost_attempts);
 		this->declareIfNeeded("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->declareIfNeeded("bg_steering", this->params.bg_steering);
-		this->declareIfNeeded("bg_reach_probe", this->params.bg_reach_probe);
 		this->declareIfNeeded("bg_miss_tolerance", this->params.bg_miss_tolerance);
 		this->declareIfNeeded("bg_track_probes", this->params.bg_track_probes);
 		this->declareIfNeeded("bg_room_then_reach", this->params.bg_room_then_reach);
@@ -379,7 +377,6 @@ private:
 		this->get_parameter("bg_real_cost_attempts", this->params.bg_real_cost_attempts);
 		this->get_parameter("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->get_parameter("bg_steering", this->params.bg_steering);
-		this->get_parameter("bg_reach_probe", this->params.bg_reach_probe);
 		this->get_parameter("bg_miss_tolerance", this->params.bg_miss_tolerance);
 		this->get_parameter("bg_track_probes", this->params.bg_track_probes);
 		this->get_parameter("bg_room_then_reach", this->params.bg_room_then_reach);
@@ -483,7 +480,6 @@ private:
 		bg.real_cost_attempts = this->params.bg_real_cost_attempts;
 		bg.planned_travel_in_cost = this->params.bg_planned_travel_in_cost;
 		bg.steering = this->params.bg_steering;
-		bg.reach_probe = this->params.bg_reach_probe;
 		bg.miss_tolerance = this->params.bg_miss_tolerance;
 		bg.track_probes = this->params.bg_track_probes;
 		bg.room_then_reach = this->params.bg_room_then_reach;

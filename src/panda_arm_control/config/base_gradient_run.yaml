@@ -21,7 +21,6 @@
     bg_track_probes: true                    # probes follow the current arm poses; new arm poses are searched only at accepted spots
     bg_steering: true
     bg_miss_tolerance: 1                     # a move may lose this many reached viewpoints if total cost drops; best seen is returned
-    bg_reach_probe: true                     # when stuck with misses, try each missed viewpoint's own gap direction
     bg_trace_line_search: true
     bg_initial_step: 0.05                    # m: largest object move per iteration (first probe)
     bg_step_shrink: 0.5                     # each failed probe tries step * this

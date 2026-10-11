@@ -102,7 +102,6 @@ struct BaseGradientParams
 	// Travel in the cost = planned joint travel instead of the L2 estimate, whatever travel_in_cost says (needs real_cost_planning_time > 0).
 	bool planned_travel_in_cost = false;
 	bool steering = true;  // steer the step around viewpoints it would lose (false: only shrink the step)
-	bool reach_probe = false;
 	// A move may lose up to this many reached viewpoints if the total cost drops; the best placement seen is returned.
 	int miss_tolerance = 0;
 	// Probes track the current arm poses (one warm IK attempt per viewpoint, fixed order) instead of a fresh search.
