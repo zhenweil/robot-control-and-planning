@@ -2502,7 +2502,7 @@ BaseGradientResult SolveBaseGradient(
 				return true;
 			};
 			// Room-then-reach walls: forget walls learned far away; aim_within_walls gives the direction nearest to `a`
-			// (unit) outside every wall's cone, scaled by its cosine to `a` (zero if none is left).
+			// (unit) outside every wall's cone, even one turned far from `a` (zero only if it can't get out).
 			const double kWallRadius = 0.1;  // step metric (m): walls learned farther away no longer apply
 			auto u_dist = [&](const ObjectPlacement& a, const ObjectPlacement& b) {
 				return ToOffsetVec(a, b).norm();
@@ -2536,7 +2536,7 @@ BaseGradientResult SolveBaseGradient(
 						moved = true;
 					}
 					if (!moved)
-						return Eigen::Vector3d(std::max(0.0, d.dot(a_u)) * d);
+						return d;
 				}
 				return none;  // the cones cover every nearby direction
 			};
@@ -2739,7 +2739,7 @@ BaseGradientResult SolveBaseGradient(
 			}
 
 			// Room then reach: stuck with misses, walk toward each missed viewpoint (closest first). An aim step that
-			// reaches it is accepted; one that loses nothing walks on (cost within room_budget); one that loses
+			// reaches it is accepted; one that loses nothing walks on (whatever the cost); one that loses
 			// viewpoints adds walls, then a room move along their room side gives the blockers room. Up to kMaxDetours.
 			if (!accepted && params.room_then_reach && !params.reach_rules && !here_quick.missed_vp.empty())
 			{
@@ -2823,8 +2823,8 @@ BaseGradientResult SolveBaseGradient(
 							// Counts only if it reaches more and loses nothing; a small cost win alone isn't the goal here.
 							const bool ok =
 								lost_from(here_quick, probe).empty() && probe.num_reachable > here_quick.num_reachable;
-							const bool walk = !ok && lost.empty() &&
-								cmp_cost(probe, true) <= cmp_cost(here_quick, true) + params.room_budget;
+							// While viewpoints are missed the cost may rise: a walk-on step only has to lose nothing.
+							const bool walk = !ok && lost.empty();
 							if (params.trace_line_search)
 								RCLCPP_INFO(
 									node->get_logger(),
@@ -2856,19 +2856,26 @@ BaseGradientResult SolveBaseGradient(
 									room_raw += comfort.normalized();
 								lost_all.push_back(v);
 							}
-							// A trade (the target reached, others lost): the room move also gives the target room, so it
-							// follows the comfort of both sides.
+							// The target votes too, so room moves don't drift away from it: its comfort at the pose the step
+							// reached it with (a trade), else at its closest pose here; toward it if it has neither.
 							const auto ti = std::find(probe.tour.begin(), probe.tour.end(), target);
-							if (!lost.empty() && ti != probe.tour.end())
+							if (!lost.empty())
 							{
-								const Eigen::Vector3d comfort = to_u(ManipulabilityOffsetGradient(
-									state, jmg, tool0_link, probe.joints[static_cast<size_t>(ti - probe.tour.begin())],
-									params.jacobian_damping, params.manipulability_limit_sharpness));
-								if (comfort.norm() > 1e-9)
-									room_raw += comfort.normalized();
+								const bool trade = ti != probe.tour.end();
+								const std::vector<double>& target_q = trade
+									? probe.joints[static_cast<size_t>(ti - probe.tour.begin())]
+									: (mi < here_at.missed_q.size() ? here_at.missed_q[mi] : std::vector<double>{});
+								const Eigen::Vector3d target_vote = target_q.empty()
+									? aim_raw
+									: Eigen::Vector3d(to_u(ManipulabilityOffsetGradient(
+										  state, jmg, tool0_link, target_q, params.jacobian_damping,
+										  params.manipulability_limit_sharpness)));
+								if (target_vote.norm() > 1e-9)
+									room_raw += target_vote.normalized();
 								if (params.trace_line_search)
 									RCLCPP_INFO(
-										node->get_logger(), "    trade: vp %d reached for%s -- room for both", target,
+										node->get_logger(), "    target vp %d votes (%s) with lost%s", target,
+										trade ? "reached: comfort" : target_q.empty() ? "missed: toward it" : "missed: comfort at closest pose",
 										list(lost).c_str());
 							}
 							if (!lost.empty())

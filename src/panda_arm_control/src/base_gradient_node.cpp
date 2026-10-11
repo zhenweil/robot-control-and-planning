@@ -98,7 +98,6 @@ struct Params
 	bool bg_reach_rules = false;
 	bool bg_track_probes = false;
 	bool bg_room_then_reach = false;
-	double bg_room_budget = 30.0;
 	double bg_rule_limit_room = 0.02;
 	double bg_rule_clearance = 0.005;
 	bool bg_trace_line_search = false;
@@ -304,7 +303,6 @@ private:
 		this->declareIfNeeded("bg_reach_rules", this->params.bg_reach_rules);
 		this->declareIfNeeded("bg_track_probes", this->params.bg_track_probes);
 		this->declareIfNeeded("bg_room_then_reach", this->params.bg_room_then_reach);
-		this->declareIfNeeded("bg_room_budget", this->params.bg_room_budget);
 		this->declareIfNeeded("bg_rule_limit_room", this->params.bg_rule_limit_room);
 		this->declareIfNeeded("bg_rule_clearance", this->params.bg_rule_clearance);
 		this->declareIfNeeded("bg_trace_line_search", this->params.bg_trace_line_search);
@@ -392,7 +390,6 @@ private:
 		this->get_parameter("bg_reach_rules", this->params.bg_reach_rules);
 		this->get_parameter("bg_track_probes", this->params.bg_track_probes);
 		this->get_parameter("bg_room_then_reach", this->params.bg_room_then_reach);
-		this->get_parameter("bg_room_budget", this->params.bg_room_budget);
 		this->get_parameter("bg_rule_limit_room", this->params.bg_rule_limit_room);
 		this->get_parameter("bg_rule_clearance", this->params.bg_rule_clearance);
 		this->get_parameter("bg_trace_line_search", this->params.bg_trace_line_search);
@@ -500,7 +497,6 @@ private:
 		bg.reach_rules = this->params.bg_reach_rules;
 		bg.track_probes = this->params.bg_track_probes;
 		bg.room_then_reach = this->params.bg_room_then_reach;
-		bg.room_budget = this->params.bg_room_budget;
 		bg.rule_limit_room = this->params.bg_rule_limit_room;
 		bg.rule_clearance = this->params.bg_rule_clearance;
 		bg.trace_line_search = this->params.bg_trace_line_search;

@@ -111,9 +111,8 @@ struct BaseGradientParams
 	// Probes track the current arm poses (one warm IK attempt per viewpoint, fixed order) instead of a fresh search.
 	bool track_probes = false;
 	// Room-then-reach steering: one-sided walls learned from lost viewpoints; when stuck, aim at a missed viewpoint,
-	// and if a blocker is lost, first move to give it room (cost may rise by room_budget), then aim again.
+	// and if a blocker is lost, first move to give it room, then aim again. Moves that lose nothing may raise the cost.
 	bool room_then_reach = false;
-	double room_budget = 30.0;
 	bool tracking = false;  // internal: set on the params copy used for tracked solves
 	double rule_limit_room = 0.02;
 	double rule_clearance = 0.005;  // when stuck with misses, try a step along each missed viewpoint's own gap direction
