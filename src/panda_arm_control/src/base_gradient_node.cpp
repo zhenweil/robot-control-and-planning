@@ -95,11 +95,8 @@ struct Params
 	bool bg_steering = true;
 	bool bg_reach_probe = false;
 	int bg_miss_tolerance = 0;
-	bool bg_reach_rules = false;
 	bool bg_track_probes = false;
 	bool bg_room_then_reach = false;
-	double bg_rule_limit_room = 0.02;
-	double bg_rule_clearance = 0.005;
 	bool bg_trace_line_search = false;
 	int bg_refine_at_reach = 0;
 
@@ -300,11 +297,8 @@ private:
 		this->declareIfNeeded("bg_steering", this->params.bg_steering);
 		this->declareIfNeeded("bg_reach_probe", this->params.bg_reach_probe);
 		this->declareIfNeeded("bg_miss_tolerance", this->params.bg_miss_tolerance);
-		this->declareIfNeeded("bg_reach_rules", this->params.bg_reach_rules);
 		this->declareIfNeeded("bg_track_probes", this->params.bg_track_probes);
 		this->declareIfNeeded("bg_room_then_reach", this->params.bg_room_then_reach);
-		this->declareIfNeeded("bg_rule_limit_room", this->params.bg_rule_limit_room);
-		this->declareIfNeeded("bg_rule_clearance", this->params.bg_rule_clearance);
 		this->declareIfNeeded("bg_trace_line_search", this->params.bg_trace_line_search);
 		this->declareIfNeeded("bg_refine_at_reach", this->params.bg_refine_at_reach);
 		this->declareIfNeeded("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
@@ -387,11 +381,8 @@ private:
 		this->get_parameter("bg_steering", this->params.bg_steering);
 		this->get_parameter("bg_reach_probe", this->params.bg_reach_probe);
 		this->get_parameter("bg_miss_tolerance", this->params.bg_miss_tolerance);
-		this->get_parameter("bg_reach_rules", this->params.bg_reach_rules);
 		this->get_parameter("bg_track_probes", this->params.bg_track_probes);
 		this->get_parameter("bg_room_then_reach", this->params.bg_room_then_reach);
-		this->get_parameter("bg_rule_limit_room", this->params.bg_rule_limit_room);
-		this->get_parameter("bg_rule_clearance", this->params.bg_rule_clearance);
 		this->get_parameter("bg_trace_line_search", this->params.bg_trace_line_search);
 		this->get_parameter("bg_refine_at_reach", this->params.bg_refine_at_reach);
 		this->get_parameter("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
@@ -494,11 +485,8 @@ private:
 		bg.steering = this->params.bg_steering;
 		bg.reach_probe = this->params.bg_reach_probe;
 		bg.miss_tolerance = this->params.bg_miss_tolerance;
-		bg.reach_rules = this->params.bg_reach_rules;
 		bg.track_probes = this->params.bg_track_probes;
 		bg.room_then_reach = this->params.bg_room_then_reach;
-		bg.rule_limit_room = this->params.bg_rule_limit_room;
-		bg.rule_clearance = this->params.bg_rule_clearance;
 		bg.trace_line_search = this->params.bg_trace_line_search;
 		bg.refine_at_reach = this->params.bg_refine_at_reach;
 		bg.random_seed = this->params.random_seed;

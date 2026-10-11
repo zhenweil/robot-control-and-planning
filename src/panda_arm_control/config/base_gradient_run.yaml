@@ -19,9 +19,6 @@
     bg_stop_when_all_reached: true
     bg_room_then_reach: true                 # when stuck: aim at a missed viewpoint; if a blocker is lost, give it room first
     bg_track_probes: true                    # probes follow the current arm poses; new arm poses are searched only at accepted spots
-    bg_reach_rules: false                    # a QP picks each step: reached viewpoints keep room, missed gaps shrink first
-    bg_rule_limit_room: 0.02                 # share of a joint's range a reached pose must keep from its limit
-    bg_rule_clearance: 0.005                 # m a reached pose must keep between arm links and from the object
     bg_steering: true
     bg_miss_tolerance: 1                     # a move may lose this many reached viewpoints if total cost drops; best seen is returned
     bg_reach_probe: true                     # when stuck with misses, try each missed viewpoint's own gap direction

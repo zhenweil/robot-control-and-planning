@@ -21,7 +21,6 @@
 #include <moveit/collision_detection/collision_common.h>
 #include <moveit/robot_state/robot_state.h>
 #include <moveit_msgs/msg/collision_object.hpp>
-#include <osqp/osqp.h>
 #include <random_numbers/random_numbers.h>
 #include <std_msgs/msg/color_rgba.hpp>
 
@@ -1344,11 +1343,6 @@ Eigen::Vector3d ManipulabilityOffsetGradient(
 	return dq_db.transpose() * ManipulabilityJointGradient(state, jmg, tool0_link, q, limit_sharpness);
 }
 
-// ---------------------------------------------------------------------------------------------
-// Reach rules: a reached viewpoint stays workable while its arm pose keeps joint room, clearance and
-// manipulability. Each rule is linearized in the placement b: value + grad . db >= floor.
-// ---------------------------------------------------------------------------------------------
-
 // A wall learned from a probe step that lost viewpoint vp: steps within kWallHalfAngle of `n` (the failed step's
 // direction, unit) are blocked. `room` is vp's comfort direction that the step went against (zero if unknown).
 // Forgotten once the object is far from where it was learned.
@@ -1359,251 +1353,6 @@ struct Wall
 	ObjectPlacement at;
 	int vp = -1;
 };
-
-struct ReachRule
-{
-	double value = 0.0;
-	double floor = 0.0;
-	Eigen::Vector3d grad = Eigen::Vector3d::Zero();  // d(value)/db
-	Eigen::VectorXd grad_z;	 // d(value)/dz: z moves the arm in its null space (hand fixed), e.g. an elbow swing
-	int z_off = 0;			 // where this pose's z starts among all poses' z
-	int vp = -1;
-	std::string what;
-};
-
-// Rules for reached viewpoint vp, arm pose q. The scene's object must sit at the placement being checked.
-// The arm follows the viewpoint (dq = J_pinv P db) plus null-space motion N z; returns z's size (N's columns).
-int ReachedPoseRules(
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, moveit::core::RobotState& state,
-	const moveit::core::JointModelGroup* jmg, const moveit::core::LinkModel* tool0_link,
-	const std::vector<double>& q, int vp, const BaseGradientParams& params,
-	int z_off, std::vector<ReachRule>& rules)
-{
-	const double kClearZone = 0.03;  // m: pairs closer than this get a rule
-	state.setJointGroupPositions(jmg, q);
-	state.update();
-	Eigen::MatrixXd J;
-	state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
-	Eigen::MatrixXd JJt = J * J.transpose();
-	JJt.diagonal().array() += params.jacobian_damping * params.jacobian_damping;
-	const Eigen::MatrixXd dq_db =
-		J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6)) * PlacementJacobian();
-	// Null space of J: joint motions that keep the hand still.
-	Eigen::JacobiSVD<Eigen::MatrixXd> svd(J, Eigen::ComputeFullV);
-	const Eigen::VectorXd& sv = svd.singularValues();
-	int rank = 0;
-	for (Eigen::Index i = 0; i < sv.size(); ++i)
-		if (sv(i) > 1e-6 * std::max(1e-12, sv(0)))
-			++rank;
-	const Eigen::MatrixXd N = svd.matrixV().rightCols(J.cols() - rank);
-	const size_t first_rule = rules.size();
-
-	// Joint room: share of range to the nearest limit, for joints inside the joint-limit zone.
-	const auto& model = state.getRobotModel();
-	for (size_t i = 0; i < q.size(); ++i)
-	{
-		const moveit::core::VariableBounds& b = model->getVariableBounds(jmg->getVariableNames()[i]);
-		const double range = b.max_position_ - b.min_position_;
-		if (!b.position_bounded_ || range <= 0.0)
-			continue;
-		const double to_min = (q[i] - b.min_position_) / range;
-		const double to_max = (b.max_position_ - q[i]) / range;
-		const double f = std::max(0.0, std::min(to_min, to_max));
-		if (f >= params.joint_limit_zone)
-			continue;
-		ReachRule r;
-		r.value = f;
-		r.floor = std::min(params.rule_limit_room, f);
-		r.grad = ((to_min < to_max ? 1.0 : -1.0) / range) * dq_db.row(static_cast<Eigen::Index>(i)).transpose();
-		r.grad_z = ((to_min < to_max ? 1.0 : -1.0) / range) * N.row(static_cast<Eigen::Index>(i)).transpose();
-		r.vp = vp;
-		r.what = "j" + std::to_string(i + 1) + (to_min < to_max ? "@min" : "@max");
-		rules.push_back(r);
-	}
-
-	// Clearance: arm-arm and arm-object pairs; the arm side follows dq/db, the object side moves with b.
-	collision_detection::DistanceRequest req = MakeClosePairRequest(state, jmg, kClearZone);
-	collision_detection::DistanceResult self_res, world_res;
-	{
-		planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
-		req.acm = &locked_scene->getAllowedCollisionMatrix();
-		req.enableGroup(locked_scene->getRobotModel());  // scene's model: links are matched by pointer
-		locked_scene->getCollisionEnv()->distanceSelf(req, self_res, state);
-		locked_scene->getCollisionEnv()->distanceRobot(req, world_res, state);
-	}
-	for (const collision_detection::DistanceResult* res : {&self_res, &world_res})
-		for (const auto& pair_entry : res->distances)
-			for (const auto& d : pair_entry.second)
-			{
-				if (d.distance >= kClearZone)
-					continue;
-				Eigen::RowVectorXd row_q = Eigen::RowVectorXd::Zero(jmg->getVariableCount());
-				Eigen::Vector3d grad_obj = Eigen::Vector3d::Zero();
-				for (int side = 0; side < 2; ++side)
-				{
-					// distance ~ distance0 + normal.(dp1 - dp0)
-					const double sign = side == 0 ? -1.0 : 1.0;
-					if (d.body_types[side] == collision_detection::BodyType::WORLD_OBJECT)
-					{
-						if (d.link_names[side] == "object")
-							grad_obj += sign * d.normal;  // the object's point moves with the object
-						continue;
-					}
-					const moveit::core::LinkModel* link = model->getLinkModel(d.link_names[side]);
-					if (!link || !jmg->isLinkUpdated(link->getName()))
-						continue;
-					const Eigen::Vector3d local_point = state.getGlobalLinkTransform(link).inverse() * d.nearest_points[side];
-					Eigen::MatrixXd J_link;
-					if (!state.getJacobian(jmg, link, local_point, J_link))
-						continue;
-					row_q += sign * (d.normal.transpose() * J_link.topRows<3>());
-				}
-				ReachRule r;
-				r.value = d.distance;
-				r.floor = std::min(params.rule_clearance, d.distance);
-				r.grad = (row_q * dq_db).transpose() + grad_obj;
-				r.grad_z = (row_q * N).transpose();
-				if (r.grad.norm() < 1e-9 && r.grad_z.norm() < 1e-9)
-					continue;
-				r.vp = vp;
-				r.what = d.link_names[0] + "-" + d.link_names[1];
-				rules.push_back(r);
-			}
-
-	// Reach edge: manipulability may not halve in one step.
-	const double w = Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness);
-	if (w > 1e-9)
-	{
-		ReachRule r;
-		r.value = w;
-		r.floor = 0.5 * w;
-		const Eigen::VectorXd dw_dq = ManipulabilityJointGradient(state, jmg, tool0_link, q, params.manipulability_limit_sharpness);
-		r.grad = dq_db.transpose() * dw_dq;
-		r.grad_z = N.transpose() * dw_dq;
-		r.vp = vp;
-		r.what = "manipulability";
-		rules.push_back(r);
-	}
-	for (size_t i = first_rule; i < rules.size(); ++i)
-		rules[i].z_off = z_off;
-	return static_cast<int>(N.cols());
-}
-
-// Step d (step metric) and null-space motions z from a small QP: min g.d + c/2 |d|^2 + c_z/2 |z|^2 + rho sum(s)
-// s.t. rule_row.[d; z] >= rule_lo, gap + gap_h.d <= s, 0 <= s <= gap, box_lo <= d <= box_hi, |z_i| <= z_max.
-bool SolveReachStep(
-	const std::vector<Eigen::VectorXd>& rule_row, const std::vector<double>& rule_lo,
-	const std::vector<Eigen::Vector3d>& gap_h, const std::vector<double>& gap,
-	const Eigen::Vector3d& g, double c, double rho, const Eigen::Vector3d& box_lo,
-	const Eigen::Vector3d& box_hi, int nz, double z_max, Eigen::Vector3d& d, Eigen::VectorXd& z,
-	std::string& status)
-{
-	const int nr = static_cast<int>(rule_row.size());
-	const int nm = static_cast<int>(gap_h.size());
-	const int ns = 3 + nz;  // slacks start here
-	const int nv = ns + nm;
-	const int nc = nr + 2 * nm + 3 + nz;
-	std::vector<Eigen::Triplet<double>> trip;
-	std::vector<c_float> lo(static_cast<size_t>(nc)), hi(static_cast<size_t>(nc));
-	int row = 0;
-	for (int i = 0; i < nr; ++i, ++row)
-	{
-		for (int k = 0; k < ns; ++k)
-			if (rule_row[i](k) != 0.0)
-				trip.emplace_back(row, k, rule_row[i](k));
-		lo[row] = rule_lo[i];
-		hi[row] = OSQP_INFTY;
-	}
-	for (int m = 0; m < nm; ++m, ++row)
-	{
-		for (int k = 0; k < 3; ++k)
-			if (gap_h[m](k) != 0.0)
-				trip.emplace_back(row, k, gap_h[m](k));
-		trip.emplace_back(row, ns + m, -1.0);
-		lo[row] = -OSQP_INFTY;
-		hi[row] = -gap[m];
-	}
-	// 0 <= s <= gap: with s >= gap + gap_h.d, no missed gap may grow.
-	for (int m = 0; m < nm; ++m, ++row)
-	{
-		trip.emplace_back(row, ns + m, 1.0);
-		lo[row] = 0.0;
-		hi[row] = gap[m];
-	}
-	for (int k = 0; k < 3; ++k, ++row)
-	{
-		trip.emplace_back(row, k, 1.0);
-		lo[row] = box_lo(k);
-		hi[row] = box_hi(k);
-	}
-	for (int k = 0; k < nz; ++k, ++row)
-	{
-		trip.emplace_back(row, 3 + k, 1.0);
-		lo[row] = -z_max;
-		hi[row] = z_max;
-	}
-	Eigen::SparseMatrix<double> A_mat(nc, nv);
-	A_mat.setFromTriplets(trip.begin(), trip.end());
-	A_mat.makeCompressed();
-	std::vector<c_float> Ax(A_mat.valuePtr(), A_mat.valuePtr() + A_mat.nonZeros());
-	std::vector<c_int> Ai(A_mat.innerIndexPtr(), A_mat.innerIndexPtr() + A_mat.nonZeros());
-	std::vector<c_int> Ap(A_mat.outerIndexPtr(), A_mat.outerIndexPtr() + nv + 1);
-	// P: c on the step, a light c_z on z (null-space motion is cheap but bounded), zero on the slacks.
-	std::vector<c_float> Px(static_cast<size_t>(ns), 1e-3 * c);
-	std::vector<c_int> Pi(static_cast<size_t>(ns));
-	for (int j = 0; j < ns; ++j)
-	{
-		Pi[static_cast<size_t>(j)] = j;
-		if (j < 3)
-			Px[static_cast<size_t>(j)] = c;
-	}
-	std::vector<c_int> Pp(static_cast<size_t>(nv + 1));
-	for (int j = 0; j <= nv; ++j)
-		Pp[static_cast<size_t>(j)] = std::min(j, ns);
-	std::vector<c_float> q_lin(static_cast<size_t>(nv), rho);
-	for (int k = 0; k < 3; ++k)
-		q_lin[static_cast<size_t>(k)] = g(k);
-
-	csc A_csc{static_cast<c_int>(Ax.size()), nc, nv, Ap.data(), Ai.data(), Ax.data(), -1};
-	csc P_csc{ns, nv, nv, Pp.data(), Pi.data(), Px.data(), -1};
-	OSQPData data;
-	data.n = nv;
-	data.m = nc;
-	data.P = &P_csc;
-	data.A = &A_csc;
-	data.q = q_lin.data();
-	data.l = lo.data();
-	data.u = hi.data();
-	OSQPSettings settings;
-	osqp_set_default_settings(&settings);
-	settings.verbose = 0;
-	settings.polish = 1;
-	settings.max_iter = 20000;
-	settings.eps_abs = 1e-6;
-	settings.eps_rel = 1e-4;
-	OSQPWorkspace* work = nullptr;
-	bool ok = false;
-	status = "setup failed";
-	if (osqp_setup(&work, &data, &settings) == 0)
-	{
-		osqp_solve(work);
-		status = work->info->status;
-		// Max-iter answers are still usable: the real solve checks every step anyway.
-		if (work->info->status_val == OSQP_SOLVED || work->info->status_val == OSQP_SOLVED_INACCURATE ||
-			work->info->status_val == OSQP_MAX_ITER_REACHED)
-		{
-			for (int k = 0; k < 3; ++k)
-				d(k) = std::clamp(static_cast<double>(work->solution->x[k]), box_lo(k), box_hi(k));
-			z.resize(nz);
-			for (int k = 0; k < nz; ++k)
-				z(k) = work->solution->x[3 + k];
-			ok = true;
-		}
-	}
-	if (work)
-		osqp_cleanup(work);
-	return ok;
-}
 
 // ---------------------------------------------------------------------------------------------
 // Analytic gradient of the cost (travel, manipulability terms, missed-viewpoint gaps) w.r.t. the object
@@ -2563,8 +2312,8 @@ BaseGradientResult SolveBaseGradient(
 			}
 			int num_steers = 0;
 			const int kMaxSteers = 3;
-			// Gradient line search with steering; skipped when reach rules pick the step.
-			for (int ls = 0; !params.reach_rules && ls < params.max_line_search_iters;)
+			// Gradient line search with steering.
+			for (int ls = 0; ls < params.max_line_search_iters;)
 			{
 				ObjectPlacement cand = ProjectToBounds(
 					{base.x + step * dir_u(0), base.y + step * dir_u(1), base.z + step * dir_u(2)},
@@ -2662,7 +2411,7 @@ BaseGradientResult SolveBaseGradient(
 
 			// Reach probe: stuck with misses, step along each missed viewpoint's own gap-shrinking direction
 			// (gap size, capped at initial_step, then half). Accepted by the same rule as the main probes.
-			for (size_t m = 0; !params.reach_rules && !params.room_then_reach && !accepted && params.reach_probe &&
+			for (size_t m = 0; !params.room_then_reach && !accepted && params.reach_probe &&
 				 m < here_quick.missed_vp.size();
 				 ++m)
 			{
@@ -2741,7 +2490,7 @@ BaseGradientResult SolveBaseGradient(
 			// Room then reach: stuck with misses, walk toward each missed viewpoint (closest first). An aim step that
 			// reaches it is accepted; one that loses nothing walks on (whatever the cost); one that loses
 			// viewpoints adds walls, then a room move along their room side gives the blockers room. Up to kMaxDetours.
-			if (!accepted && params.room_then_reach && !params.reach_rules && !here_quick.missed_vp.empty())
+			if (!accepted && params.room_then_reach && !here_quick.missed_vp.empty())
 			{
 				const int kMaxDetours = 6;  // aim steps + room moves per missed viewpoint
 				auto lost_from = [](const InnerSolution& from, const InnerSolution& to) {
@@ -2947,151 +2696,6 @@ BaseGradientResult SolveBaseGradient(
 				}
 			}
 
-			// Reach rules: a small QP picks the step that keeps every reached viewpoint's joint room, clearance and
-			// manipulability (linearized), shrinks missed gaps first, then lowers the cost. A real solve checks it.
-			const double kGapProgress = 1e-4;  // m: smallest gap-sum drop that counts as progress
-			auto rule_ok = [&](const InnerSolution& a, const InnerSolution& b) {
-				if (a.num_reachable != b.num_reachable)
-					return a.num_reachable > b.num_reachable;
-				for (int v : b.tour)
-					if (std::find(a.tour.begin(), a.tour.end(), v) == a.tour.end())
-						return false;  // a swap: a reached viewpoint was lost
-				if (!b.missed_vp.empty() && a.gap_sum < b.gap_sum - kGapProgress)
-					return true;
-				return a.gap_sum <= b.gap_sum + kGapProgress && a.weighted_cost < b.weighted_cost + slack;
-			};
-			if (params.reach_rules)
-			{
-				const Eigen::Isometry3d xform = MakePlacement(base);
-				SetObjectPose(planning_scene_monitor, xform * object_pose_obj);
-				std::vector<ReachRule> rules;
-				int nz = 0;
-				for (size_t k = 0; k < here_quick.tour.size() && k < here_quick.joints.size(); ++k)
-				{
-					const int v = here_quick.tour[k];
-					nz += ReachedPoseRules(
-						planning_scene_monitor, state, jmg, tool0_link, here_quick.joints[k], v, params, nz, rules);
-				}
-				const double kZMax = 0.3;  // rad: largest null-space joint motion per pose per step
-				std::vector<Eigen::VectorXd> rule_row;
-				std::vector<Eigen::Vector3d> gap_h;
-				std::vector<double> rule_lo, gaps;
-				std::vector<int> gap_vp;
-				for (const ReachRule& r : rules)
-				{
-					Eigen::VectorXd row = Eigen::VectorXd::Zero(3 + nz);
-					row.head<3>() = to_u(r.grad);
-					row.segment(3 + r.z_off, r.grad_z.size()) = r.grad_z;
-					rule_row.push_back(row);
-					rule_lo.push_back(r.floor - r.value);
-				}
-				for (size_t m = 0; m < here_quick.missed_vp.size() && m < here_quick.missed_gap.size(); ++m)
-				{
-					const int v = here_quick.missed_vp[m];
-					const double gap = WeightedPoseGap(here_quick.missed_gap[m], params.rot_metric_scale);
-					if (gap < 1e-9)
-						continue;
-					Eigen::Matrix<double, 6, 1> weighted_error = here_quick.missed_gap[m];
-					weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-					gap_h.push_back(to_u(PlacementJacobian().transpose() * weighted_error / gap));
-					gaps.push_back(gap);
-					gap_vp.push_back(v);
-				}
-				if (params.trace_line_search)
-					RCLCPP_INFO(
-						node->get_logger(), "    reach rules: %zu rules on %zu reached viewpoints (%d null-space motions), %zu missed gaps",
-						rules.size(), here_quick.tour.size(), nz, gaps.size());
-
-				// Box: trust radius, placement bounds, locked axes.
-				const ObjectPlacement lo_b{bb.x_min, bb.y_min, bb.z_min};
-				const ObjectPlacement hi_b{bb.x_max, bb.y_max, bb.z_max};
-				const Eigen::Vector3d to_lo = ToOffsetVec(lo_b, base), to_hi = ToOffsetVec(hi_b, base);
-				const double big = std::max(1.0, gnorm);
-				double delta = params.initial_step;
-				for (int ls = 0; ls < params.max_line_search_iters && !accepted; ++ls, delta *= params.step_shrink)
-				{
-					Eigen::Vector3d box_lo, box_hi;
-					for (int k = 0; k < 3; ++k)
-					{
-						const bool locked = to_u(Eigen::Vector3d::Unit(k))(k) == 0.0;
-						box_lo(k) = locked ? 0.0 : std::min(0.0, std::max(-delta, to_lo(k)));
-						box_hi(k) = locked ? 0.0 : std::max(0.0, std::min(delta, to_hi(k)));
-					}
-					Eigen::Vector3d d = Eigen::Vector3d::Zero();
-					Eigen::VectorXd z;
-					std::string qp_status;
-					// Objective scaled by 1/big (same answer, better conditioned): gaps weigh 100x the cost slope.
-					if (!SolveReachStep(
-							rule_row, rule_lo, gap_h, gaps, g_u / big, 1.0 / delta, 100.0, box_lo, box_hi, nz, kZMax, d, z,
-							qp_status))
-					{
-						RCLCPP_WARN(
-							node->get_logger(), "    reach rules: QP failed at box %.4f m (%s)", delta, qp_status.c_str());
-						continue;
-					}
-					if (params.trace_line_search && qp_status != "solved")
-						RCLCPP_INFO(node->get_logger(), "    reach rules: QP %s", qp_status.c_str());
-					if (d.norm() < 1e-4)  // under 0.1 mm: not worth a solve
-					{
-						if (params.trace_line_search)
-							RCLCPP_INFO(node->get_logger(), "    reach rules: no move keeps every rule");
-						break;
-					}
-					ObjectPlacement cand = ProjectToBounds(
-						{base.x + d(0), base.y + d(1), base.z + d(2)},
-						params.bounds);
-					InnerSolution probe = quick_solve(cand);
-					result.num_inner_solves += 1;
-					if (probe.num_reachable >= here_quick.num_reachable)
-						add_planned_travel(cand, probe);
-					const bool ok = rule_ok(probe, here_quick);
-					if (params.trace_line_search)
-					{
-						// Rules the step presses against (predicted value at its floor), and predicted gaps.
-						std::string tight, pred;
-						int num_tight = 0;
-						for (size_t i = 0; i < rules.size(); ++i)
-						{
-							Eigen::VectorXd x(3 + nz);
-							x << d, z;
-							const double v = rules[i].value + rule_row[i].dot(x);
-							if (v - rules[i].floor <= 0.05 * std::abs(rules[i].value - rules[i].floor) + 1e-6 && num_tight++ < 6)
-								tight += " vp" + std::to_string(rules[i].vp) + ":" + rules[i].what;
-						}
-						for (size_t m = 0; m < gaps.size(); ++m)
-						{
-							char buf[64];
-							std::snprintf(
-								buf, sizeof(buf), " vp%d %.1f->%.1f", gap_vp[m], 1e3 * gaps[m],
-								1e3 * std::max(0.0, gaps[m] + gap_h[m].dot(d)));
-							pred += buf;
-						}
-						std::string lost;
-						for (int v : here_quick.tour)
-							if (std::find(probe.tour.begin(), probe.tour.end(), v) == probe.tour.end())
-								lost += " " + std::to_string(v);
-						RCLCPP_INFO(
-							node->get_logger(),
-							"    rule step box=%.4f m |d|=%.4f dir (%+.2f, %+.2f, %+.2f) abs (%.4f, %.4f, %.4f): "
-							"reached %d vs %d here, gap sum %.1f vs %.1f mm, cost %.2f vs %.2f here, null-space max %.2f rad  lost:%s -> %s",
-							delta, d.norm(), d(0) / std::max(1e-12, d.norm()), d(1) / std::max(1e-12, d.norm()),
-							d(2) / std::max(1e-12, d.norm()), cand.x, cand.y, cand.z, probe.num_reachable,
-							here_quick.num_reachable, 1e3 * probe.gap_sum, 1e3 * here_quick.gap_sum, probe.weighted_cost,
-							here_quick.weighted_cost, z.size() ? z.cwiseAbs().maxCoeff() : 0.0, lost.empty() ? " none" : lost.c_str(),
-							ok ? "accepted" : "rejected");
-						RCLCPP_INFO(
-							node->get_logger(), "      predicted gaps (mm):%s | tight rules (%d):%s", pred.empty() ? " none" : pred.c_str(),
-							num_tight, tight.empty() ? " none" : tight.c_str());
-					}
-					if (ok)
-					{
-						accepted = true;
-						b_new = cand;
-						next = std::move(probe);
-						step = d.norm();
-					}
-				}
-			}
 
 			InnerSolution committed;
 			if (accepted)
@@ -3105,7 +2709,7 @@ BaseGradientResult SolveBaseGradient(
 				add_planned_travel(b_new, committed);
 				if (better(next, committed))
 					committed = std::move(next);
-				const bool keep = params.reach_rules ? rule_ok(committed, cur) : acceptable(committed, cur);
+				const bool keep = acceptable(committed, cur);
 				if (params.trace_line_search)
 					RCLCPP_INFO(
 						node->get_logger(), "    full solve: reached %d vs %d current, cost %.2f vs %.2f current -> %s",
@@ -3137,10 +2741,8 @@ BaseGradientResult SolveBaseGradient(
 
 			double base_move = ToOffsetVec(b_new, base).norm();
 			double rel_impr = (cur.weighted_cost - committed.weighted_cost) / std::max(std::abs(cur.weighted_cost), 1e-9);
-			// Progress even if the cost rose: a viewpoint gained, or (reach rules) missed gaps shrank.
-			const bool gained = committed.num_reachable > cur.num_reachable ||
-				(params.reach_rules && committed.num_reachable == cur.num_reachable &&
-				 committed.gap_sum < cur.gap_sum - kGapProgress);
+			// Progress even if the cost rose: a viewpoint gained.
+			const bool gained = committed.num_reachable > cur.num_reachable;
 
 			base = b_new;
 			cur = std::move(committed);

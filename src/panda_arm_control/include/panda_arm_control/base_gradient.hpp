@@ -105,17 +105,12 @@ struct BaseGradientParams
 	bool reach_probe = false;
 	// A move may lose up to this many reached viewpoints if the total cost drops; the best placement seen is returned.
 	int miss_tolerance = 0;
-	// Reach rules: a QP picks each step so reached viewpoints keep joint room (share of range) and clearance (m)
-	// above these floors, missed gaps shrink first, then the cost drops. Replaces the line search and steering.
-	bool reach_rules = false;
 	// Probes track the current arm poses (one warm IK attempt per viewpoint, fixed order) instead of a fresh search.
 	bool track_probes = false;
 	// Room-then-reach steering: one-sided walls learned from lost viewpoints; when stuck, aim at a missed viewpoint,
 	// and if a blocker is lost, first move to give it room, then aim again. Moves that lose nothing may raise the cost.
 	bool room_then_reach = false;
 	bool tracking = false;  // internal: set on the params copy used for tracked solves
-	double rule_limit_room = 0.02;
-	double rule_clearance = 0.005;  // when stuck with misses, try a step along each missed viewpoint's own gap direction
 	bool trace_line_search = false;  // log every line-search probe and full solve against the current point
 	int refine_at_reach = 0;  // log N refine solves at the first all-reached placement (descent continues)
 
