@@ -12,6 +12,8 @@
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_state/robot_state.h>
+#include <moveit_msgs/msg/collision_object.hpp>
+#include <shape_msgs/msg/solid_primitive.hpp>
 #include <ompl/util/RandomNumbers.h>
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -147,6 +149,29 @@ std::vector<Eigen::Isometry3d> LoadTourTcpPoses(const std::string& tour_input_di
 	for (const auto& e : entries)
 		poses.push_back(e.second);
 	return poses;
+}
+
+// The surface the robot is mounted on: a wide slab just under the base, so no arm pose (IK or closest IK) can reach
+// below it. The base link rests on it, so that pair is allowed to touch.
+void AddMountingSurface(const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor)
+{
+	const double size = 4.0, thickness = 0.05;  // m
+	planning_scene_monitor::LockedPlanningSceneRW locked_scene(planning_scene_monitor);
+	const std::string base_link = locked_scene->getRobotModel()->getRootLinkName();
+	moveit_msgs::msg::CollisionObject surface;
+	surface.header.frame_id = base_link;
+	surface.id = "mounting_surface";
+	shape_msgs::msg::SolidPrimitive box;
+	box.type = box.BOX;
+	box.dimensions = {size, size, thickness};
+	geometry_msgs::msg::Pose pose;
+	pose.position.z = -0.5 * thickness;  // top face at the base plane
+	pose.orientation.w = 1.0;
+	surface.primitives.push_back(box);
+	surface.primitive_poses.push_back(pose);
+	surface.operation = surface.ADD;
+	locked_scene->processCollisionObjectMsg(surface);
+	locked_scene->getAllowedCollisionMatrixNonConst().setEntry(surface.id, base_link, true);
 }
 
 }  // namespace
@@ -410,6 +435,7 @@ private:
 		planning_scene_monitor::PlanningSceneMonitorPtr local_scene = BuildLocalCollisionScene(
 			this->shared_from_this(), this->resolved_mesh_path, this->params.mesh_scale, object_translation_world,
 			object_rotation_world);
+		AddMountingSurface(local_scene);
 
 		BaseGradientParams bg;
 		bg.bounds.x_min = this->params.bg_x_min;
