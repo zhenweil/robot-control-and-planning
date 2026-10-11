@@ -1,0 +1,8 @@
+starts: 108, reached all: 105 (97.2%), errors: 0
+seconds per start: median 102, max 567
+already reached all at the start: 7; median reached at the start: 28
+successes on the first descent: 89, after a restart: 16
+misses:
+  start (-0.1, 0.0, 0.5): 37/38 -> end (-0.0895, 0.0028, 0.4995)
+  start (0.1, 0.0, 0.4): 37/38 -> end (-0.0603, 0.0094, 0.5037)
+  start (0.1, 0.0, 0.5): 37/38 -> end (-0.0408, 0.0163, 0.5128)

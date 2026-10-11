@@ -1,0 +1,251 @@
+[INFO] [launch]: All log files can be found below /home/zhenweil/.ros/log/2026-08-30-10-42-21-797511-zhenweil-ThinkPad-X1-Carbon-7th-261953
+[INFO] [launch]: Default logging verbosity is set to INFO
+WARNING:root:[33;21mCannot infer SRDF from `/home/zhenweil/robot-control-and-planning/install/panda_arm_moveit/share/panda_arm_moveit`. -- using config/panda.srdf[0m
+[INFO] [base_gradient-1]: process started with pid [261954]
+[base_gradient-1] [INFO] [1788111742.044200376] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.0022015 seconds
+[base_gradient-1] [INFO] [1788111742.044255558] [moveit_robot_model.robot_model]: Loading robot model 'panda'...
+[base_gradient-1] [INFO] [1788111742.056632016] [base_gradient]: Loaded 38 tour poses from /tmp/viewpoint_planner_output/selected_robot_poses.json
+[base_gradient-1] [INFO] [1788111742.058044322] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.00131321 seconds
+[base_gradient-1] [INFO] [1788111742.058055105] [moveit_robot_model.robot_model]: Loading robot model 'panda'...
+[base_gradient-1] [INFO] [1788111742.083540807] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Publishing maintained planning scene on 'monitored_planning_scene'
+[base_gradient-1] [INFO] [1788111742.239688535] [base_gradient]: BuildLocalCollisionScene: object registered in local scene: yes
+[base_gradient-1] [INFO] [1788111742.239731172] [base_gradient]: Selection sensitivity experiment (seed 1): sweeping a 5^3 (x,y,z) grid, re-select vs fixed viewpoint set, pool from /tmp/viewpoint_planner_output/candidate_pool.json...
+[base_gradient-1] [INFO] [1788111742.256107172] [base_gradient]: [selection] pool 884 candidates, nominal selection 52 (covers 81.7% area), target 80.0%
+[base_gradient-1] [INFO] [1788111742.256673709] [base_gradient]: [selection] seed 1: sweeping grid points [0, 25) of 25 (5x5x1)
+[base_gradient-1] [INFO] [1788111742.668534938] [base_gradient]: [selection] 1/25  offset (-0.150, -0.150, 0.000)  pool reach 854/884 (cov 82%)  re-select 51 vp cost 160.13 (cov 82%)  fixed 50/52 cost 152.46
+[base_gradient-1] [INFO] [1788111745.094464251] [base_gradient]: [selection] 6/25  offset (-0.075, -0.150, 0.000)  pool reach 858/884 (cov 82%)  re-select 52 vp cost 162.05 (cov 82%)  fixed 52/52 cost 154.41
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] [INFO] [1788111747.641494959] [base_gradient]: [selection] 11/25  offset (0.000, -0.150, 0.000)  pool reach 727/884 (cov 81%)  re-select 52 vp cost 161.59 (cov 81%)  fixed 43/52 cost 134.45
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] [INFO] [1788111753.043921791] [base_gradient]: [selection] 16/25  offset (0.075, -0.150, 0.000)  pool reach 614/884 (cov 78%)  re-select 52 vp cost 157.18 (cov 78%)  fixed 38/52 cost 131.02
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] [INFO] [1788111761.530917495] [base_gradient]: [selection] 21/25  offset (0.150, -0.150, 0.000)  pool reach 473/884 (cov 72%)  re-select 52 vp cost 150.33 (cov 72%)  fixed 31/52 cost 112.26
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] [INFO] [1788111769.377242674] [base_gradient]: [selection] 25/25  offset (0.150, 0.150, 0.000)  pool reach 504/884 (cov 68%)  re-select 52 vp cost 156.33 (cov 68%)  fixed 30/52 cost 111.37
+[base_gradient-1] [INFO] [1788111769.385757651] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Stopped publishing maintained planning scene.
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] reachability: 100/884 candidates checked
+[base_gradient-1] reachability: 200/884 candidates checked
+[base_gradient-1] reachability: 300/884 candidates checked
+[base_gradient-1] reachability: 400/884 candidates checked
+[base_gradient-1] reachability: 500/884 candidates checked
+[base_gradient-1] reachability: 600/884 candidates checked
+[base_gradient-1] reachability: 700/884 candidates checked
+[base_gradient-1] reachability: 800/884 candidates checked
+[base_gradient-1] reachability: 884/884 candidates checked
+[base_gradient-1] Saved selection experiment JSON: /tmp/selexp/cap/selection_experiment_seed1_g0.json
+[base_gradient-1] Saved best re-selected tour: /tmp/selexp/cap/selection_best_tour.json  (51 viewpoints, cost 136.98, offset -0.150 0.000 0.000)
+[base_gradient-1] Warning: class_loader.ClassLoader: SEVERE WARNING!!! Attempting to unload library while objects created by this loader exist in the heap! You should delete your objects before attempting to unload the library or destroying the ClassLoader. The library will NOT be unloaded.
+[base_gradient-1]          at line 127 in ./src/class_loader.cpp
+[INFO] [base_gradient-1]: process has finished cleanly [pid 261954]

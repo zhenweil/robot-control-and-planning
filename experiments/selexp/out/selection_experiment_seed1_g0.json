@@ -1,0 +1,506 @@
+{
+    "grid" : 
+    [
+        {
+            "cov_pool" : 0.62441263572862749,
+            "fixed_cost" : 134.6113453001509,
+            "fixed_cost_penalized" : 184.6113453001509,
+            "fixed_coverage" : 0.61075887578772936,
+            "fixed_num_reachable" : 37,
+            "num_pool_reachable" : 114,
+            "offset" : 
+            [
+                -0.14999999999999999,
+                -0.14999999999999999,
+                0.0
+            ],
+            "reselect_cost" : 133.95001698957094,
+            "reselect_coverage" : 0.62441263572862704,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 37,
+            "reselect_overlap_nominal" : 32
+        },
+        {
+            "cov_pool" : 0.61434962749595212,
+            "fixed_cost" : 107.63386339704361,
+            "fixed_cost_penalized" : 257.63386339704363,
+            "fixed_coverage" : 0.600695867555054,
+            "fixed_num_reachable" : 35,
+            "num_pool_reachable" : 112,
+            "offset" : 
+            [
+                -0.14999999999999999,
+                -0.074999999999999997,
+                0.0
+            ],
+            "reselect_cost" : 108.12309000879355,
+            "reselect_coverage" : 0.61434962749595157,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 35,
+            "reselect_overlap_nominal" : 30
+        },
+        {
+            "cov_pool" : 0.61445246412010179,
+            "fixed_cost" : 116.83544944734481,
+            "fixed_cost_penalized" : 266.83544944734479,
+            "fixed_coverage" : 0.59558628784971213,
+            "fixed_num_reachable" : 35,
+            "num_pool_reachable" : 114,
+            "offset" : 
+            [
+                -0.14999999999999999,
+                0.0,
+                0.0
+            ],
+            "reselect_cost" : 117.34256470726311,
+            "reselect_coverage" : 0.61445246412010157,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 35,
+            "reselect_overlap_nominal" : 29
+        },
+        {
+            "cov_pool" : 0.62535483593320784,
+            "fixed_cost" : 130.29734615095251,
+            "fixed_cost_penalized" : 180.29734615095251,
+            "fixed_coverage" : 0.61097535425369265,
+            "fixed_num_reachable" : 37,
+            "num_pool_reachable" : 114,
+            "offset" : 
+            [
+                -0.14999999999999999,
+                0.074999999999999983,
+                0.0
+            ],
+            "reselect_cost" : 138.08956391177713,
+            "reselect_coverage" : 0.62535483593320729,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 38,
+            "reselect_overlap_nominal" : 32
+        },
+        {
+            "cov_pool" : 0.62535483593320784,
+            "fixed_cost" : 112.62633620951232,
+            "fixed_cost_penalized" : 162.62633620951232,
+            "fixed_coverage" : 0.61097535425369265,
+            "fixed_num_reachable" : 37,
+            "num_pool_reachable" : 115,
+            "offset" : 
+            [
+                -0.14999999999999999,
+                0.14999999999999999,
+                0.0
+            ],
+            "reselect_cost" : 121.28911483343435,
+            "reselect_coverage" : 0.62535483593320729,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 38,
+            "reselect_overlap_nominal" : 32
+        },
+        {
+            "cov_pool" : 0.62446479990190285,
+            "fixed_cost" : 130.41732006699556,
+            "fixed_cost_penalized" : 130.41732006699556,
+            "fixed_coverage" : 0.61170107599230961,
+            "fixed_num_reachable" : 38,
+            "num_pool_reachable" : 115,
+            "offset" : 
+            [
+                -0.074999999999999997,
+                -0.14999999999999999,
+                0.0
+            ],
+            "reselect_cost" : 124.80958822375865,
+            "reselect_coverage" : 0.62446479990190229,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 36,
+            "reselect_overlap_nominal" : 33
+        },
+        {
+            "cov_pool" : 0.6241923795419354,
+            "fixed_cost" : 118.94074203580797,
+            "fixed_cost_penalized" : 168.94074203580797,
+            "fixed_coverage" : 0.61053861960103717,
+            "fixed_num_reachable" : 37,
+            "num_pool_reachable" : 116,
+            "offset" : 
+            [
+                -0.074999999999999997,
+                -0.074999999999999997,
+                0.0
+            ],
+            "reselect_cost" : 122.85127288590405,
+            "reselect_coverage" : 0.62419237954193485,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 37,
+            "reselect_overlap_nominal" : 32
+        },
+        {
+            "cov_pool" : 0.62535483593320784,
+            "fixed_cost" : 124.17578124085883,
+            "fixed_cost_penalized" : 124.17578124085883,
+            "fixed_coverage" : 0.61170107599230961,
+            "fixed_num_reachable" : 38,
+            "num_pool_reachable" : 118,
+            "offset" : 
+            [
+                -0.074999999999999997,
+                0.0,
+                0.0
+            ],
+            "reselect_cost" : 132.58440225960138,
+            "reselect_coverage" : 0.62535483593320729,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 38,
+            "reselect_overlap_nominal" : 33
+        },
+        {
+            "cov_pool" : 0.62535483593320784,
+            "fixed_cost" : 120.14391055053535,
+            "fixed_cost_penalized" : 120.14391055053535,
+            "fixed_coverage" : 0.61170107599230961,
+            "fixed_num_reachable" : 38,
+            "num_pool_reachable" : 118,
+            "offset" : 
+            [
+                -0.074999999999999997,
+                0.074999999999999983,
+                0.0
+            ],
+            "reselect_cost" : 114.10946753939589,
+            "reselect_coverage" : 0.62535483593320729,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 38,
+            "reselect_overlap_nominal" : 33
+        },
+        {
+            "cov_pool" : 0.62270842303767915,
+            "fixed_cost" : 136.71107044729314,
+            "fixed_cost_penalized" : 136.71107044729314,
+            "fixed_coverage" : 0.61170107599230961,
+            "fixed_num_reachable" : 38,
+            "num_pool_reachable" : 115,
+            "offset" : 
+            [
+                -0.074999999999999997,
+                0.14999999999999999,
+                0.0
+            ],
+            "reselect_cost" : 129.84543756451779,
+            "reselect_coverage" : 0.6227084230376787,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 39,
+            "reselect_overlap_nominal" : 33
+        },
+        {
+            "cov_pool" : 0.58486266159962186,
+            "fixed_cost" : 101.17532145427964,
+            "fixed_cost_penalized" : 401.17532145427964,
+            "fixed_coverage" : 0.56516904855461381,
+            "fixed_num_reachable" : 32,
+            "num_pool_reachable" : 86,
+            "offset" : 
+            [
+                0.0,
+                -0.14999999999999999,
+                0.0
+            ],
+            "reselect_cost" : 112.46244613031331,
+            "reselect_coverage" : 0.58486266159962164,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 32,
+            "reselect_overlap_nominal" : 30
+        },
+        {
+            "cov_pool" : 0.60874494094430898,
+            "fixed_cost" : 123.51370062472036,
+            "fixed_cost_penalized" : 273.51370062472034,
+            "fixed_coverage" : 0.60752374271351384,
+            "fixed_num_reachable" : 35,
+            "num_pool_reachable" : 95,
+            "offset" : 
+            [
+                0.0,
+                -0.074999999999999997,
+                0.0
+            ],
+            "reselect_cost" : 127.03479498343172,
+            "reselect_coverage" : 0.60874494094430842,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 35,
+            "reselect_overlap_nominal" : 33
+        },
+        {
+            "cov_pool" : 0.61170107599230983,
+            "fixed_cost" : 128.31928016292483,
+            "fixed_cost_penalized" : 128.31928016292483,
+            "fixed_coverage" : 0.61170107599230961,
+            "fixed_num_reachable" : 38,
+            "num_pool_reachable" : 98,
+            "offset" : 
+            [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "reselect_cost" : 128.31928016292483,
+            "reselect_coverage" : 0.61170107599230927,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 38,
+            "reselect_overlap_nominal" : 38
+        },
+        {
+            "cov_pool" : 0.60983195539868884,
+            "fixed_cost" : 118.64312372138572,
+            "fixed_cost_penalized" : 218.64312372138573,
+            "fixed_coverage" : 0.60632409993518133,
+            "fixed_num_reachable" : 36,
+            "num_pool_reachable" : 100,
+            "offset" : 
+            [
+                0.0,
+                0.074999999999999983,
+                0.0
+            ],
+            "reselect_cost" : 120.3811204929077,
+            "reselect_coverage" : 0.60983195539868829,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 36,
+            "reselect_overlap_nominal" : 34
+        },
+        {
+            "cov_pool" : 0.60392314184371343,
+            "fixed_cost" : 120.32201971613127,
+            "fixed_cost_penalized" : 420.32201971613125,
+            "fixed_coverage" : 0.59411413334528518,
+            "fixed_num_reachable" : 32,
+            "num_pool_reachable" : 97,
+            "offset" : 
+            [
+                0.0,
+                0.14999999999999999,
+                0.0
+            ],
+            "reselect_cost" : 122.30327286773824,
+            "reselect_coverage" : 0.60392314184371276,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 32,
+            "reselect_overlap_nominal" : 29
+        },
+        {
+            "cov_pool" : 0.49848756180663745,
+            "fixed_cost" : 99.033043079467348,
+            "fixed_cost_penalized" : 799.03304307946735,
+            "fixed_coverage" : 0.48971072321750858,
+            "fixed_num_reachable" : 24,
+            "num_pool_reachable" : 66,
+            "offset" : 
+            [
+                0.074999999999999983,
+                -0.14999999999999999,
+                0.0
+            ],
+            "reselect_cost" : 100.56624473533428,
+            "reselect_coverage" : 0.49848756180663722,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 28,
+            "reselect_overlap_nominal" : 24
+        },
+        {
+            "cov_pool" : 0.52472659743958772,
+            "fixed_cost" : 89.351166456442741,
+            "fixed_cost_penalized" : 789.3511664564428,
+            "fixed_coverage" : 0.48971072321750858,
+            "fixed_num_reachable" : 24,
+            "num_pool_reachable" : 70,
+            "offset" : 
+            [
+                0.074999999999999983,
+                -0.074999999999999997,
+                0.0
+            ],
+            "reselect_cost" : 107.02454002322658,
+            "reselect_coverage" : 0.52472659743958761,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 27,
+            "reselect_overlap_nominal" : 24
+        },
+        {
+            "cov_pool" : 0.54606102381930133,
+            "fixed_cost" : 121.70640804777233,
+            "fixed_cost_penalized" : 671.70640804777236,
+            "fixed_coverage" : 0.5303579693015058,
+            "fixed_num_reachable" : 27,
+            "num_pool_reachable" : 76,
+            "offset" : 
+            [
+                0.074999999999999983,
+                0.0,
+                0.0
+            ],
+            "reselect_cost" : 123.11033341690627,
+            "reselect_coverage" : 0.54606102381930133,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 29,
+            "reselect_overlap_nominal" : 27
+        },
+        {
+            "cov_pool" : 0.57205799946417468,
+            "fixed_cost" : 118.16766393709374,
+            "fixed_cost_penalized" : 518.16766393709372,
+            "fixed_coverage" : 0.57116388170275068,
+            "fixed_num_reachable" : 30,
+            "num_pool_reachable" : 82,
+            "offset" : 
+            [
+                0.074999999999999983,
+                0.074999999999999983,
+                0.0
+            ],
+            "reselect_cost" : 118.32373814024038,
+            "reselect_coverage" : 0.57205799946417435,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 31,
+            "reselect_overlap_nominal" : 30
+        },
+        {
+            "cov_pool" : 0.56556047906255202,
+            "fixed_cost" : 112.81368047866385,
+            "fixed_cost_penalized" : 512.81368047866385,
+            "fixed_coverage" : 0.56247054057694146,
+            "fixed_num_reachable" : 30,
+            "num_pool_reachable" : 81,
+            "offset" : 
+            [
+                0.074999999999999983,
+                0.14999999999999999,
+                0.0
+            ],
+            "reselect_cost" : 112.53247970774478,
+            "reselect_coverage" : 0.56556047906255191,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 31,
+            "reselect_overlap_nominal" : 29
+        },
+        {
+            "cov_pool" : 0.47884271660446637,
+            "fixed_cost" : 102.14988730570497,
+            "fixed_cost_penalized" : 852.14988730570497,
+            "fixed_coverage" : 0.47727766750508011,
+            "fixed_num_reachable" : 23,
+            "num_pool_reachable" : 60,
+            "offset" : 
+            [
+                0.14999999999999999,
+                -0.14999999999999999,
+                0.0
+            ],
+            "reselect_cost" : 103.85211677328158,
+            "reselect_coverage" : 0.47884271660446648,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 25,
+            "reselect_overlap_nominal" : 23
+        },
+        {
+            "cov_pool" : 0.47884271660446637,
+            "fixed_cost" : 100.91641782647328,
+            "fixed_cost_penalized" : 850.91641782647332,
+            "fixed_coverage" : 0.47727766750508011,
+            "fixed_num_reachable" : 23,
+            "num_pool_reachable" : 61,
+            "offset" : 
+            [
+                0.14999999999999999,
+                -0.074999999999999997,
+                0.0
+            ],
+            "reselect_cost" : 101.7843402020515,
+            "reselect_coverage" : 0.47884271660446648,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 25,
+            "reselect_overlap_nominal" : 23
+        },
+        {
+            "cov_pool" : 0.46798145862988744,
+            "fixed_cost" : 97.292519551250663,
+            "fixed_cost_penalized" : 797.29251955125062,
+            "fixed_coverage" : 0.4650154335649711,
+            "fixed_num_reachable" : 24,
+            "num_pool_reachable" : 64,
+            "offset" : 
+            [
+                0.14999999999999999,
+                0.0,
+                0.0
+            ],
+            "reselect_cost" : 97.882473858353649,
+            "reselect_coverage" : 0.46798145862988721,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 26,
+            "reselect_overlap_nominal" : 24
+        },
+        {
+            "cov_pool" : 0.46674763053028168,
+            "fixed_cost" : 102.00713312752369,
+            "fixed_cost_penalized" : 852.00713312752373,
+            "fixed_coverage" : 0.43592251795611209,
+            "fixed_num_reachable" : 23,
+            "num_pool_reachable" : 64,
+            "offset" : 
+            [
+                0.14999999999999999,
+                0.074999999999999983,
+                0.0
+            ],
+            "reselect_cost" : 108.31915370316577,
+            "reselect_coverage" : 0.46674763053028145,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 27,
+            "reselect_overlap_nominal" : 23
+        },
+        {
+            "cov_pool" : 0.36645076437545304,
+            "fixed_cost" : 98.216604449086333,
+            "fixed_cost_penalized" : 898.21660444908639,
+            "fixed_coverage" : 0.34387044542707662,
+            "fixed_num_reachable" : 22,
+            "num_pool_reachable" : 62,
+            "offset" : 
+            [
+                0.14999999999999999,
+                0.14999999999999999,
+                0.0
+            ],
+            "reselect_cost" : 108.27835694227829,
+            "reselect_coverage" : 0.36645076437545315,
+            "reselect_meets_target" : false,
+            "reselect_num_viewpoints" : 26,
+            "reselect_overlap_nominal" : 21
+        }
+    ],
+    "grid_count" : 25,
+    "grid_max" : 
+    [
+        0.14999999999999999,
+        0.14999999999999999,
+        0.0
+    ],
+    "grid_min" : 
+    [
+        -0.14999999999999999,
+        -0.14999999999999999,
+        -0.0
+    ],
+    "grid_shape" : 
+    [
+        5,
+        5,
+        1
+    ],
+    "grid_start" : 0,
+    "nominal_coverage" : 0.61170107599230961,
+    "num_nominal" : 38,
+    "pool_size" : 121,
+    "seed" : 1,
+    "target_visibility" : 0.94999999999999996,
+    "unreachable_penalty" : 50.0
+}

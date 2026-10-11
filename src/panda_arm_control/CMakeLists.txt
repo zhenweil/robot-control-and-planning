@@ -89,7 +89,14 @@ add_executable(base_gradient
 	src/base_gradient_node.cpp
 	)
 
-foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient)
+# Random-sampling placement baseline (separate from base_gradient).
+add_executable(random_placement
+	src/real_cost_planning.cpp
+	src/viewpoint_io.cpp
+	src/random_placement_node.cpp
+	)
+
+foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement)
 	target_include_directories(${viewpoint_planner_target} PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		)
@@ -128,7 +135,7 @@ install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient
+install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement
 	DESTINATION lib/${PROJECT_NAME}
 	)
 

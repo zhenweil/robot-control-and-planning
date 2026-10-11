@@ -1,0 +1,18 @@
+[INFO] [launch]: All log files can be found below /home/zhenweil/.ros/log/2026-08-30-22-04-04-309834-zhenweil-ThinkPad-X1-Carbon-7th-267353
+[INFO] [launch]: Default logging verbosity is set to INFO
+WARNING:root:[33;21mCannot infer SRDF from `/home/zhenweil/robot-control-and-planning/install/panda_arm_moveit/share/panda_arm_moveit`. -- using config/panda.srdf[0m
+[INFO] [base_gradient-1]: process started with pid [267367]
+[base_gradient-1] [INFO] [1788152644.580666355] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.00221408 seconds
+[base_gradient-1] [INFO] [1788152644.580724692] [moveit_robot_model.robot_model]: Loading robot model 'panda'...
+[base_gradient-1] [INFO] [1788152644.592833782] [base_gradient]: Loaded 38 tour poses from /tmp/viewpoint_planner_output/selected_robot_poses.json
+[base_gradient-1] [INFO] [1788152644.594393125] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.00140095 seconds
+[base_gradient-1] [INFO] [1788152644.594430561] [moveit_robot_model.robot_model]: Loading robot model 'panda'...
+[base_gradient-1] [INFO] [1788152644.621008315] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Publishing maintained planning scene on 'monitored_planning_scene'
+[base_gradient-1] [INFO] [1788152644.779530637] [base_gradient]: BuildLocalCollisionScene: object registered in local scene: yes
+[base_gradient-1] [INFO] [1788152644.779610353] [base_gradient]: IK repeatability experiment (seed 6): scoring the 38-pose input viewpoint order at the nominal object pose, fixed-order DP + free re-route...
+[base_gradient-1] [INFO] [1788152646.935120626] [base_gradient]: [ik_repeatability] seed 6  max_sol=4 ik_timeout=0.150 retries=14 restarts=2  ->  fixed-order honest=122.0015 (38/38, 1.2s)  free-route honest=91.1905 (38/38, 0.9s)
+[base_gradient-1] [INFO] [1788152646.936308552] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Stopped publishing maintained planning scene.
+[base_gradient-1] Saved IK repeatability result JSON: /tmp/ik_repeatability_output/m4_t0.15_r14_s2/ik_repeatability_seed6.json
+[base_gradient-1] Warning: class_loader.ClassLoader: SEVERE WARNING!!! Attempting to unload library while objects created by this loader exist in the heap! You should delete your objects before attempting to unload the library or destroying the ClassLoader. The library will NOT be unloaded.
+[base_gradient-1]          at line 127 in ./src/class_loader.cpp
+[INFO] [base_gradient-1]: process has finished cleanly [pid 267367]

@@ -1,0 +1,75 @@
+[INFO] [launch]: All log files can be found below /home/zhenweil/.ros/log/2026-08-30-10-08-52-560370-zhenweil-ThinkPad-X1-Carbon-7th-258244
+[INFO] [launch]: Default logging verbosity is set to INFO
+WARNING:root:[33;21mCannot infer SRDF from `/home/zhenweil/robot-control-and-planning/install/panda_arm_moveit/share/panda_arm_moveit`. -- using config/panda.srdf[0m
+[INFO] [base_gradient-1]: process started with pid [258245]
+[base_gradient-1] [INFO] [1788109732.838891633] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.00291872 seconds
+[base_gradient-1] [INFO] [1788109732.838951596] [moveit_robot_model.robot_model]: Loading robot model 'panda'...
+[base_gradient-1] [INFO] [1788109732.851910984] [base_gradient]: Loaded 38 tour poses from /tmp/viewpoint_planner_output/selected_robot_poses.json
+[base_gradient-1] [INFO] [1788109732.853295547] [moveit_rdf_loader.rdf_loader]: Loaded robot model in 0.00129095 seconds
+[base_gradient-1] [INFO] [1788109732.853307480] [moveit_robot_model.robot_model]: Loading robot model 'panda'...
+[base_gradient-1] [INFO] [1788109732.879195565] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Publishing maintained planning scene on 'monitored_planning_scene'
+[base_gradient-1] [INFO] [1788109733.040442465] [base_gradient]: BuildLocalCollisionScene: object registered in local scene: yes
+[base_gradient-1] [INFO] [1788109733.040487615] [base_gradient]: Selection sensitivity experiment (seed 1): sweeping a 5^3 (x,y,z) grid, re-select vs fixed viewpoint set, pool from /tmp/viewpoint_planner_output/candidate_pool.json...
+[base_gradient-1] [INFO] [1788109733.043448332] [base_gradient]: [selection] pool 121 candidates, nominal selection 38 (covers 61.2% area), target 95.0%
+[base_gradient-1] [INFO] [1788109733.043542095] [base_gradient]: [selection] seed 1: sweeping grid points [0, 25) of 25 (5x5x1)
+[base_gradient-1] [INFO] [1788109733.140537752] [base_gradient]: [selection] 1/25  offset (-0.150, -0.150, 0.000)  pool reach 114/121 (cov 62%)  re-select 37 vp cost 133.95 (cov 62%)  fixed 37/38 cost 134.61
+[base_gradient-1] [INFO] [1788109733.615495226] [base_gradient]: [selection] 6/25  offset (-0.075, -0.150, 0.000)  pool reach 115/121 (cov 62%)  re-select 36 vp cost 124.81 (cov 62%)  fixed 38/38 cost 130.42
+[base_gradient-1] [INFO] [1788109734.138091420] [base_gradient]: [selection] 11/25  offset (0.000, -0.150, 0.000)  pool reach 86/121 (cov 58%)  re-select 32 vp cost 112.46 (cov 58%)  fixed 32/38 cost 101.18
+[base_gradient-1] [INFO] [1788109735.020693787] [base_gradient]: [selection] 16/25  offset (0.075, -0.150, 0.000)  pool reach 66/121 (cov 50%)  re-select 28 vp cost 100.57 (cov 50%)  fixed 24/38 cost 99.03
+[base_gradient-1] [INFO] [1788109736.256694891] [base_gradient]: [selection] 21/25  offset (0.150, -0.150, 0.000)  pool reach 60/121 (cov 48%)  re-select 25 vp cost 103.85 (cov 48%)  fixed 23/38 cost 102.15
+[base_gradient-1] [INFO] [1788109737.392071671] [base_gradient]: [selection] 25/25  offset (0.150, 0.150, 0.000)  pool reach 62/121 (cov 37%)  re-select 26 vp cost 108.28 (cov 37%)  fixed 22/38 cost 98.22
+[base_gradient-1] [INFO] [1788109737.393888098] [moveit_ros.planning_scene_monitor.planning_scene_monitor]: Stopped publishing maintained planning scene.
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] reachability: 100/121 candidates checked
+[base_gradient-1] reachability: 121/121 candidates checked
+[base_gradient-1] Saved selection experiment JSON: /tmp/selexp/out/selection_experiment_seed1_g0.json
+[base_gradient-1] Warning: class_loader.ClassLoader: SEVERE WARNING!!! Attempting to unload library while objects created by this loader exist in the heap! You should delete your objects before attempting to unload the library or destroying the ClassLoader. The library will NOT be unloaded.
+[base_gradient-1]          at line 127 in ./src/class_loader.cpp
+[INFO] [base_gradient-1]: process has finished cleanly [pid 258245]

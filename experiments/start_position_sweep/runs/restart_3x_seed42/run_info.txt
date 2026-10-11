@@ -1,0 +1,1 @@
+method=base_gradient seed=42 workers=6 starts=108 git=3edbd00 (restarts 3)
