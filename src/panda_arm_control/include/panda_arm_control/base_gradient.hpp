@@ -34,7 +34,6 @@ struct BaseGradientParams
 	double manipulability_weight = 0.0;
 	double manipulability_weight_initial = 40.0;
 	double manipulability_weight_decay = 0.8;
-	double log_manipulability_weight = 2.0;
 	// Missed viewpoints add their closest-IK pose's manipulability too (cost and gradient).
 	bool manipulability_include_missed = false;
 	// Range-aware manipulability: each joint's Jacobian column is scaled by 1 - exp(-k (q-lo)(hi-q)/range^2),
@@ -55,8 +54,6 @@ struct BaseGradientParams
 	// is its closest-IK pose gap (m, rotation scaled by rot_metric_scale): gives misses a gradient.
 	double miss_gap_weight = 5000.0;
 	double miss_gap_cap = 0.15;
-	// Planned travel is noisy: with equal viewpoints reached, accept a move whose cost rises by at most this. 0 = strict.
-	double cost_slack = 0.0;
 
 	// Collision-aware closest IK for missed viewpoints: keeps arm-arm and arm-object pairs at least
 	// closest_ik_margin apart; iterations per start, and starts (warm seed + random) per viewpoint.
@@ -102,8 +99,6 @@ struct BaseGradientParams
 	// Travel in the cost = planned joint travel instead of the L2 estimate, whatever travel_in_cost says (needs real_cost_planning_time > 0).
 	bool planned_travel_in_cost = false;
 	bool steering = true;  // steer the step around viewpoints it would lose (false: only shrink the step)
-	// A move may lose up to this many reached viewpoints if the total cost drops; the best placement seen is returned.
-	int miss_tolerance = 0;
 	// Probes track the current arm poses (one warm IK attempt per viewpoint, fixed order) instead of a fresh search.
 	bool track_probes = false;
 	// Room-then-reach steering: one-sided walls learned from lost viewpoints; when stuck, aim at a missed viewpoint,

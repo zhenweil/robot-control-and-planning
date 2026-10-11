@@ -128,10 +128,6 @@ def generate_launch_description():
     )
     manipulability_weight_initial = ParameterValue(
         LaunchConfiguration("manipulability_weight_initial"), value_type=float)
-    log_manipulability_weight_arg = DeclareLaunchArgument(
-        "log_manipulability_weight", default_value="2.0", description="mu (log-manipulability barrier weight)."
-    )
-    log_manipulability_weight = ParameterValue(LaunchConfiguration("log_manipulability_weight"), value_type=float)
     miss_gap_weight_arg = DeclareLaunchArgument(
         "miss_gap_weight", default_value="5000.0", description="Weight on missed viewpoints' closest-IK gap (0 = no miss gradient)."
     )
@@ -148,7 +144,7 @@ def generate_launch_description():
     lock_input_order = ParameterValue(LaunchConfiguration("lock_input_order"), value_type=bool)
     manipulability_after_reach_arg = DeclareLaunchArgument(
         "manipulability_after_reach", default_value="false",
-        description="Misses only (lambda = mu = 0) until all viewpoints are reached, then manipulability on.",
+        description="Comfort terms (manipulability, soft-min) off until all viewpoints are reached.",
     )
     manipulability_after_reach = ParameterValue(LaunchConfiguration("manipulability_after_reach"), value_type=bool)
     real_cost_planning_time_arg = DeclareLaunchArgument(
@@ -252,7 +248,6 @@ def generate_launch_description():
         "bg_manipulability_weight_initial": manipulability_weight_initial,
         "bg_manipulability_weight_decay": 0.8,
         # Reach-margin barrier: objective also subtracts this * sum of log(manipulability).
-        "bg_log_manipulability_weight": log_manipulability_weight,
         # A missed viewpoint costs the penalty + this * its closest-IK pose gap (m), capped at the cap.
         "bg_miss_gap_weight": miss_gap_weight,
         "bg_miss_gap_cap": 0.15,
@@ -401,7 +396,6 @@ def generate_launch_description():
             manipulability_gradient_arg,
             travel_in_cost_arg,
             manipulability_weight_initial_arg,
-            log_manipulability_weight_arg,
             miss_gap_weight_arg,
             freeze_order_arg,
             lock_input_order_arg,

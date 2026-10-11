@@ -481,19 +481,8 @@ ClosestIkResult CollisionAwareClosestIk(
 	return best;
 }
 
-// Floor on w before taking its log, so a singular configuration gives a large finite barrier.
+// Floor on w, so a singular configuration doesn't divide by zero.
 constexpr double kMinManipulability = 1e-6;
-
-double SumLogManipulability(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const moveit::core::LinkModel* tool0_link, const std::vector<std::vector<double>>& joints, double limit_sharpness)
-{
-	double total = 0.0;
-	for (const auto& q : joints)
-		if (!q.empty())
-			total += std::log(std::max(kMinManipulability, Manipulability(state, jmg, tool0_link, q, limit_sharpness)));
-	return total;
-}
 
 double SumManipulability(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
@@ -969,7 +958,6 @@ struct InnerSolution
 	double weighted_cost = 0.0;
 	double travel_cost = 0.0;		   // edge part of weighted_cost (home edge included)
 	double sum_manipulability = 0.0;  // sum of w over visited viewpoints (+ missed closest poses if included)
-	double sum_log_manipulability = 0.0;  // sum of log(w): the reach-margin barrier
 	// Missed viewpoints and their closest-IK pose gaps; miss_cost = weight * sum of capped gaps.
 	std::vector<int> missed_vp;
 	std::vector<Eigen::Matrix<double, 6, 1>> missed_gap;
@@ -1092,9 +1080,7 @@ InnerSolution InnerSolve(
 		for (const auto& q : ik_solutions[i])
 		{
 			const double w = Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness);
-			node_cost[i].push_back(
-				-params.manipulability_weight * w -
-				params.log_manipulability_weight * std::log(std::max(kMinManipulability, w)));
+			node_cost[i].push_back(-params.manipulability_weight * w);
 		}
 	InnerSolution out;
 	if (fixed_order)
@@ -1147,11 +1133,9 @@ InnerSolution InnerSolve(
 	out.travel_cost =
 		TourWeightedCost(base, out.tour, out.joints, tour_poses_obj, home_joints, home_tcp_local, params);
 	out.sum_manipulability = SumManipulability(state, jmg, tool0_link, out.joints, params.manipulability_limit_sharpness);
-	out.sum_log_manipulability = SumLogManipulability(state, jmg, tool0_link, out.joints, params.manipulability_limit_sharpness);
 	if (params.manipulability_include_missed)
 	{
 		out.sum_manipulability += SumManipulability(state, jmg, tool0_link, missed_q, params.manipulability_limit_sharpness);
-		out.sum_log_manipulability += SumLogManipulability(state, jmg, tool0_link, missed_q, params.manipulability_limit_sharpness);
 	}
 	if (params.softmin_manipulability_weight > 0.0)
 	{
@@ -1208,7 +1192,6 @@ InnerSolution InnerSolve(
 	out.miss_cost = params.miss_gap_weight * out.gap_sum;
 
 	out.weighted_cost = (params.travel_in_cost ? out.travel_cost : 0.0) - params.manipulability_weight * out.sum_manipulability -
-		params.log_manipulability_weight * out.sum_log_manipulability -
 		params.softmin_manipulability_weight * out.softmin_manipulability +
 		params.unreachable_penalty * (out.num_total - out.num_reachable) + out.miss_cost + out.clearance_cost + out.limit_cost;
 	return out;
@@ -1297,8 +1280,7 @@ TrackResult TrackTour(
 			state.copyJointGroupPositions(jmg, r.joints[k]);
 			r.num_reachable++;
 			const double w = Manipulability(state, jmg, tool0_link, r.joints[k], params.manipulability_limit_sharpness);
-			r.weighted_cost -= params.manipulability_weight * w +
-				params.log_manipulability_weight * std::log(std::max(kMinManipulability, w));
+			r.weighted_cost -= params.manipulability_weight * w;
 			if (prev_reachable)
 			{
 				r.weighted_cost += WeightedEdgeCost(*prev_j, r.joints[k], prev_p, p, params);
@@ -1402,11 +1384,11 @@ Eigen::Vector3d AnalyticGradient(
 	std::vector<Eigen::Vector3d> softmin_dw_db;
 	for (size_t k = 0; k < n && params.manipulability_gradient; ++k)
 	{
-		// d(-lambda w - mu log w)/db = -(lambda + mu / w) (dq/db)^T dw/dq
+		// d(-lambda w)/db = -lambda (dq/db)^T dw/dq
 		const double w = std::max(kMinManipulability, Manipulability(state, jmg, tool0_link, joints[k], params.manipulability_limit_sharpness));
 		const Eigen::Vector3d dw_db = dq_db[k].transpose() *
 			ManipulabilityJointGradient(state, jmg, tool0_link, joints[k], params.manipulability_limit_sharpness);
-		g -= (params.manipulability_weight + params.log_manipulability_weight / w) * dw_db;
+		g -= params.manipulability_weight * dw_db;
 		softmin_w.push_back(w);
 		softmin_dw_db.push_back(dw_db);
 	}
@@ -1434,7 +1416,7 @@ Eigen::Vector3d AnalyticGradient(
 		{
 			const Eigen::Vector3d dw_db = dq_db_missed.transpose() *
 				ManipulabilityJointGradient(state, jmg, tool0_link, q, params.manipulability_limit_sharpness);
-			g -= (params.manipulability_weight + params.log_manipulability_weight / w) * dw_db;
+			g -= params.manipulability_weight * dw_db;
 			softmin_w.push_back(w);
 			softmin_dw_db.push_back(dw_db);
 		}
@@ -1778,14 +1760,11 @@ BaseGradientResult SolveBaseGradient(
 	auto run_descent = [&](ObjectPlacement base, int restart_idx, const InnerSolution* warm) -> RestartResult {
 		base = ProjectToBounds(base, params.bounds);
 		params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
-		params.log_manipulability_weight = params_in.log_manipulability_weight;
-		// manipulability_after_reach: misses only (lambda = mu = 0) until every viewpoint is reached.
-		// manipulability_after_reach: comfort terms (lambda, mu, soft-min) off while any viewpoint is missed, so the
+		// manipulability_after_reach: comfort terms (lambda, soft-min) off while any viewpoint is missed, so the
 		// step follows the miss gaps instead of being outvoted; back on once everything is reached.
 		bool manipulability_on = !params.manipulability_after_reach;
 		auto comfort_off = [&]() {
 			params.manipulability_weight = 0.0;
-			params.log_manipulability_weight = 0.0;
 			params.softmin_manipulability_weight = 0.0;
 		};
 		if (!manipulability_on)
@@ -1850,12 +1829,11 @@ BaseGradientResult SolveBaseGradient(
 			// Re-score at the final weight so points found during annealing compare fairly.
 			InnerSolution sf = s;
 			sf.weighted_cost = travel_term(s) - lambda_final * s.sum_manipulability -
-				params_in.log_manipulability_weight * s.sum_log_manipulability -
 				params_in.softmin_manipulability_weight * s.softmin_manipulability +
 				params.unreachable_penalty * (s.num_total - s.num_reachable) + s.miss_cost + s.clearance_cost + s.limit_cost;
 			result.history.push_back(
 				{static_cast<double>(restart_idx), b.x, b.y, b.z, sf.weighted_cost});
-			// Best seen: most viewpoints reached, then cost (moves may lose viewpoints under miss_tolerance).
+			// Best seen: most viewpoints reached, then cost.
 			if (sf.num_reachable > rr.sol.num_reachable ||
 				(sf.num_reachable == rr.sol.num_reachable && sf.weighted_cost < rr.cost))
 			{
@@ -1895,7 +1873,6 @@ BaseGradientResult SolveBaseGradient(
 			RCLCPP_INFO(node->get_logger(), "    %-16s %12s %10s %12s", "term", "raw", "weight", "weighted");
 			row(planned_travel ? "planned travel" : "L2 travel", travel_raw, travel_weight);
 			row("manipulability", sol.sum_manipulability, -params.manipulability_weight);
-			row("log manip", sol.sum_log_manipulability, -params.log_manipulability_weight);
 			row("soft-min manip", sol.softmin_manipulability, -params.softmin_manipulability_weight);
 			row("self clearance", sol.clearance_sum, params.self_clearance_weight);
 			row("joint-limit room", sol.limit_sum, params.joint_limit_weight);
@@ -1965,7 +1942,6 @@ BaseGradientResult SolveBaseGradient(
 		// Cost at the final weight, so solutions found at different weights compare fairly.
 		auto cost_at_final_weight = [&](const InnerSolution& sol) {
 			return travel_term(sol) - lambda_final * sol.sum_manipulability -
-				params_in.log_manipulability_weight * sol.sum_log_manipulability -
 				params_in.softmin_manipulability_weight * sol.softmin_manipulability +
 				params.unreachable_penalty * (sol.num_total - sol.num_reachable) + sol.miss_cost + sol.clearance_cost + sol.limit_cost;
 		};
@@ -1975,9 +1951,7 @@ BaseGradientResult SolveBaseGradient(
 		auto refine = [&](const ObjectPlacement& at, InnerSolution best_sol, int num_solves) {
 			// Travel-only tours: no manipulability preference when picking arm poses.
 			const double saved_weight = params.manipulability_weight;
-			const double saved_log_weight = params.log_manipulability_weight;
 			params.manipulability_weight = 0.0;
-			params.log_manipulability_weight = 0.0;
 			best_sol.weighted_cost = cost_at_final_weight(best_sol);
 			if (use_real_cost && best_sol.real_cost < 0.0)
 				best_sol.real_cost = real_cost_of(at, best_sol);
@@ -2005,7 +1979,6 @@ BaseGradientResult SolveBaseGradient(
 					best_sol = std::move(s);
 			}
 			params.manipulability_weight = saved_weight;
-			params.log_manipulability_weight = saved_log_weight;
 			return best_sol;
 		};
 
@@ -2047,7 +2020,6 @@ BaseGradientResult SolveBaseGradient(
 					{
 						manipulability_on = true;
 						params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
-						params.log_manipulability_weight = params_in.log_manipulability_weight;
 						params.softmin_manipulability_weight = params_in.softmin_manipulability_weight;
 						RCLCPP_INFO(node->get_logger(), "  restart %d: all reached -- comfort terms on", restart_idx + 1);
 					}
@@ -2062,7 +2034,6 @@ BaseGradientResult SolveBaseGradient(
 					0.05 * (params_in.manipulability_weight_initial - lambda_final))
 					params.manipulability_weight = lambda_final;
 				cur.weighted_cost = travel_term(cur) - params.manipulability_weight * cur.sum_manipulability -
-					params.log_manipulability_weight * cur.sum_log_manipulability -
 					params.softmin_manipulability_weight * cur.softmin_manipulability +
 					params.unreachable_penalty * (cur.num_total - cur.num_reachable) + cur.miss_cost + cur.clearance_cost + cur.limit_cost;
 			}
@@ -2195,21 +2166,11 @@ BaseGradientResult SolveBaseGradient(
 			auto reaching = [](const InnerSolution& a, const InnerSolution& b) {
 				return !a.all_reachable || !b.all_reachable;
 			};
-			// More viewpoints reached wins; cost only breaks ties.
+			// More viewpoints reached wins; cost only breaks ties. Used for comparing and for accepting moves.
 			auto better = [&](const InnerSolution& a, const InnerSolution& b) {
 				const bool r = reaching(a, b);
 				return a.num_reachable > b.num_reachable ||
 					(a.num_reachable == b.num_reachable && cmp_cost(a, r) < cmp_cost(b, r));
-			};
-			// Accepting a move: same rule, but tolerate a cost rise up to cost_slack (planned-travel noise), and
-			// losing up to miss_tolerance viewpoints when the cost (which charges each miss) still drops.
-			const double slack = std::max(0.0, params.cost_slack);
-			const int tol = std::max(0, params.miss_tolerance);
-			auto acceptable = [&](const InnerSolution& a, const InnerSolution& b) {
-				const bool r = reaching(a, b);
-				const double ca = cmp_cost(a, r), cb = cmp_cost(b, r);
-				return a.num_reachable > b.num_reachable || (a.num_reachable == b.num_reachable && ca < cb + slack) ||
-					(a.num_reachable >= b.num_reachable - tol && ca < cb);
 			};
 			// Viewpoint v is reached here but missed at cand: the direction (step metric) whose opposite loses it --
 			// its manipulability slope (reach edge) or, failing that, its gap slope at cand. Zero if neither fits step_dir.
@@ -2321,7 +2282,7 @@ BaseGradientResult SolveBaseGradient(
 				// weighted_cost carries the unreachable penalty, so a probe that drops a viewpoint fails.
 				InnerSolution probe = quick_solve(cand);
 				result.num_inner_solves += 1;
-				if (probe.num_reachable >= here_quick.num_reachable - tol)
+				if (probe.num_reachable >= here_quick.num_reachable)
 					add_planned_travel(cand, probe);  // plan only probes that could be accepted
 				if (params.trace_line_search)
 				{
@@ -2339,7 +2300,7 @@ BaseGradientResult SolveBaseGradient(
 				}
 				// Never trade away a reached viewpoint, whatever the cost says. Compared with the quick solve
 				// here (same IK effort), so a viewpoint the quick solve merely failed to find doesn't block the step.
-				if (acceptable(probe, here_quick))
+				if (better(probe, here_quick))
 				{
 					accepted = true;
 					b_new = cand;
@@ -2631,7 +2592,7 @@ BaseGradientResult SolveBaseGradient(
 				add_planned_travel(b_new, committed);
 				if (better(next, committed))
 					committed = std::move(next);
-				const bool keep = acceptable(committed, cur);
+				const bool keep = better(committed, cur);
 				if (params.trace_line_search)
 					RCLCPP_INFO(
 						node->get_logger(), "    full solve: reached %d vs %d current, cost %.2f vs %.2f current -> %s",

@@ -49,9 +49,7 @@ struct Params
 	double bg_manipulability_weight = 0.0;
 	double bg_manipulability_weight_initial = 40.0;
 	double bg_manipulability_weight_decay = 0.8;
-	double bg_log_manipulability_weight = 2.0;
 	double bg_miss_gap_weight = 5000.0;
-	double bg_cost_slack = 0.0;
 	bool bg_manipulability_include_missed = false;
 	double bg_self_clearance_weight = 0.0;
 	double bg_joint_limit_weight = 0.0;
@@ -93,7 +91,6 @@ struct Params
 	int bg_real_cost_attempts = 3;
 	bool bg_planned_travel_in_cost = false;
 	bool bg_steering = true;
-	int bg_miss_tolerance = 0;
 	bool bg_track_probes = false;
 	bool bg_room_then_reach = false;
 	bool bg_trace_line_search = false;
@@ -253,9 +250,7 @@ private:
 		this->declareIfNeeded(
 			"bg_manipulability_weight_initial", this->params.bg_manipulability_weight_initial);
 		this->declareIfNeeded("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
-		this->declareIfNeeded("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
 		this->declareIfNeeded("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
-		this->declareIfNeeded("bg_cost_slack", this->params.bg_cost_slack);
 		this->declareIfNeeded("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
 		this->declareIfNeeded("bg_self_clearance_weight", this->params.bg_self_clearance_weight);
 		this->declareIfNeeded("bg_joint_limit_weight", this->params.bg_joint_limit_weight);
@@ -294,7 +289,6 @@ private:
 		this->declareIfNeeded("bg_real_cost_attempts", this->params.bg_real_cost_attempts);
 		this->declareIfNeeded("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->declareIfNeeded("bg_steering", this->params.bg_steering);
-		this->declareIfNeeded("bg_miss_tolerance", this->params.bg_miss_tolerance);
 		this->declareIfNeeded("bg_track_probes", this->params.bg_track_probes);
 		this->declareIfNeeded("bg_room_then_reach", this->params.bg_room_then_reach);
 		this->declareIfNeeded("bg_trace_line_search", this->params.bg_trace_line_search);
@@ -336,9 +330,7 @@ private:
 		this->get_parameter("bg_manipulability_weight", this->params.bg_manipulability_weight);
 		this->get_parameter("bg_manipulability_weight_initial", this->params.bg_manipulability_weight_initial);
 		this->get_parameter("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
-		this->get_parameter("bg_log_manipulability_weight", this->params.bg_log_manipulability_weight);
 		this->get_parameter("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
-		this->get_parameter("bg_cost_slack", this->params.bg_cost_slack);
 		this->get_parameter("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
 		this->get_parameter("bg_self_clearance_weight", this->params.bg_self_clearance_weight);
 		this->get_parameter("bg_joint_limit_weight", this->params.bg_joint_limit_weight);
@@ -377,7 +369,6 @@ private:
 		this->get_parameter("bg_real_cost_attempts", this->params.bg_real_cost_attempts);
 		this->get_parameter("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->get_parameter("bg_steering", this->params.bg_steering);
-		this->get_parameter("bg_miss_tolerance", this->params.bg_miss_tolerance);
 		this->get_parameter("bg_track_probes", this->params.bg_track_probes);
 		this->get_parameter("bg_room_then_reach", this->params.bg_room_then_reach);
 		this->get_parameter("bg_trace_line_search", this->params.bg_trace_line_search);
@@ -437,9 +428,7 @@ private:
 		bg.manipulability_weight = this->params.bg_manipulability_weight;
 		bg.manipulability_weight_initial = this->params.bg_manipulability_weight_initial;
 		bg.manipulability_weight_decay = this->params.bg_manipulability_weight_decay;
-		bg.log_manipulability_weight = this->params.bg_log_manipulability_weight;
 		bg.miss_gap_weight = this->params.bg_miss_gap_weight;
-		bg.cost_slack = this->params.bg_cost_slack;
 		bg.manipulability_include_missed = this->params.bg_manipulability_include_missed;
 		bg.self_clearance_weight = this->params.bg_self_clearance_weight;
 		bg.joint_limit_weight = this->params.bg_joint_limit_weight;
@@ -480,7 +469,6 @@ private:
 		bg.real_cost_attempts = this->params.bg_real_cost_attempts;
 		bg.planned_travel_in_cost = this->params.bg_planned_travel_in_cost;
 		bg.steering = this->params.bg_steering;
-		bg.miss_tolerance = this->params.bg_miss_tolerance;
 		bg.track_probes = this->params.bg_track_probes;
 		bg.room_then_reach = this->params.bg_room_then_reach;
 		bg.trace_line_search = this->params.bg_trace_line_search;

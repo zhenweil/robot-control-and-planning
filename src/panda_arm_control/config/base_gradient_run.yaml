@@ -20,7 +20,6 @@
     bg_room_then_reach: true                 # when stuck: aim at a missed viewpoint; if a blocker is lost, give it room first
     bg_track_probes: true                    # probes follow the current arm poses; new arm poses are searched only at accepted spots
     bg_steering: true
-    bg_miss_tolerance: 1                     # a move may lose this many reached viewpoints if total cost drops; best seen is returned
     bg_trace_line_search: true
     bg_initial_step: 0.05                    # m: largest object move per iteration (first probe)
     bg_step_shrink: 0.5                     # each failed probe tries step * this
@@ -36,7 +35,6 @@
     bg_real_cost_planning_time: 0.5
     bg_manipulability_weight_initial: 30.0  # lambda during the descent
     bg_manipulability_weight: 1.0            # final lambda; also used to pick the reported best placement
-    bg_log_manipulability_weight: 0.0        # mu (off: soft-min instead)
     bg_softmin_manipulability_weight: 1000.0 # pull from the worst poses' manipulability; 0 = off
     bg_softmin_tau: 0.01                     # small = only the worst pose, large = closer to the average
     bg_manipulability_after_reach: true      # comfort terms (manipulability, soft-min) off while any viewpoint is missed
@@ -46,4 +44,3 @@
     bg_joint_limit_weight: 10.0              # penalty as joints near their limits; 0 = off
     bg_joint_limit_zone: 0.15                # share of a joint's range from its limit where the penalty starts
     bg_miss_gap_weight: 200.0
-    bg_cost_slack: 2.0                       # accept a move if cost rises by at most this (planned-travel noise); 0 = strict
