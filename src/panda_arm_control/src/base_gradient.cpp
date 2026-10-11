@@ -1349,11 +1349,13 @@ Eigen::Vector3d ManipulabilityOffsetGradient(
 // manipulability. Each rule is linearized in the placement b: value + grad . db >= floor.
 // ---------------------------------------------------------------------------------------------
 
-// A wall learned from a probe that lost viewpoint vp: moving against n (step metric, unit) loses it, so steps
-// keep n . d >= 0. Moving along n gives vp room. Forgotten once the object is far from where it was learned.
+// A wall learned from a probe step that lost viewpoint vp: steps within kWallHalfAngle of `n` (the failed step's
+// direction, unit) are blocked. `room` is vp's comfort direction that the step went against (zero if unknown).
+// Forgotten once the object is far from where it was learned.
 struct Wall
 {
 	Eigen::Vector3d n = Eigen::Vector3d::Zero();
+	Eigen::Vector3d room = Eigen::Vector3d::Zero();
 	ObjectPlacement at;
 	int vp = -1;
 };
@@ -2500,7 +2502,7 @@ BaseGradientResult SolveBaseGradient(
 				return true;
 			};
 			// Room-then-reach walls: forget walls learned far away; aim_within_walls gives the direction nearest to `a`
-			// (unit) that keeps n . d >= 0 for every wall (zero if none is left).
+			// (unit) outside every wall's cone, scaled by its cosine to `a` (zero if none is left).
 			const double kWallRadius = 0.1;  // step metric (m): walls learned farther away no longer apply
 			auto u_dist = [&](const ObjectPlacement& a, const ObjectPlacement& b) {
 				return ToOffsetVec(a, b).norm();
@@ -2508,42 +2510,49 @@ BaseGradientResult SolveBaseGradient(
 			walls.erase(
 				std::remove_if(walls.begin(), walls.end(), [&](const Wall& w) { return u_dist(w.at, base) > kWallRadius; }),
 				walls.end());
+			const double kWallHalfAngle = M_PI / 4.0;  // a wall blocks steps within this angle of the failed step
 			auto aim_within_walls = [&](const Eigen::Vector3d& a) {
-				if (walls.empty())
+				const Eigen::Vector3d none = Eigen::Vector3d::Zero();
+				if (walls.empty() || a.norm() < 1e-9)
 					return a;
-				std::vector<Eigen::VectorXd> rows;
-				std::vector<double> lo;
-				for (const Wall& w : walls)
+				const Eigen::Vector3d a_u = a.normalized();
+				// Push the direction out of each cone it is in, onto the cone's edge (just past it), until it is in none.
+				const double edge = kWallHalfAngle + 0.01;
+				Eigen::Vector3d d = a_u;
+				for (int it = 0; it < 20; ++it)
 				{
-					rows.push_back(w.n);
-					lo.push_back(0.0);
+					bool moved = false;
+					for (const Wall& w : walls)
+					{
+						if (d.dot(w.n) <= std::cos(kWallHalfAngle))
+							continue;
+						Eigen::Vector3d side = d - d.dot(w.n) * w.n;
+						if (side.norm() < 1e-9)
+							side = w.n.unitOrthogonal();
+						Eigen::Vector3d next = to_u(std::cos(edge) * w.n + std::sin(edge) * side.normalized());
+						if (next.norm() < 1e-9)
+							return none;
+						d = next.normalized();
+						moved = true;
+					}
+					if (!moved)
+						return Eigen::Vector3d(std::max(0.0, d.dot(a_u)) * d);
 				}
-				Eigen::Vector3d box_lo, box_hi;
-				for (int k = 0; k < 3; ++k)
-				{
-					const bool locked = to_u(Eigen::Vector3d::Unit(k))(k) == 0.0;
-					box_lo(k) = locked ? 0.0 : -1.0;
-					box_hi(k) = locked ? 0.0 : 1.0;
-				}
-				Eigen::Vector3d d = Eigen::Vector3d::Zero();
-				Eigen::VectorXd z;
-				std::string status;
-				// min -a.d + |d|^2 / 2 within the walls: a projected onto the allowed side.
-				if (!SolveReachStep(rows, lo, {}, {}, -a, 1.0, 0.0, box_lo, box_hi, 0, 0.0, d, z, status))
-					return Eigen::Vector3d(Eigen::Vector3d::Zero());
-				return d;
+				return none;  // the cones cover every nearby direction
 			};
-			auto add_wall = [&](int v, const Eigen::Vector3d& h, const ObjectPlacement& at) {
-				if (h.norm() < 1e-9)
+			// Wall for viewpoint v lost by a step along `step_dir` from `at`; `room` is its comfort direction.
+			auto add_wall = [&](int v, const Eigen::Vector3d& step_dir, const Eigen::Vector3d& room, const ObjectPlacement& at) {
+				if (step_dir.norm() < 1e-9)
 					return false;
-				// One wall per viewpoint: the newest replaces the old one, so stale walls can't contradict it.
-				walls.erase(
-					std::remove_if(walls.begin(), walls.end(), [v](const Wall& w) { return w.vp == v; }), walls.end());
-				walls.push_back({h.normalized(), at, v});
+				const Eigen::Vector3d n = step_dir.normalized();
+				for (const Wall& w : walls)
+					if (w.n.dot(n) > std::cos(0.1))
+						return false;  // this step's cone is already there (one cone per failed step)
+				walls.push_back({n, room, at, v});
 				if (params.trace_line_search)
 					RCLCPP_INFO(
-						node->get_logger(), "    wall: vp %d, room side (%+.2f, %+.2f, %+.2f), %zu walls", v,
-						walls.back().n(0), walls.back().n(1), walls.back().n(2), walls.size());
+						node->get_logger(), "    wall: vp %d, blocked dir (%+.2f, %+.2f, %+.2f), room (%+.2f, %+.2f, %+.2f), %zu walls",
+						v, n(0), n(1), n(2), room(0), room(1), room(2), walls.size());
 				return true;
 			};
 			if (params.room_then_reach && !walls.empty())
@@ -2598,7 +2607,7 @@ BaseGradientResult SolveBaseGradient(
 					// One-sided walls: block only the side that loses each viewpoint, then re-aim the descent.
 					bool steered = false;
 					for (int v : probe.missed_vp)
-						steered = add_wall(v, loss_direction(v, here_quick, probe, dir_u), base) || steered;
+						steered = add_wall(v, dir_u, loss_direction(v, here_quick, probe, dir_u), base) || steered;
 					if (steered)
 					{
 						++num_steers;
@@ -2800,6 +2809,8 @@ BaseGradientResult SolveBaseGradient(
 						}
 						const Eigen::Vector3d aim = aim_d.normalized();
 						std::vector<int> lost_all;
+						// Every lost viewpoint outvotes the one target: the room move follows their average comfort direction.
+						Eigen::Vector3d room_raw = Eigen::Vector3d::Zero();
 						bool walked = false;
 						for (double size : {params.initial_step, 0.5 * params.initial_step})
 						{
@@ -2838,8 +2849,28 @@ BaseGradientResult SolveBaseGradient(
 								break;
 							}
 							for (int v : lost)
-								if (add_wall(v, loss_direction(v, here_at, probe, aim), at))
-									lost_all.push_back(v);
+							{
+								const Eigen::Vector3d comfort = loss_direction(v, here_at, probe, aim);
+								add_wall(v, aim, comfort, at);
+								if (comfort.norm() > 1e-9)
+									room_raw += comfort.normalized();
+								lost_all.push_back(v);
+							}
+							// A trade (the target reached, others lost): the room move also gives the target room, so it
+							// follows the comfort of both sides.
+							const auto ti = std::find(probe.tour.begin(), probe.tour.end(), target);
+							if (!lost.empty() && ti != probe.tour.end())
+							{
+								const Eigen::Vector3d comfort = to_u(ManipulabilityOffsetGradient(
+									state, jmg, tool0_link, probe.joints[static_cast<size_t>(ti - probe.tour.begin())],
+									params.jacobian_damping, params.manipulability_limit_sharpness));
+								if (comfort.norm() > 1e-9)
+									room_raw += comfort.normalized();
+								if (params.trace_line_search)
+									RCLCPP_INFO(
+										node->get_logger(), "    trade: vp %d reached for%s -- room for both", target,
+										list(lost).c_str());
+							}
 							if (!lost.empty())
 								break;  // walls learned: make room rather than shrink
 						}
@@ -2850,50 +2881,58 @@ BaseGradientResult SolveBaseGradient(
 						if (lost_all.empty())
 							break;  // no loss, no gain, over budget: nothing to make room for
 
-						// Room: along the new walls' room side (kept within all walls); no viewpoint lost, cost within budget.
-						Eigen::Vector3d room_raw = Eigen::Vector3d::Zero();
-						for (size_t w = walls.size() - lost_all.size(); w < walls.size(); ++w)
-							room_raw += walls[w].n;
-						const Eigen::Vector3d room_d =
-							room_raw.norm() > 1e-9 ? aim_within_walls(room_raw.normalized()) : room_raw;
-						if (room_d.norm() < 0.1)
+						// Room: along the lost viewpoints' comfort directions (outside all walls). While viewpoints are missed
+						// the cost may rise here: a room move only has to lose nothing. A room move that loses viewpoints gets
+						// its own wall, and one more try goes the way that is still left.
+						if (room_raw.norm() < 1e-9)
 							break;
-						const Eigen::Vector3d room = room_d.normalized();
 						bool moved = false;
-						for (double size : {params.initial_step, 0.5 * params.initial_step})
+						for (int attempt = 0; attempt < 2 && !moved && !accepted; ++attempt)
 						{
-							const ObjectPlacement cand = shifted(at, room, size);
-							InnerSolution rp = quick_solve(cand);
-							result.num_inner_solves += 1;
-							const std::vector<int> lost = lost_from(here_at, rp);
-							if (lost.empty())
-								add_planned_travel(cand, rp);
-							const bool gained = lost_from(here_quick, rp).empty() && rp.num_reachable > here_quick.num_reachable;
-							const bool ok =
-								lost.empty() && cmp_cost(rp, true) <= cmp_cost(here_quick, true) + params.room_budget;
-							if (params.trace_line_search)
-								RCLCPP_INFO(
-									node->get_logger(),
-									"    room for%s step=%.4f m dir (%+.2f, %+.2f, %+.2f) abs (%.4f, %.4f, %.4f): reached %d, cost "
-									"%.2f vs %.2f here (budget %.1f)  lost:%s -> %s",
-									list(lost_all).c_str(), size, room(0), room(1), room(2), cand.x, cand.y, cand.z,
-									rp.num_reachable, rp.weighted_cost, here_quick.weighted_cost, params.room_budget,
-									list(lost).c_str(), gained ? "gained, accepted" : ok ? "moved" : "rejected");
-							if (gained)
-							{
-								accepted = true;
-								b_new = cand;
-								next = std::move(rp);
-								step = size;
+							const Eigen::Vector3d room_d = aim_within_walls(room_raw.normalized());
+							if (room_d.norm() < 0.1)
 								break;
-							}
-							if (ok)
+							const Eigen::Vector3d room = room_d.normalized();
+							std::vector<int> room_lost;
+							for (double size : {params.initial_step, 0.5 * params.initial_step})
 							{
-								at = cand;
-								here_at = std::move(rp);
-								moved = true;
-								break;
+								const ObjectPlacement cand = shifted(at, room, size);
+								InnerSolution rp = quick_solve(cand);
+								result.num_inner_solves += 1;
+								const std::vector<int> lost = lost_from(here_at, rp);
+								if (lost.empty())
+									add_planned_travel(cand, rp);
+								const bool gained =
+									lost_from(here_quick, rp).empty() && rp.num_reachable > here_quick.num_reachable;
+								const bool ok = lost.empty();
+								if (params.trace_line_search)
+									RCLCPP_INFO(
+										node->get_logger(),
+										"    room for%s (try %d) step=%.4f m dir (%+.2f, %+.2f, %+.2f) abs (%.4f, %.4f, %.4f): "
+										"reached %d, cost %.2f vs %.2f here  lost:%s -> %s",
+										list(lost_all).c_str(), attempt + 1, size, room(0), room(1), room(2), cand.x, cand.y,
+										cand.z, rp.num_reachable, rp.weighted_cost, here_quick.weighted_cost,
+										list(lost).c_str(), gained ? "gained, accepted" : ok ? "moved" : "rejected");
+								if (gained)
+								{
+									accepted = true;
+									b_new = cand;
+									next = std::move(rp);
+									step = size;
+									break;
+								}
+								if (ok)
+								{
+									at = cand;
+									here_at = std::move(rp);
+									moved = true;
+									break;
+								}
+								if (room_lost.empty())
+									room_lost = lost;
 							}
+							if (!moved && !accepted && !room_lost.empty())
+								add_wall(room_lost.front(), room, Eigen::Vector3d::Zero(), at);
 						}
 						if (!moved)
 							break;
