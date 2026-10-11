@@ -153,9 +153,12 @@ std::vector<Eigen::Isometry3d> LoadTourTcpPoses(const std::string& tour_input_di
 
 // The surface the robot is mounted on: a wide slab just under the base, so no arm pose (IK or closest IK) can reach
 // below it. The base link rests on it, so that pair is allowed to touch.
+constexpr double kSurfaceSize = 4.0;       // m
+constexpr double kSurfaceThickness = 0.05;  // m
+
 void AddMountingSurface(const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor)
 {
-	const double size = 4.0, thickness = 0.05;  // m
+	const double size = kSurfaceSize, thickness = kSurfaceThickness;
 	planning_scene_monitor::LockedPlanningSceneRW locked_scene(planning_scene_monitor);
 	const std::string base_link = locked_scene->getRobotModel()->getRootLinkName();
 	moveit_msgs::msg::CollisionObject surface;
@@ -172,6 +175,28 @@ void AddMountingSurface(const planning_scene_monitor::PlanningSceneMonitorPtr& p
 	surface.operation = surface.ADD;
 	locked_scene->processCollisionObjectMsg(surface);
 	locked_scene->getAllowedCollisionMatrixNonConst().setEntry(surface.id, base_link, true);
+}
+
+// RViz marker for the mounting surface, in the robot's base frame.
+visualization_msgs::msg::Marker MountingSurfaceMarker(const std::string& base_link, const rclcpp::Time& stamp)
+{
+	visualization_msgs::msg::Marker m;
+	m.header.frame_id = base_link;
+	m.header.stamp = stamp;
+	m.ns = "mounting_surface";
+	m.id = 0;
+	m.type = visualization_msgs::msg::Marker::CUBE;
+	m.action = visualization_msgs::msg::Marker::ADD;
+	m.pose.position.z = -0.5 * kSurfaceThickness;
+	m.pose.orientation.w = 1.0;
+	m.scale.x = kSurfaceSize;
+	m.scale.y = kSurfaceSize;
+	m.scale.z = kSurfaceThickness;
+	m.color.r = 0.55f;
+	m.color.g = 0.45f;
+	m.color.b = 0.35f;
+	m.color.a = 0.6f;
+	return m;
 }
 
 }  // namespace
@@ -436,6 +461,9 @@ private:
 			this->shared_from_this(), this->resolved_mesh_path, this->params.mesh_scale, object_translation_world,
 			object_rotation_world);
 		AddMountingSurface(local_scene);
+		visualization_msgs::msg::MarkerArray surface_markers;
+		surface_markers.markers.push_back(MountingSurfaceMarker(this->robot_model->getRootLinkName(), this->now()));
+		this->marker_pub->publish(surface_markers);
 
 		BaseGradientParams bg;
 		bg.bounds.x_min = this->params.bg_x_min;
@@ -520,6 +548,7 @@ private:
 		this->marker_array = BuildBaseGradientMarkerArray(
 			this->now(), this->resolved_mesh_path, this->params.mesh_scale, object_translation_world,
 			object_rotation_world, tour_tcp_poses, result);
+		this->marker_array.markers.push_back(MountingSurfaceMarker(this->robot_model->getRootLinkName(), this->now()));
 		this->marker_pub->publish(this->marker_array);
 
 		if (!result.ok)
