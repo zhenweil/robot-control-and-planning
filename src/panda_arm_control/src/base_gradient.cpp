@@ -1,28 +1,29 @@
-#include "panda_arm_control/base_gradient.hpp"
-#include "panda_arm_control/real_cost_planning.hpp"
-
-#include <algorithm>
-#include <chrono>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
-#include <filesystem>
-#include <fstream>
 #include <limits>
 #include <memory>
-#include <numeric>
 #include <random>
 #include <thread>
-
+#include <numeric>
+#include <fstream>
+#include <algorithm>
+#include <filesystem>
+#include <json/json.h>
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
-#include <geometry_msgs/msg/point.hpp>
+#include <random_numbers/random_numbers.h>
+
+#include <geometric_shapes/shapes.h>
 #include <geometry_msgs/msg/pose.hpp>
-#include <json/json.h>
-#include <moveit/collision_detection/collision_common.h>
+#include <geometry_msgs/msg/point.hpp>
+#include <std_msgs/msg/color_rgba.hpp>
 #include <moveit/robot_state/robot_state.h>
 #include <moveit_msgs/msg/collision_object.hpp>
-#include <random_numbers/random_numbers.h>
-#include <std_msgs/msg/color_rgba.hpp>
+#include <moveit/collision_detection/collision_common.h>
+
+#include "panda_arm_control/base_gradient.hpp"
+#include "panda_arm_control/real_cost_planning.hpp"
 
 namespace
 {
@@ -356,6 +357,46 @@ struct ClosestIkResult
 	std::vector<double> joints;  // the best collision-free pose; empty if none found
 };
 
+// Links that move rigidly with the tool, plus anything hanging off them (hand, fingers): the path check ignores them.
+std::set<std::string> ToolSideLinks(const moveit::core::LinkModel* tool0_link)
+{
+	std::set<std::string> links;
+	const moveit::core::LinkModel* wrist = moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(tool0_link);
+	links.insert(wrist->getName());
+	for (const moveit::core::JointModel* joint : wrist->getChildJointModels())
+		for (const moveit::core::LinkModel* link : joint->getDescendantLinkModels())
+			links.insert(link->getName());
+	return links;
+}
+
+// True if a thin rod from the tool to the target hits nothing (object or arm; the tool side excepted). A closest
+// pose with something in between can't slide onto the viewpoint, so its gap and slope would mislead.
+bool ClearPathToTarget(
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, moveit::core::RobotState& state,
+	const moveit::core::LinkModel* tool0_link, const Eigen::Vector3d& target, const std::set<std::string>& tool_side)
+{
+	const Eigen::Vector3d local = state.getGlobalLinkTransform(tool0_link).inverse() * target;
+	const double length = local.norm();
+	if (length < 0.01)
+		return true;  // already at the viewpoint
+	Eigen::Isometry3d rod_pose = Eigen::Isometry3d::Identity();
+	rod_pose.translation() = 0.5 * local;  // cylinder axis is z, centered on the shape pose
+	rod_pose.linear() = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d::UnitZ(), local / length).toRotationMatrix();
+	const std::string id = "path_to_target";
+	state.attachBody(
+		id, Eigen::Isometry3d::Identity(), {std::make_shared<shapes::Cylinder>(0.005, length)}, {rod_pose}, tool_side,
+		tool0_link->getName());
+	state.update();
+	collision_detection::CollisionRequest req;
+	collision_detection::CollisionResult res;
+	{
+		planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
+		locked_scene->checkCollision(req, res, state);
+	}
+	state.clearAttachedBody(id);
+	return !res.collision;
+}
+
 ClosestIkResult CollisionAwareClosestIk(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, moveit::core::RobotState& state,
 	const moveit::core::JointModelGroup* jmg, const moveit::core::LinkModel* tool0_link,
@@ -380,6 +421,7 @@ ClosestIkResult CollisionAwareClosestIk(
 		upper[static_cast<size_t>(k)] = b.position_bounded_ ? b.max_position_ : std::numeric_limits<double>::max();
 	}
 
+	const std::set<std::string> tool_side = ToolSideLinks(tool0_link);
 	std::vector<double> q = initial_joints;
 	ClosestIkResult best;
 	std::vector<double> min_gap_history;  // smallest gap seen up to each step
@@ -400,7 +442,8 @@ ClosestIkResult CollisionAwareClosestIk(
 		FindClosePairs(planning_scene_monitor, state, jmg, req, margin, close_pair_gradients, dists);
 		// Full validity check (same as IK and the planner) before keeping a pose: the distance query alone
 		// let through self-collisions near the base (hand vs link0, link5 vs link7).
-		if (gap < best.gap && IsStateCollisionFree(planning_scene_monitor, &state, jmg, q.data()))
+		if (gap < best.gap && IsStateCollisionFree(planning_scene_monitor, &state, jmg, q.data()) &&
+			ClearPathToTarget(planning_scene_monitor, state, tool0_link, target_pose.translation(), tool_side))
 		{
 			best.found = true;
 			best.pose_error = pose_error;
