@@ -372,8 +372,6 @@ robot_trajectory::RobotTrajectoryPtr TryStraightLineInterpolatedPath(
 	return trajectory;
 }
 
-// Building/using a PlanningPipeline logs adapter chatter that floods the terminal when many
-// pipelines are built (esp. the hierarchical tour node). Parent prefixes cover all child loggers.
 void QuietPlanningLoggers(const rclcpp::Node::SharedPtr& node)
 {
 	static const char* kLoggerPrefixesToQuiet[] = {
@@ -383,7 +381,7 @@ void QuietPlanningLoggers(const rclcpp::Node::SharedPtr& node)
 	};
 	for (const char* logger_name : kLoggerPrefixesToQuiet)
 	{
-		if (rcutils_logging_set_logger_level(logger_name, RCUTILS_LOG_SEVERITY_WARN) != RCUTILS_RET_OK)
+		if (rcutils_logging_set_logger_level(logger_name, RCUTILS_LOG_SEVERITY_ERROR) != RCUTILS_RET_OK)
 			RCLCPP_WARN(node->get_logger(), "Failed to quiet %s logger", logger_name);
 	}
 }
@@ -661,6 +659,14 @@ std::vector<double> PlanTourJointPathLengths(
 		goal_state.setToDefaultValues();
 		goal_state.setJointGroupPositions(jmg, goal_joints);
 		goal_state.update();
+		// An end in collision (e.g. the home pose inside an object placed next to the robot) can't be planned:
+		// mark the edge unplannable instead of letting the planner try and warn on every call.
+		if (!scene->isStateValid(start_state, group_name) || !scene->isStateValid(goal_state, group_name))
+		{
+			lengths.push_back(-1.0);
+			start_joints = &goal_joints;
+			continue;
+		}
 
 		planning_interface::MotionPlanRequest req;
 		req.group_name = group_name;

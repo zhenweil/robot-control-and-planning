@@ -1802,6 +1802,7 @@ BaseGradientResult SolveBaseGradient(
 	// Every descent starts at the initial weight; it decays only while all viewpoints are reached.
 	auto run_descent = [&](ObjectPlacement base, int restart_idx, const InnerSolution* warm) -> RestartResult {
 		base = ProjectToBounds(base, params.bounds);
+		params.random_seed = params_in.random_seed + restart_idx;  // each restart draws its own IK luck
 		params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
 		// manipulability_after_reach: comfort terms (lambda, soft-min) off while any viewpoint is missed, so the
 		// step follows the miss gaps instead of being outvoted; back on once everything is reached.
@@ -2293,6 +2294,50 @@ BaseGradientResult SolveBaseGradient(
 				}
 				return none;  // the cones cover every nearby direction
 			};
+			// The direction farthest from every failed step: maximizes the smallest angle to any wall's axis. Ascent on
+			// that smallest angle from each wall's opposite; zero if no walls.
+			auto farthest_from_walls = [&]() -> Eigen::Vector3d {
+				Eigen::Vector3d best = Eigen::Vector3d::Zero();
+				double best_cos = 2.0;  // cosine to the nearest axis; smaller is farther
+				auto nearest_cos = [&](const Eigen::Vector3d& d, const Wall** nearest) {
+					double c = -2.0;
+					for (const Wall& w : walls)
+						if (d.dot(w.n) > c)
+						{
+							c = d.dot(w.n);
+							*nearest = &w;
+						}
+					return c;
+				};
+				for (const Wall& start : walls)
+				{
+					Eigen::Vector3d d = to_u(-start.n);
+					if (d.norm() < 1e-9)
+						continue;
+					d.normalize();
+					for (int it = 0; it < 100; ++it)
+					{
+						const Wall* nearest = nullptr;
+						nearest_cos(d, &nearest);
+						// Turn away from the nearest axis, within the sphere.
+						const Eigen::Vector3d away = -(nearest->n - nearest->n.dot(d) * d);
+						if (away.norm() < 1e-9)
+							break;
+						const Eigen::Vector3d next = to_u(d + 0.05 * away.normalized());
+						if (next.norm() < 1e-9)
+							break;
+						d = next.normalized();
+					}
+					const Wall* nearest = nullptr;
+					const double c = nearest_cos(d, &nearest);
+					if (c < best_cos)
+					{
+						best_cos = c;
+						best = d;
+					}
+				}
+				return best;
+			};
 			// Wall for viewpoint v lost by a step along `step_dir` from `at`; `room` is its comfort direction.
 			auto add_wall = [&](int v, const Eigen::Vector3d& step_dir, const Eigen::Vector3d& room, const ObjectPlacement& at) {
 				if (step_dir.norm() < 1e-9)
@@ -2565,13 +2610,20 @@ BaseGradientResult SolveBaseGradient(
 
 						// Room: along the lost viewpoints' comfort directions (outside all walls). While viewpoints are missed
 						// the cost may rise here: a room move only has to lose nothing. A room move that loses viewpoints gets
-						// its own wall, and one more try goes the way that is still left.
+						// its own wall; the second try goes the way still left: the direction farthest from every failed step.
 						if (room_raw.norm() < 1e-9)
 							break;
 						bool moved = false;
 						for (int attempt = 0; attempt < 2 && !moved && !accepted; ++attempt)
 						{
-							const Eigen::Vector3d room_d = aim_within_walls(room_raw.normalized());
+							Eigen::Vector3d want = room_raw;
+							if (attempt > 0)
+							{
+								want = farthest_from_walls();
+								if (want.norm() < 1e-9)
+									break;
+							}
+							const Eigen::Vector3d room_d = aim_within_walls(want.normalized());
 							if (room_d.norm() < 0.1)
 								break;
 							const Eigen::Vector3d room = room_d.normalized();
@@ -2755,9 +2807,9 @@ BaseGradientResult SolveBaseGradient(
 					 : PerturbOffset(overall.placement, rng, params.descent_restart_perturbation);
 		RestartResult rr = run_descent(start, r, r == 0 ? nullptr : &overall.sol);
 
-		// weighted_cost carries the unreachable penalty, so lower cost == better (a fully-
-		// reachable result always beats a partial one).
-		bool improved = (r == 0) || (rr.cost < overall.cost);
+		// More viewpoints reached wins, then lower cost.
+		const bool improved = (r == 0) || rr.sol.num_reachable > overall.sol.num_reachable ||
+			(rr.sol.num_reachable == overall.sol.num_reachable && rr.cost < overall.cost);
 
 		RCLCPP_INFO(
 			node->get_logger(),
@@ -2769,6 +2821,8 @@ BaseGradientResult SolveBaseGradient(
 
 		if (improved)
 			overall = rr;
+		if (overall.ok)
+			break;  // every viewpoint reached: no more restarts needed
 	}
 
 	const InnerSolution& fin = overall.sol;
