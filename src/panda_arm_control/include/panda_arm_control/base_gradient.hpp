@@ -98,12 +98,12 @@ struct BaseGradientParams
 	int real_cost_attempts = 3;  // planning attempts per leg; the shortest joint path is kept
 	// Travel in the cost = planned joint travel instead of the L2 estimate, whatever travel_in_cost says (needs real_cost_planning_time > 0).
 	bool planned_travel_in_cost = false;
-	bool steering = true;  // steer the step around viewpoints it would lose (false: only shrink the step)
 	// Probes track the current arm poses (one warm IK attempt per viewpoint, fixed order) instead of a fresh search.
 	bool track_probes = false;
-	// Room-then-reach steering: one-sided walls learned from lost viewpoints; when stuck, aim at a missed viewpoint,
+	// Room-then-reach: one-sided walls learned from lost viewpoints; when stuck, aim at a missed viewpoint,
 	// and if a blocker is lost, first move to give it room, then aim again. Moves that lose nothing may raise the cost.
 	bool room_then_reach = false;
+	bool room_target_vote = true;  // the aimed-at viewpoint votes in room moves too (false: only lost viewpoints)
 	bool tracking = false;  // internal: set on the params copy used for tracked solves
 	bool trace_line_search = false;  // log every line-search probe and full solve against the current point
 	int refine_at_reach = 0;  // log N refine solves at the first all-reached placement (descent continues)

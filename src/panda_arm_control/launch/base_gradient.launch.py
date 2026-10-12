@@ -161,10 +161,6 @@ def generate_launch_description():
         description="Travel in the cost = OMPL-planned joint travel; overrides travel_in_cost (needs real_cost_planning_time > 0).",
     )
     planned_travel_in_cost = ParameterValue(LaunchConfiguration("planned_travel_in_cost"), value_type=bool)
-    steering_arg = DeclareLaunchArgument(
-        "steering", default_value="true", description="Steer the step around viewpoints it would lose."
-    )
-    steering = ParameterValue(LaunchConfiguration("steering"), value_type=bool)
     trace_line_search_arg = DeclareLaunchArgument(
         "trace_line_search", default_value="false",
         description="Log every line-search probe and full solve against the current point.",
@@ -287,7 +283,6 @@ def generate_launch_description():
         "bg_real_cost_planning_time": real_cost_planning_time,
         "bg_real_cost_attempts": real_cost_attempts,
         "bg_planned_travel_in_cost": planned_travel_in_cost,
-        "bg_steering": steering,
         "bg_trace_line_search": trace_line_search,
         "bg_refine_at_reach": refine_at_reach,
         "bg_fd_gradient_check": fd_gradient_check,
@@ -403,7 +398,6 @@ def generate_launch_description():
             real_cost_planning_time_arg,
             real_cost_attempts_arg,
             planned_travel_in_cost_arg,
-            steering_arg,
             trace_line_search_arg,
             refine_at_reach_arg,
             *position_bound_args,

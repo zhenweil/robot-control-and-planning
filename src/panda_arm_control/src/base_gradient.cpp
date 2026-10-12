@@ -1818,7 +1818,7 @@ BaseGradientResult SolveBaseGradient(
 			warm ? SeedsFromSolution(*warm, fallback_seed, static_cast<size_t>(n))
 				 : std::vector<std::vector<double>>(static_cast<size_t>(n), fallback_seed);
 		int stall_count = 0;
-		std::vector<Wall> walls;  // room-then-reach steering: remembered across iterations while nearby
+		std::vector<Wall> walls;  // room-then-reach: remembered across iterations while nearby
 		// Each viewpoint's joints from the last time it was reached: seeds its closest-IK gap once missed.
 		std::vector<std::vector<double>> last_good(static_cast<size_t>(n));
 		// Each missed viewpoint's last closest-IK pose: seeds the next closest IK so the gap stays continuous.
@@ -2197,9 +2197,6 @@ BaseGradientResult SolveBaseGradient(
 			bool accepted = false;
 			ObjectPlacement b_new = base;
 			InnerSolution next;
-			// Steering: when a probe loses a reached viewpoint, remove the part of the direction that lowers its
-			// manipulability (reach edge) or, failing that, grows its closest-IK gap at the probe (limit, collision).
-			std::vector<Eigen::Vector3d> blocked;  // orthonormal, step metric
 			// Cost for comparisons: while either side misses a viewpoint, without planned travel -- it jumps when an
 			// arm pose switches family and the gradient doesn't see it, so it mustn't veto reaching. Reaching first.
 			auto cmp_cost = [&](const InnerSolution& s, bool reach_phase) {
@@ -2243,17 +2240,6 @@ BaseGradientResult SolveBaseGradient(
 				weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
 				h = -to_u(PlacementJacobian().transpose() * weighted_error / gap);
 				return step_dir.dot(h) < 0.0 ? h : none;  // the step doesn't grow its gap either
-			};
-			// Add v's loss direction to `blk`, orthonormalized. False if it adds nothing new.
-			auto block = [&](std::vector<Eigen::Vector3d>& blk, int v, const InnerSolution& probe,
-							 const Eigen::Vector3d& step_dir) {
-				Eigen::Vector3d h = loss_direction(v, here_quick, probe, step_dir);
-				for (const Eigen::Vector3d& e : blk)
-					h -= h.dot(e) * e;
-				if (h.norm() < 1e-9)
-					return false;
-				blk.push_back(h.normalized());
-				return true;
 			};
 			// Room-then-reach walls: forget walls learned far away; aim_within_walls gives the direction nearest to `a`
 			// (unit) outside every wall's cone, even one turned far from `a` (zero only if it can't get out).
@@ -2359,9 +2345,7 @@ BaseGradientResult SolveBaseGradient(
 				if (d.norm() >= 0.1)
 					dir_u = d.normalized();  // stay off known walls
 			}
-			int num_steers = 0;
-			const int kMaxSteers = 3;
-			// Gradient line search with steering.
+			// Gradient line search: shrink the step until a probe is better.
 			for (int ls = 0; ls < params.max_line_search_iters;)
 			{
 				ObjectPlacement cand = ProjectToBounds(
@@ -2394,65 +2378,6 @@ BaseGradientResult SolveBaseGradient(
 					b_new = cand;
 					next = std::move(probe);
 					break;
-				}
-				// Steer whenever a reached viewpoint is lost, even if the probe gained another.
-				bool lost_any = false;
-				for (int v : here_quick.tour)
-					if (std::find(probe.tour.begin(), probe.tour.end(), v) == probe.tour.end())
-						lost_any = true;
-				if (params.room_then_reach && params.steering && lost_any && num_steers < kMaxSteers)
-				{
-					// One-sided walls: block only the side that loses each viewpoint, then re-aim the descent.
-					bool steered = false;
-					for (int v : probe.missed_vp)
-						steered = add_wall(v, dir_u, loss_direction(v, here_quick, probe, dir_u), base) || steered;
-					if (steered)
-					{
-						++num_steers;
-						const Eigen::Vector3d d = aim_within_walls(-g_u / gnorm);
-						if (d.norm() < 0.1)
-						{
-							if (params.trace_line_search)
-								RCLCPP_INFO(node->get_logger(), "    walls block the descent: room-then-reach next");
-							break;
-						}
-						dir_u = d.normalized();
-						if (params.trace_line_search)
-							RCLCPP_INFO(
-								node->get_logger(), "    steered: new dir (%+.2f, %+.2f, %+.2f)", dir_u(0), dir_u(1),
-								dir_u(2));
-						continue;
-					}
-				}
-				else if (params.steering && lost_any && num_steers < kMaxSteers)
-				{
-					bool steered = false;
-					for (int v : probe.missed_vp)
-						steered = block(blocked, v, probe, dir_u) || steered;
-					if (steered)
-					{
-						++num_steers;
-						Eigen::Vector3d d = -g_u / gnorm;
-						for (const Eigen::Vector3d& e : blocked)
-							d -= d.dot(e) * e;
-						if (d.norm() < 0.1)
-						{
-							// No direction keeps every viewpoint: one half-size try along the descent direction, then stop.
-							if (params.trace_line_search)
-								RCLCPP_INFO(node->get_logger(), "    steering stuck: one half-size try, then stop");
-							dir_u = -g_u / gnorm;
-							step *= 0.5;
-							num_steers = kMaxSteers;
-							ls = params.max_line_search_iters - 1;  // the next probe is the last
-							continue;
-						}
-						dir_u = d.normalized();
-						if (params.trace_line_search)
-							RCLCPP_INFO(
-								node->get_logger(), "    steered: new dir (%+.2f, %+.2f, %+.2f)", dir_u(0), dir_u(1),
-								dir_u(2));
-						continue;
-					}
 				}
 				step *= params.step_shrink;
 				++ls;
@@ -2579,7 +2504,7 @@ BaseGradientResult SolveBaseGradient(
 							// The target votes too, so room moves don't drift away from it: its comfort at the pose the step
 							// reached it with (a trade), else at its closest pose here; toward it if it has neither.
 							const auto ti = std::find(probe.tour.begin(), probe.tour.end(), target);
-							if (!lost.empty())
+							if (params.room_target_vote && !lost.empty())
 							{
 								const bool trade = ti != probe.tour.end();
 								const std::vector<double>& target_q = trade
