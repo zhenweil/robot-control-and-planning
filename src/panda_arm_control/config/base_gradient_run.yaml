@@ -19,7 +19,6 @@
     bg_stop_when_all_reached: true
     bg_elbow_swing: false                    # after refine: swing each arm pose's elbow and nudge the object to shorten travel
     bg_room_then_reach: true                 # when stuck: aim at a missed viewpoint; if a blocker is lost, give it room first
-    bg_room_target_vote: true                # the aimed-at missed viewpoint votes in room moves too
     bg_track_probes: true                    # probes follow the current arm poses; new arm poses are searched only at accepted spots
     bg_trace_line_search: true
     bg_initial_step: 0.05                    # m: largest object move per iteration (first probe)

@@ -2571,28 +2571,6 @@ BaseGradientResult SolveBaseGradient(
 									room_raw += comfort.normalized();
 								lost_all.push_back(v);
 							}
-							// The target votes too, so room moves don't drift away from it: its comfort at the pose the step
-							// reached it with (a trade), else at its closest pose here; toward it if it has neither.
-							const auto ti = std::find(probe.tour.begin(), probe.tour.end(), target);
-							if (params.room_target_vote && !lost.empty())
-							{
-								const bool trade = ti != probe.tour.end();
-								const std::vector<double>& target_q = trade
-									? probe.joints[static_cast<size_t>(ti - probe.tour.begin())]
-									: (mi < here_at.missed_q.size() ? here_at.missed_q[mi] : std::vector<double>{});
-								const Eigen::Vector3d target_vote = target_q.empty()
-									? aim_raw
-									: Eigen::Vector3d(to_u(ManipulabilityOffsetGradient(
-										  state, jmg, tool0_link, target_q, params.jacobian_damping,
-										  params.manipulability_limit_sharpness)));
-								if (target_vote.norm() > 1e-9)
-									room_raw += target_vote.normalized();
-								if (params.trace_line_search)
-									RCLCPP_INFO(
-										node->get_logger(), "    target vp %d votes (%s) with lost%s", target,
-										trade ? "reached: comfort" : target_q.empty() ? "missed: toward it" : "missed: comfort at closest pose",
-										list(lost).c_str());
-							}
 							if (!lost.empty())
 								break;  // walls learned: make room rather than shrink
 						}

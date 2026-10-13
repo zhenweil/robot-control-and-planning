@@ -97,7 +97,6 @@ struct Params
 	bool bg_planned_travel_in_cost = false;
 	bool bg_track_probes = false;
 	bool bg_room_then_reach = false;
-	bool bg_room_target_vote = true;
 	bool bg_trace_line_search = false;
 	int bg_refine_at_reach = 0;
 
@@ -346,7 +345,6 @@ private:
 		this->declareIfNeeded("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->declareIfNeeded("bg_track_probes", this->params.bg_track_probes);
 		this->declareIfNeeded("bg_room_then_reach", this->params.bg_room_then_reach);
-		this->declareIfNeeded("bg_room_target_vote", this->params.bg_room_target_vote);
 		this->declareIfNeeded("bg_trace_line_search", this->params.bg_trace_line_search);
 		this->declareIfNeeded("bg_refine_at_reach", this->params.bg_refine_at_reach);
 		this->declareIfNeeded("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
@@ -429,7 +427,6 @@ private:
 		this->get_parameter("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->get_parameter("bg_track_probes", this->params.bg_track_probes);
 		this->get_parameter("bg_room_then_reach", this->params.bg_room_then_reach);
-		this->get_parameter("bg_room_target_vote", this->params.bg_room_target_vote);
 		this->get_parameter("bg_trace_line_search", this->params.bg_trace_line_search);
 		this->get_parameter("bg_refine_at_reach", this->params.bg_refine_at_reach);
 		this->get_parameter("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
@@ -536,7 +533,6 @@ private:
 		bg.planned_travel_in_cost = this->params.bg_planned_travel_in_cost;
 		bg.track_probes = this->params.bg_track_probes;
 		bg.room_then_reach = this->params.bg_room_then_reach;
-		bg.room_target_vote = this->params.bg_room_target_vote;
 		bg.trace_line_search = this->params.bg_trace_line_search;
 		bg.refine_at_reach = this->params.bg_refine_at_reach;
 		bg.random_seed = this->params.random_seed;
