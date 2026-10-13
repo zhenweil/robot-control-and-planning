@@ -1899,7 +1899,12 @@ public:
 	BaseGradientResult result;  // history and solve count; SolveBaseGradient fills in the final placement
 
 private:
-	// --- Steps of a descent ---
+	// --- A descent: start, reach all viewpoints, then refine path and position ---
+	bool StartDescent(const ObjectPlacement& start, int restart_idx, const InnerSolution* warm);
+	int ReachAllViewpoints();
+	void RefinePathAndPosition(int iter);
+	bool ReachDescentStep(int iter);
+	// --- Parts of a step ---
 	void LogRefineAtReach();
 	void UpdateComfortWeights();
 	Eigen::Vector3d Gradient();
@@ -2013,6 +2018,17 @@ BaseGradientSolver::BaseGradientSolver(
 
 RestartResult BaseGradientSolver::RunDescent(const ObjectPlacement& start, int restart_idx_in, const InnerSolution* warm)
 {
+	if (!StartDescent(start, restart_idx_in, warm))
+		return rr;
+	const int iters = ReachAllViewpoints();
+	if (cur.all_reachable)
+		RefinePathAndPosition(iters);
+	return rr;  // Record() runs at least once, so rr holds this descent's best-cost solution
+}
+
+// Resets the descent state and solves at `start`. False if no viewpoint is reachable there.
+bool BaseGradientSolver::StartDescent(const ObjectPlacement& start, int restart_idx_in, const InnerSolution* warm)
+{
 	restart_idx = restart_idx_in;
 	base = ProjectToBounds(start, params.bounds);
 	params.random_seed = params_in.random_seed + restart_idx;  // each restart draws its own IK luck
@@ -2046,7 +2062,7 @@ RestartResult BaseGradientSolver::RunDescent(const ObjectPlacement& start, int r
 	if (cur.tour.empty())
 	{
 		RCLCPP_WARN(node->get_logger(), "restart %d: no tour pose reachable at the start placement", restart_idx + 1);
-		return rr;
+		return false;
 	}
 	Record(base, cur);
 	Remember(cur);
@@ -2056,53 +2072,74 @@ RestartResult BaseGradientSolver::RunDescent(const ObjectPlacement& start, int r
 		std::max(1, params.descent_num_restart), base.x, base.y, base.z, cur.num_reachable, n);
 	LogCostTerms(cur);
 	LogMissed(base, cur);
+	return true;
+}
 
-	for (int outer = 0; outer < params.max_outer_iterations && rclcpp::ok() && !cur.tour.empty(); ++outer)
+// 1) Reach all viewpoints: descend while any is missed (room-then-reach when the gradient step fails).
+// Returns the iterations used.
+int BaseGradientSolver::ReachAllViewpoints()
+{
+	for (int iter = 0; iter < params.max_outer_iterations; ++iter)
 	{
-		LogRefineAtReach();
-		if (params.stop_when_all_reached && cur.all_reachable)
-		{
-			RCLCPP_INFO(node->get_logger(), "  restart %d: all viewpoints reached -- stopping", restart_idx + 1);
-			break;
-		}
-		if (outer > 0)
-			UpdateComfortWeights();
-
-		const Eigen::Vector3d g = Gradient();
-		const Eigen::Vector3d g_u = LockAxes(g);
-		const double gnorm = g_u.norm();
-		if (gnorm < 1e-6)
-		{
-			RCLCPP_INFO(node->get_logger(), "  restart %d: gradient ~ 0 -- converged", restart_idx + 1);
-			Publish(-g);
-			break;
-		}
-
-		PrepareProbes();
-		std::optional<Step> step = LineSearch(-g_u / gnorm);
-		if (!step && params.room_then_reach && !here_quick.missed_vp.empty())
-			step = RoomThenReach();
-		std::optional<InnerSolution> committed;
-		if (step)
-			committed = FullSolveAt(*step);
-		if (!committed)
-		{
-			if (cur.all_reachable)
-				RCLCPP_INFO(node->get_logger(), "  restart %d: no step reduces the tour cost -- converged", restart_idx + 1);
-			else
-				RCLCPP_WARN(
-					node->get_logger(), "  restart %d: no step reduces the tour cost with %d/%d reachable -- stuck",
-					restart_idx + 1, cur.num_reachable, n);
-			Publish(-g);
-			break;
-		}
-		if (TakeStep(std::move(*step), std::move(*committed), outer, gnorm, g))
-			break;
+		if (cur.all_reachable || !rclcpp::ok())
+			return iter;
+		if (!ReachDescentStep(iter))
+			return iter + 1;  // converged or stuck
 	}
+	return params.max_outer_iterations;
+}
 
+// 2) Refine path and position once all are reached: keep descending on travel and comfort (unless
+// stop_when_all_reached), then refine solves and elbow-swing smoothing at the best spot.
+void BaseGradientSolver::RefinePathAndPosition(int iter)
+{
+	LogRefineAtReach();
+	if (params.stop_when_all_reached)
+		RCLCPP_INFO(node->get_logger(), "  restart %d: all viewpoints reached -- stopping", restart_idx + 1);
+	else
+		for (; iter < params.max_outer_iterations && rclcpp::ok(); ++iter)
+			if (!ReachDescentStep(iter))
+				break;
 	RefineResult();
 	ElbowSwingAtResult();
-	return rr;  // Record() runs at least once, so rr holds this descent's best-cost solution
+}
+
+// One iteration: gradient, line search, room-then-reach if that fails with misses, full solve at the new spot.
+// False when the descent ends here (converged or stuck).
+bool BaseGradientSolver::ReachDescentStep(int iter)
+{
+	if (iter > 0)
+		UpdateComfortWeights();
+
+	const Eigen::Vector3d g = Gradient();
+	const Eigen::Vector3d g_u = LockAxes(g);
+	const double gnorm = g_u.norm();
+	if (gnorm < 1e-6)
+	{
+		RCLCPP_INFO(node->get_logger(), "  restart %d: gradient ~ 0 -- converged", restart_idx + 1);
+		Publish(-g);
+		return false;
+	}
+
+	PrepareProbes();
+	std::optional<Step> step = LineSearch(-g_u / gnorm);
+	if (!step && params.room_then_reach && !here_quick.missed_vp.empty())
+		step = RoomThenReach();
+	std::optional<InnerSolution> committed;
+	if (step)
+		committed = FullSolveAt(*step);
+	if (!committed)
+	{
+		if (cur.all_reachable)
+			RCLCPP_INFO(node->get_logger(), "  restart %d: no step reduces the tour cost -- converged", restart_idx + 1);
+		else
+			RCLCPP_WARN(
+				node->get_logger(), "  restart %d: no step reduces the tour cost with %d/%d reachable -- stuck",
+				restart_idx + 1, cur.num_reachable, n);
+		Publish(-g);
+		return false;
+	}
+	return !TakeStep(std::move(*step), std::move(*committed), iter, gnorm, g);
 }
 
 // Option "stay at A": the first time everything is reached, log what refining right here would give.
