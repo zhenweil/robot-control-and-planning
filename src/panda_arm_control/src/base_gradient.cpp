@@ -6,6 +6,7 @@
 #include <random>
 #include <thread>
 #include <numeric>
+#include <optional>
 #include <fstream>
 #include <algorithm>
 #include <filesystem>
@@ -1822,6 +1823,1105 @@ void PublishProgress(
 }  // namespace
 
 // ---------------------------------------------------------------------------------------------
+// Solver: up to N descents (restarts). Each descent iteration takes the gradient, line-searches along it,
+// falls back to room-then-reach when stuck with misses, and re-solves fully at the accepted spot.
+// ---------------------------------------------------------------------------------------------
+
+namespace
+{
+
+// Best result of one descent.
+struct RestartResult
+{
+	ObjectPlacement placement;
+	InnerSolution sol;
+	double cost = std::numeric_limits<double>::max();
+	bool ok = false;  // fully reachable
+};
+
+// A move found by the line search or room-then-reach: where, its quick solve, and the step size.
+struct Step
+{
+	ObjectPlacement at;
+	InnerSolution sol;
+	double size = 0.0;
+};
+
+double JointPathLength(const std::vector<double>& home, const InnerSolution& s)
+{
+	double len = 0.0;
+	const std::vector<double>* prev = &home;
+	for (const auto& q : s.joints)
+	{
+		len += JointL2Distance(*prev, q);
+		prev = &q;
+	}
+	return len;
+}
+
+// Viewpoints reached in `from` but not in `to`.
+std::vector<int> LostViewpoints(const InnerSolution& from, const InnerSolution& to)
+{
+	std::vector<int> lost;
+	for (int v : from.tour)
+		if (std::find(to.tour.begin(), to.tour.end(), v) == to.tour.end())
+			lost.push_back(v);
+	return lost;
+}
+
+std::string ListText(const std::vector<int>& v)
+{
+	std::string out;
+	for (int x : v)
+		out += " " + std::to_string(x);
+	return out.empty() ? std::string(" none") : out;
+}
+
+ObjectPlacement Shifted(const ObjectPlacement& at, const Eigen::Vector3d& d, double size, const BaseGradientBounds& b)
+{
+	return ProjectToBounds({at.x + size * d(0), at.y + size * d(1), at.z + size * d(2)}, b);
+}
+
+class BaseGradientSolver
+{
+public:
+	BaseGradientSolver(
+		const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
+		const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
+		const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
+		const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const std::vector<double>& home_joints,
+		const BaseGradientParams& params_in);
+
+	// One full gradient descent from `start`. warm: IK seeds and viewpoint order from an earlier descent, or
+	// null to start from the home pose.
+	RestartResult RunDescent(const ObjectPlacement& start, int restart_idx, const InnerSolution* warm);
+
+	BaseGradientResult result;  // history and solve count; SolveBaseGradient fills in the final placement
+
+private:
+	// --- Steps of a descent ---
+	void LogRefineAtReach();
+	void UpdateComfortWeights();
+	Eigen::Vector3d Gradient();
+	void PrepareProbes();
+	std::optional<Step> LineSearch(Eigen::Vector3d dir);
+	std::optional<Step> RoomThenReach();
+	std::optional<InnerSolution> FullSolveAt(const Step& step);
+	bool TakeStep(Step step, InnerSolution committed, int outer, double gnorm, const Eigen::Vector3d& g);
+	void RefineResult();
+	void ElbowSwingAtResult();
+
+	// --- Solving and scoring ---
+	InnerSolution SolveAt(const ObjectPlacement& at, int max_solutions);
+	InnerSolution QuickSolve(const ObjectPlacement& at);
+	InnerSolution Refine(const ObjectPlacement& at, InnerSolution best_sol, int num_solves);
+	double RealCost(const ObjectPlacement& at, const InnerSolution& sol);
+	InnerSolution WithPlannedTravel(const ObjectPlacement& at, InnerSolution sol);
+	double TravelTerm(const InnerSolution& sol) const;
+	double CostAtFinalWeight(const InnerSolution& sol) const;
+	double CompareCost(const InnerSolution& s, bool reach_phase) const;
+	bool Better(const InnerSolution& a, const InnerSolution& b) const;
+	void Record(const ObjectPlacement& at, const InnerSolution& s);
+	void Remember(const InnerSolution& s);
+
+	// --- Room-then-reach directions and walls ---
+	Eigen::Vector3d LockAxes(Eigen::Vector3d v) const;
+	Eigen::Vector3d LossDirection(
+		int v, const InnerSolution& from_sol, const InnerSolution& probe, const Eigen::Vector3d& step_dir);
+	Eigen::Vector3d AimWithinWalls(const Eigen::Vector3d& a) const;
+	Eigen::Vector3d FarthestFromWalls() const;
+	bool AddWall(int v, const Eigen::Vector3d& step_dir, const Eigen::Vector3d& room, const ObjectPlacement& at);
+
+	// --- Logging ---
+	void LogCostTerms(const InnerSolution& sol);
+	void LogMissed(const ObjectPlacement& at, const InnerSolution& sol);
+	void Publish(const Eigen::Vector3d& neg_grad);
+
+	// --- Fixed for the whole solve ---
+	rclcpp::Node::SharedPtr node;
+	moveit::core::RobotModelConstPtr robot_model;
+	planning_scene_monitor::PlanningSceneMonitorPtr planning_scene_monitor;
+	std::string group_name;
+	Eigen::Vector3d object_translation_nominal;
+	Eigen::Matrix3d object_rotation_nominal;
+	const BaseGradientParams params_in;
+	BaseGradientParams params;  // per-descent seed and comfort weights change; the rest is params_in
+	double lambda_final;		// manipulability weight the results are compared at
+	Eigen::Isometry3d object_pose_obj;  // object relative to its own position
+	std::vector<Eigen::Isometry3d> tour_poses_obj;  // viewpoints relative to the object's position
+	int n;
+	std::vector<int> input_order;  // viewpoints in the order given (lock_input_order)
+	moveit::core::RobotState state;
+	const moveit::core::JointModelGroup* jmg;
+	const moveit::core::LinkModel* tool0_link;
+	std::vector<double> home_joints;
+	Eigen::Vector3d home_tcp_local;
+	bool use_real_cost;
+	bool planned_travel;  // planned joint travel replaces the L2 travel in the cost
+
+	// --- Per descent (reset by RunDescent) ---
+	int restart_idx = 0;
+	ObjectPlacement base;  // current object position
+	InnerSolution cur;	   // full solve at `base`
+	RestartResult rr;	   // best seen in this descent
+	bool manipulability_on = true;
+	std::vector<ObjectPlacement> base_history;
+	std::vector<std::vector<double>> seeds;
+	int stall_count = 0;
+	std::vector<Wall> walls;  // room-then-reach: remembered across iterations while nearby
+	// Each viewpoint's joints from the last time it was reached: seeds its closest-IK gap once missed.
+	std::vector<std::vector<double>> last_good;
+	// Each missed viewpoint's last closest-IK pose: seeds the next closest IK so the gap stays continuous.
+	std::vector<std::vector<double>> last_closest;
+	bool refined_at_reach = false;
+
+	// --- Per iteration (set by PrepareProbes) ---
+	std::vector<int> locked_order;
+	const std::vector<int>* order_lock = nullptr;  // null = GTSP reorders
+	InnerSolution here_quick;  // quick solve at `base`: what probes are compared with
+};
+
+BaseGradientSolver::BaseGradientSolver(
+	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
+	const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const std::vector<double>& home_joints,
+	const BaseGradientParams& params_in)
+	: node(node), robot_model(robot_model), planning_scene_monitor(planning_scene_monitor), group_name(group_name),
+	  object_translation_nominal(object_translation_nominal), object_rotation_nominal(object_rotation_nominal),
+	  params_in(params_in), params(params_in), lambda_final(params_in.manipulability_weight),
+	  object_pose_obj(MakeIsometry(Eigen::Vector3d::Zero(), object_rotation_nominal)),
+	  tour_poses_obj(tour_tcp_poses_nominal), n(static_cast<int>(tour_tcp_poses_nominal.size())),
+	  input_order(static_cast<size_t>(n)), state(robot_model), home_joints(home_joints)
+{
+	ReseedRng(params.random_seed);
+	for (Eigen::Isometry3d& t : tour_poses_obj)
+		t.translation() -= object_translation_nominal;
+	std::iota(input_order.begin(), input_order.end(), 0);
+
+	state.setToDefaultValues();
+	jmg = state.getJointModelGroup(group_name);
+	tool0_link = robot_model->getLinkModel("tool0");
+	state.setJointGroupPositions(jmg, home_joints);
+	state.update();
+	home_tcp_local = state.getGlobalLinkTransform("tool0").translation();
+
+	use_real_cost = params.real_cost_planning_time > 0.0;
+	planned_travel = params.planned_travel_in_cost && use_real_cost;
+	result.num_total = n;
+}
+
+RestartResult BaseGradientSolver::RunDescent(const ObjectPlacement& start, int restart_idx_in, const InnerSolution* warm)
+{
+	restart_idx = restart_idx_in;
+	base = ProjectToBounds(start, params.bounds);
+	params.random_seed = params_in.random_seed + restart_idx;  // each restart draws its own IK luck
+	params.manipulability_weight = lambda_final;
+	// manipulability_after_reach: comfort terms (lambda, soft-min) off while any viewpoint is missed, so the
+	// step follows the miss gaps instead of being outvoted; back on once everything is reached.
+	manipulability_on = !params.manipulability_after_reach;
+	if (!manipulability_on)
+	{
+		params.manipulability_weight = 0.0;
+		params.softmin_manipulability_weight = 0.0;
+	}
+	base_history = {base};
+	seeds = warm ? SeedsFromSolution(*warm, home_joints, static_cast<size_t>(n))
+				 : std::vector<std::vector<double>>(static_cast<size_t>(n), home_joints);
+	stall_count = 0;
+	walls.clear();
+	last_good.assign(static_cast<size_t>(n), {});
+	last_closest.assign(static_cast<size_t>(n), {});
+	refined_at_reach = false;
+	rr = RestartResult{};
+	rr.placement = base;
+
+	ReseedRng(params.random_seed);
+	cur = BestOfNInnerSolve(
+		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, home_joints, home_tcp_local, base,
+		params, warm ? &warm->tour : nullptr, params.max_solutions_per_candidate,
+		params.lock_input_order ? &input_order : nullptr);
+	result.num_inner_solves += std::max(1, params.gtsp_num_restart);
+	cur = WithPlannedTravel(base, std::move(cur));
+	if (cur.tour.empty())
+	{
+		RCLCPP_WARN(node->get_logger(), "restart %d: no tour pose reachable at the start placement", restart_idx + 1);
+		return rr;
+	}
+	Record(base, cur);
+	Remember(cur);
+	Publish(Eigen::Vector3d::Zero());
+	RCLCPP_INFO(
+		node->get_logger(), "restart %d/%d iter 0: abs (%.4f, %.4f, %.4f) m  reachable %d/%d", restart_idx + 1,
+		std::max(1, params.descent_num_restart), base.x, base.y, base.z, cur.num_reachable, n);
+	LogCostTerms(cur);
+	LogMissed(base, cur);
+
+	for (int outer = 0; outer < params.max_outer_iterations && rclcpp::ok() && !cur.tour.empty(); ++outer)
+	{
+		LogRefineAtReach();
+		if (params.stop_when_all_reached && cur.all_reachable)
+		{
+			RCLCPP_INFO(node->get_logger(), "  restart %d: all viewpoints reached -- stopping", restart_idx + 1);
+			break;
+		}
+		if (outer > 0)
+			UpdateComfortWeights();
+
+		const Eigen::Vector3d g = Gradient();
+		const Eigen::Vector3d g_u = LockAxes(g);
+		const double gnorm = g_u.norm();
+		if (gnorm < 1e-6)
+		{
+			RCLCPP_INFO(node->get_logger(), "  restart %d: gradient ~ 0 -- converged", restart_idx + 1);
+			Publish(-g);
+			break;
+		}
+
+		PrepareProbes();
+		std::optional<Step> step = LineSearch(-g_u / gnorm);
+		if (!step && params.room_then_reach && !here_quick.missed_vp.empty())
+			step = RoomThenReach();
+		std::optional<InnerSolution> committed;
+		if (step)
+			committed = FullSolveAt(*step);
+		if (!committed)
+		{
+			if (cur.all_reachable)
+				RCLCPP_INFO(node->get_logger(), "  restart %d: no step reduces the tour cost -- converged", restart_idx + 1);
+			else
+				RCLCPP_WARN(
+					node->get_logger(), "  restart %d: no step reduces the tour cost with %d/%d reachable -- stuck",
+					restart_idx + 1, cur.num_reachable, n);
+			Publish(-g);
+			break;
+		}
+		if (TakeStep(std::move(*step), std::move(*committed), outer, gnorm, g))
+			break;
+	}
+
+	RefineResult();
+	ElbowSwingAtResult();
+	return rr;  // Record() runs at least once, so rr holds this descent's best-cost solution
+}
+
+// Option "stay at A": the first time everything is reached, log what refining right here would give.
+void BaseGradientSolver::LogRefineAtReach()
+{
+	if (params.refine_at_reach <= 0 || !cur.all_reachable || refined_at_reach)
+		return;
+	refined_at_reach = true;
+	InnerSolution start = cur;
+	if (use_real_cost && start.real_cost < 0.0)
+		start.real_cost = RealCost(base, start);
+	const InnerSolution at_reach = Refine(base, start, params.refine_at_reach);
+	RCLCPP_INFO(
+		node->get_logger(),
+		"  restart %d: refined %d solves at first all-reached abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  "
+		"real %.2f -> %.2f",
+		restart_idx + 1, params.refine_at_reach, base.x, base.y, base.z, start.travel_cost, at_reach.travel_cost,
+		start.real_cost, at_reach.real_cost);
+}
+
+// manipulability_after_reach: comfort off while any viewpoint is missed, back on once all are reached.
+void BaseGradientSolver::UpdateComfortWeights()
+{
+	if (params.manipulability_after_reach && manipulability_on && !cur.all_reachable)
+	{
+		manipulability_on = false;
+		params.manipulability_weight = 0.0;
+		params.softmin_manipulability_weight = 0.0;
+		RCLCPP_INFO(node->get_logger(), "  restart %d: viewpoint missed -- comfort terms off", restart_idx + 1);
+	}
+	else if (!manipulability_on && cur.all_reachable)
+	{
+		manipulability_on = true;
+		params.manipulability_weight = lambda_final;
+		params.softmin_manipulability_weight = params_in.softmin_manipulability_weight;
+		RCLCPP_INFO(node->get_logger(), "  restart %d: all reached -- comfort terms on", restart_idx + 1);
+	}
+	cur.weighted_cost = TravelTerm(cur) - params.manipulability_weight * cur.sum_manipulability -
+		params.softmin_manipulability_weight * cur.softmin_manipulability +
+		params.unreachable_penalty * (cur.num_total - cur.num_reachable) + cur.miss_cost;
+}
+
+// Cost gradient at `base`, with optional per-term and finite-difference logs.
+Eigen::Vector3d BaseGradientSolver::Gradient()
+{
+	const Eigen::Vector3d g = AnalyticGradient(
+		state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, home_joints, home_tcp_local, base, params,
+		cur.missed_vp, cur.missed_gap, cur.missed_q);
+
+	if (params.trace_line_search)
+	{
+		// Each term's own descent direction (translation part of -gradient) and size.
+		auto part = [&](bool manip, double gap_weight) {
+			BaseGradientParams p = params;
+			p.travel_gradient = false;
+			p.manipulability_gradient = manip;
+			p.miss_gap_weight = gap_weight;
+			return AnalyticGradient(
+				state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, home_joints, home_tcp_local, base, p,
+				cur.missed_vp, cur.missed_gap, cur.missed_q);
+		};
+		auto describe = [](const Eigen::Vector3d& gp) {
+			const Eigen::Vector3d d = -gp;
+			const double nrm = d.norm();
+			const Eigen::Vector3d u = nrm > 1e-9 ? Eigen::Vector3d(d / nrm) : Eigen::Vector3d::Zero();
+			char buf[96];
+			std::snprintf(buf, sizeof(buf), "|%.1f| dir (%+.2f, %+.2f, %+.2f)", nrm, u.x(), u.y(), u.z());
+			return std::string(buf);
+		};
+		RCLCPP_INFO(
+			node->get_logger(), "    directions: manip %s  gap %s  total %s",
+			describe(part(params.manipulability_gradient, 0.0)).c_str(),
+			describe(part(false, params.miss_gap_weight)).c_str(), describe(g).c_str());
+	}
+	if (params.fd_gradient_check)
+	{
+		const Eigen::Vector3d g_fd = FiniteDifferenceGradient(
+			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, cur.tour, cur.joints, home_joints,
+			home_tcp_local, base, params);
+		RCLCPP_INFO(
+			node->get_logger(),
+			"    grad check [x y z]  analytic (%+.4f %+.4f %+.4f)  central-diff (%+.4f %+.4f %+.4f)", g(0), g(1), g(2),
+			g_fd(0), g_fd(1), g_fd(2));
+	}
+	return g;
+}
+
+// Seeds, viewpoint-order lock and the quick solve at `base` that this iteration's probes compare against.
+void BaseGradientSolver::PrepareProbes()
+{
+	seeds = SeedsFromSolution(cur, home_joints, static_cast<size_t>(n));
+	for (int v : cur.missed_vp)
+	{
+		const size_t vi = static_cast<size_t>(v);
+		if (!last_closest[vi].empty())
+			seeds[vi] = last_closest[vi];
+		else if (!last_good[vi].empty())
+			seeds[vi] = last_good[vi];
+	}
+	// Locked viewpoint order: the input order from the start (lock_input_order), or the current order
+	// once everything is reached (freeze_order). Only arm poses are re-picked; null = GTSP reorders.
+	locked_order = cur.tour;
+	order_lock = params.lock_input_order					? &input_order
+		: (params.freeze_order && cur.all_reachable) ? &locked_order
+													 : nullptr;
+	here_quick = WithPlannedTravel(base, QuickSolve(base));
+	result.num_inner_solves += 1;
+
+	// Room-then-reach walls learned farther than this (m) no longer apply.
+	const double kWallRadius = 0.1;
+	walls.erase(
+		std::remove_if(
+			walls.begin(), walls.end(), [&](const Wall& w) { return ToOffsetVec(w.at, base).norm() > kWallRadius; }),
+		walls.end());
+}
+
+// Backtracking line search along `dir` (unit, kept off known walls): shrink the step until a probe beats
+// the quick solve here. Never trades away a reached viewpoint.
+std::optional<Step> BaseGradientSolver::LineSearch(Eigen::Vector3d dir)
+{
+	if (params.room_then_reach && !walls.empty())
+	{
+		const Eigen::Vector3d d = AimWithinWalls(dir);
+		if (d.norm() >= 0.1)
+			dir = d.normalized();  // stay off known walls
+	}
+	double step = params.initial_step;
+	for (int ls = 0; ls < params.max_line_search_iters; ++ls)
+	{
+		const ObjectPlacement cand = Shifted(base, dir, step, params.bounds);
+		// weighted_cost carries the unreachable penalty, so a probe that drops a viewpoint fails.
+		InnerSolution probe = QuickSolve(cand);
+		result.num_inner_solves += 1;
+		if (probe.num_reachable >= here_quick.num_reachable)
+			probe = WithPlannedTravel(cand, std::move(probe));  // plan only probes that could be accepted
+		if (params.trace_line_search)
+			RCLCPP_INFO(
+				node->get_logger(),
+				"    probe step=%.4f m abs (%.4f, %.4f, %.4f): reached %d vs %d here, cost %.2f vs %.2f here "
+				"(sum_w %.3f vs %.3f, planned %.2f vs %.2f)  lost:%s",
+				step, cand.x, cand.y, cand.z, probe.num_reachable, here_quick.num_reachable, probe.weighted_cost,
+				here_quick.weighted_cost, probe.sum_manipulability, here_quick.sum_manipulability, probe.real_cost,
+				here_quick.real_cost, ListText(LostViewpoints(here_quick, probe)).c_str());
+		// Compared with the quick solve here (same IK effort), so a viewpoint the quick solve merely failed to
+		// find doesn't block the step.
+		if (Better(probe, here_quick))
+			return Step{cand, std::move(probe), step};
+		step *= params.step_shrink;
+	}
+	return std::nullopt;
+}
+
+// Room then reach: stuck with misses, walk toward each missed viewpoint (smallest gap first). An aim step
+// that reaches it is accepted; one that loses nothing walks on (whatever the cost); one that loses viewpoints
+// adds walls, then a room move along their comfort side gives them room. Up to kMaxDetours aim steps and room
+// moves per viewpoint.
+std::optional<Step> BaseGradientSolver::RoomThenReach()
+{
+	const int kMaxDetours = 6;
+	std::vector<size_t> order(here_quick.missed_vp.size());
+	std::iota(order.begin(), order.end(), 0);
+	std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+		return WeightedPoseGap(here_quick.missed_gap[a], params.rot_metric_scale) <
+			WeightedPoseGap(here_quick.missed_gap[b], params.rot_metric_scale);
+	});
+	for (size_t oi : order)
+	{
+		const int target = here_quick.missed_vp[oi];
+		ObjectPlacement at = base;
+		InnerSolution here_at = here_quick;
+		for (int detour = 0; detour <= kMaxDetours; ++detour)
+		{
+			// Aim: the target's gap-shrinking direction here, kept off the walls.
+			const size_t mi = static_cast<size_t>(
+				std::find(here_at.missed_vp.begin(), here_at.missed_vp.end(), target) - here_at.missed_vp.begin());
+			if (mi >= here_at.missed_vp.size() || mi >= here_at.missed_gap.size())
+				break;
+			Eigen::Matrix<double, 6, 1> pose_error = here_at.missed_gap[mi];
+			if (detour == 0)
+			{
+				// Steadier aim: the full solve's closest pose may be nearer than the tracked one.
+				const auto ci = std::find(cur.missed_vp.begin(), cur.missed_vp.end(), target);
+				const size_t c = static_cast<size_t>(ci - cur.missed_vp.begin());
+				if (ci != cur.missed_vp.end() && c < cur.missed_gap.size() &&
+					WeightedPoseGap(cur.missed_gap[c], params.rot_metric_scale) <
+						WeightedPoseGap(pose_error, params.rot_metric_scale))
+					pose_error = cur.missed_gap[c];
+			}
+			const double gap = WeightedPoseGap(pose_error, params.rot_metric_scale);
+			if (gap < 1e-9)
+				break;
+			Eigen::Matrix<double, 6, 1> weighted_error = pose_error;
+			weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
+			const Eigen::Vector3d aim_raw = -LockAxes(PlacementJacobian().transpose() * weighted_error);
+			if (aim_raw.norm() < 1e-9)
+				break;
+			const Eigen::Vector3d aim_d = AimWithinWalls(aim_raw.normalized());
+			if (aim_d.norm() < 0.1)
+			{
+				if (params.trace_line_search)
+					RCLCPP_INFO(node->get_logger(), "    aim vp %d: walls leave no way toward it", target);
+				break;
+			}
+			const Eigen::Vector3d aim = aim_d.normalized();
+
+			// Aim step: counts only if it reaches more and loses nothing. Lost viewpoints get walls and vote for
+			// the room direction (their comfort side).
+			std::vector<int> lost_all;
+			Eigen::Vector3d room_raw = Eigen::Vector3d::Zero();
+			bool walked = false;
+			for (double size : {params.initial_step, 0.5 * params.initial_step})
+			{
+				const ObjectPlacement cand = Shifted(at, aim, size, params.bounds);
+				InnerSolution probe = QuickSolve(cand);
+				result.num_inner_solves += 1;
+				if (probe.num_reachable >= here_quick.num_reachable)
+					probe = WithPlannedTravel(cand, std::move(probe));
+				const std::vector<int> lost = LostViewpoints(here_at, probe);
+				const bool ok = LostViewpoints(here_quick, probe).empty() && probe.num_reachable > here_quick.num_reachable;
+				const bool walk = !ok && lost.empty();
+				if (params.trace_line_search)
+					RCLCPP_INFO(
+						node->get_logger(),
+						"    aim vp %d (detour %d) step=%.4f m dir (%+.2f, %+.2f, %+.2f) abs (%.4f, %.4f, %.4f): reached %d "
+						"vs %d here, cost %.2f vs %.2f here  lost:%s -> %s",
+						target, detour, size, aim(0), aim(1), aim(2), cand.x, cand.y, cand.z, probe.num_reachable,
+						here_quick.num_reachable, probe.weighted_cost, here_quick.weighted_cost, ListText(lost).c_str(),
+						ok ? "accepted" : walk ? "walk on" : "rejected");
+				if (ok)
+					return Step{cand, std::move(probe), size};
+				if (walk)
+				{
+					at = cand;
+					here_at = std::move(probe);
+					walked = true;
+					break;
+				}
+				for (int v : lost)
+				{
+					const Eigen::Vector3d comfort = LossDirection(v, here_at, probe, aim);
+					AddWall(v, aim, comfort, at);
+					if (comfort.norm() > 1e-9)
+						room_raw += comfort.normalized();
+					lost_all.push_back(v);
+				}
+				if (!lost.empty())
+					break;  // walls learned: make room rather than shrink
+			}
+			if (detour == kMaxDetours)
+				break;
+			if (walked)
+				continue;  // aim again from the new spot
+			if (lost_all.empty() || room_raw.norm() < 1e-9)
+				break;  // nothing to make room for
+
+			// Room move along the lost viewpoints' comfort directions (outside all walls): it only has to lose
+			// nothing. One that loses viewpoints gets its own wall; the second try goes the direction farthest
+			// from every failed step.
+			bool moved = false;
+			for (int attempt = 0; attempt < 2 && !moved; ++attempt)
+			{
+				Eigen::Vector3d want = room_raw;
+				if (attempt > 0)
+				{
+					want = FarthestFromWalls();
+					if (want.norm() < 1e-9)
+						break;
+				}
+				const Eigen::Vector3d room_d = AimWithinWalls(want.normalized());
+				if (room_d.norm() < 0.1)
+					break;
+				const Eigen::Vector3d room = room_d.normalized();
+				std::vector<int> room_lost;
+				for (double size : {params.initial_step, 0.5 * params.initial_step})
+				{
+					const ObjectPlacement cand = Shifted(at, room, size, params.bounds);
+					InnerSolution rp = QuickSolve(cand);
+					result.num_inner_solves += 1;
+					const std::vector<int> lost = LostViewpoints(here_at, rp);
+					if (lost.empty())
+						rp = WithPlannedTravel(cand, std::move(rp));
+					const bool gained = LostViewpoints(here_quick, rp).empty() && rp.num_reachable > here_quick.num_reachable;
+					const bool ok = lost.empty();
+					if (params.trace_line_search)
+						RCLCPP_INFO(
+							node->get_logger(),
+							"    room for%s (try %d) step=%.4f m dir (%+.2f, %+.2f, %+.2f) abs (%.4f, %.4f, %.4f): "
+							"reached %d, cost %.2f vs %.2f here  lost:%s -> %s",
+							ListText(lost_all).c_str(), attempt + 1, size, room(0), room(1), room(2), cand.x, cand.y,
+							cand.z, rp.num_reachable, rp.weighted_cost, here_quick.weighted_cost, ListText(lost).c_str(),
+							gained ? "gained, accepted" : ok ? "moved" : "rejected");
+					if (gained)
+						return Step{cand, std::move(rp), size};
+					if (ok)
+					{
+						at = cand;
+						here_at = std::move(rp);
+						moved = true;
+						break;
+					}
+					if (room_lost.empty())
+						room_lost = lost;
+				}
+				if (!moved && !room_lost.empty())
+					AddWall(room_lost.front(), room, Eigen::Vector3d::Zero(), at);
+			}
+			if (!moved)
+				break;
+		}
+	}
+	return std::nullopt;
+}
+
+// Best-of-N full solve at the accepted spot; the probe's own solve stands if it is better. Kept only if
+// it beats the current solution.
+std::optional<InnerSolution> BaseGradientSolver::FullSolveAt(const Step& step)
+{
+	ReseedRng(params.random_seed);
+	InnerSolution committed = BestOfNInnerSolve(
+		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, home_joints, home_tcp_local,
+		step.at, params, &step.sol.tour, params.max_solutions_per_candidate, order_lock);
+	result.num_inner_solves += std::max(1, params.gtsp_num_restart);
+	committed = WithPlannedTravel(step.at, std::move(committed));
+	if (Better(step.sol, committed))
+		committed = step.sol;
+	const bool keep = Better(committed, cur);
+	if (params.trace_line_search)
+		RCLCPP_INFO(
+			node->get_logger(), "    full solve: reached %d vs %d current, cost %.2f vs %.2f current -> %s",
+			committed.num_reachable, cur.num_reachable, committed.weighted_cost, cur.weighted_cost,
+			keep ? "accepted" : "rejected");
+	if (!keep)
+		return std::nullopt;  // quick probe looked better but the full solve isn't
+	return committed;
+}
+
+// Move to the accepted spot and log it. True when the descent has converged.
+bool BaseGradientSolver::TakeStep(Step step, InnerSolution committed, int outer, double gnorm, const Eigen::Vector3d& g)
+{
+	const double base_move = ToOffsetVec(step.at, base).norm();
+	const double rel_impr =
+		(cur.weighted_cost - committed.weighted_cost) / std::max(std::abs(cur.weighted_cost), 1e-9);
+	// Progress even if the cost rose: a viewpoint gained.
+	const bool gained = committed.num_reachable > cur.num_reachable;
+
+	base = step.at;
+	cur = std::move(committed);
+	Remember(cur);
+	base_history.push_back(base);
+	Record(base, cur);
+
+	RCLCPP_INFO(
+		node->get_logger(),
+		"restart %d/%d iter %d/%d: abs (%.4f, %.4f, %.4f) m  reachable %d/%d  |grad|=%.4f  step=%.4f m",
+		restart_idx + 1, std::max(1, params.descent_num_restart), outer + 1, params.max_outer_iterations, base.x,
+		base.y, base.z, cur.num_reachable, n, gnorm, step.size);
+	LogCostTerms(cur);
+	LogMissed(base, cur);
+	Publish(-g);
+
+	if (!gained && rel_impr < params.convergence_tolerance_cost)
+	{
+		if (++stall_count >= std::max(1, params.patience))
+		{
+			RCLCPP_INFO(
+				node->get_logger(), "  restart %d: %d iterations with <%.1e relative gain -- stopping early",
+				restart_idx + 1, stall_count, params.convergence_tolerance_cost);
+			return true;
+		}
+	}
+	else
+		stall_count = 0;
+
+	if (!gained && base_move < params.convergence_tolerance_offset && rel_impr < params.convergence_tolerance_cost)
+	{
+		RCLCPP_INFO(node->get_logger(), "  restart %d: placement settled -- converged", restart_idx + 1);
+		return true;
+	}
+	return false;
+}
+
+// Option "keep descending": refine wherever the descent ended.
+void BaseGradientSolver::RefineResult()
+{
+	if (params.refine_solves <= 0 || rr.sol.tour.empty())
+		return;
+	InnerSolution start = rr.sol;
+	if (use_real_cost && start.real_cost < 0.0)
+		start.real_cost = RealCost(rr.placement, start);
+	rr.sol = Refine(rr.placement, start, params.refine_solves);	 // best of start and the refine solves
+	rr.cost = CostAtFinalWeight(rr.sol);
+	rr.ok = rr.sol.all_reachable;
+	RCLCPP_INFO(
+		node->get_logger(),
+		"  restart %d: refined %d solves at final abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  real %.2f -> %.2f",
+		restart_idx + 1, params.refine_solves, rr.placement.x, rr.placement.y, rr.placement.z, start.travel_cost,
+		rr.sol.travel_cost, start.real_cost, rr.sol.real_cost);
+}
+
+// Elbow-swing smoothing at the result (all reached only): same order, smoothed poses, object nudged with them.
+// Kept only if the planned travel (else the L2 travel) drops, like refine.
+void BaseGradientSolver::ElbowSwingAtResult()
+{
+	if (!params.elbow_swing || !rr.ok || rr.sol.tour.empty())
+		return;
+	InnerSolution before = rr.sol;
+	if (use_real_cost && before.real_cost < 0.0)
+		before.real_cost = RealCost(rr.placement, before);
+	const ElbowSwingResult es = ElbowSwingSmooth(
+		state, jmg, tool0_link, planning_scene_monitor, object_pose_obj, tour_poses_obj, before.tour, before.joints,
+		home_joints, rr.placement, params);
+	// Rescore the smoothed tour; every viewpoint is still reached, so there are no missed-pose terms.
+	InnerSolution s = before;
+	s.joints = es.joints;
+	s.travel_cost =
+		TourWeightedCost(es.placement, s.tour, s.joints, tour_poses_obj, home_joints, home_tcp_local, params);
+	s.sum_manipulability = SumManipulability(state, jmg, tool0_link, s.joints, params.manipulability_limit_sharpness);
+	if (params_in.softmin_manipulability_weight > 0.0)
+	{
+		std::vector<double> ws;
+		for (const auto& q : s.joints)
+			ws.push_back(Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness));
+		s.softmin_manipulability = SoftMin(ws, params.softmin_tau);
+	}
+	s.real_cost = use_real_cost ? RealCost(es.placement, s) : -1.0;
+	s.weighted_cost = (params.travel_in_cost ? s.travel_cost : 0.0) -
+		params.manipulability_weight * s.sum_manipulability -
+		params.softmin_manipulability_weight * s.softmin_manipulability;
+	if (planned_travel)
+		s.weighted_cost += s.real_cost - (params.travel_in_cost ? s.travel_cost : 0.0);
+	const bool keep = use_real_cost ? s.real_cost < before.real_cost : s.travel_cost < before.travel_cost;
+	RCLCPP_INFO(
+		node->get_logger(),
+		"  restart %d: elbow swing %d iters: joint path %.2f -> %.2f rad, big moves %d -> %d, object moved %.4f m to abs (%.4f, %.4f, "
+		"%.4f) m, real %.2f -> %.2f%s  (rejected tries: ik %d, limits %d, collision %d, longer %d)",
+		restart_idx + 1, es.iters, es.travel_before, es.travel_after, es.big_moves_before, es.big_moves_after,
+		ToOffsetVec(es.placement, rr.placement).norm(), es.placement.x, es.placement.y, es.placement.z,
+		before.real_cost, s.real_cost, keep ? "  <-- kept" : "", es.fail_ik, es.fail_limits, es.fail_collision,
+		es.fail_longer);
+	if (keep)
+	{
+		rr.placement = es.placement;
+		rr.sol = std::move(s);
+	}
+	else
+		rr.sol = std::move(before);
+	rr.cost = CostAtFinalWeight(rr.sol);
+}
+
+// One full solve at `at` with this iteration's seeds and order lock.
+InnerSolution BaseGradientSolver::SolveAt(const ObjectPlacement& at, int max_solutions)
+{
+	ReseedRng(params.random_seed);
+	return InnerSolve(
+		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, home_joints, home_tcp_local, at,
+		params, &cur.tour, max_solutions, order_lock);
+}
+
+// Tracked probes: every viewpoint follows its current arm pose (one warm IK attempt, fixed order), so
+// nearby placements compare the same arm poses; the full solve at an accepted spot searches anew.
+InnerSolution BaseGradientSolver::QuickSolve(const ObjectPlacement& at)
+{
+	if (!params.track_probes)
+		return SolveAt(at, params.max_solutions_per_candidate);
+	BaseGradientParams track_params = params;
+	track_params.tracking = true;
+	ReseedRng(params.random_seed);
+	return InnerSolve(
+		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, home_joints, home_tcp_local, at,
+		track_params, &cur.tour, 1, &locked_order);
+}
+
+// Refine at a fixed placement: more full solves, each warm-started from the best so far, scored at the
+// final weight. With freeze_order the viewpoint order is kept and only the arm poses are re-picked.
+// Lowest real cost if enabled, else lowest L2 travel; never fewer viewpoints reached.
+InnerSolution BaseGradientSolver::Refine(const ObjectPlacement& at, InnerSolution best_sol, int num_solves)
+{
+	// Travel-only tours: no manipulability preference when picking arm poses.
+	const double saved_weight = params.manipulability_weight;
+	params.manipulability_weight = 0.0;
+	best_sol.weighted_cost = CostAtFinalWeight(best_sol);
+	if (use_real_cost && best_sol.real_cost < 0.0)
+		best_sol.real_cost = RealCost(at, best_sol);
+	for (int i = 0; i < num_solves && rclcpp::ok(); ++i)
+	{
+		const std::vector<std::vector<double>> refine_seeds =
+			SeedsFromSolution(best_sol, home_joints, static_cast<size_t>(n));
+		const std::vector<int>* refine_lock = params.lock_input_order ? &input_order
+			: params.freeze_order									  ? &best_sol.tour
+																	  : nullptr;
+		InnerSolution s = InnerSolve(
+			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, refine_seeds, home_joints,
+			home_tcp_local, at, params, &best_sol.tour, params.max_solutions_per_candidate, refine_lock);
+		result.num_inner_solves += 1;
+		if (s.num_reachable < best_sol.num_reachable)
+			continue;
+		if (use_real_cost)
+		{
+			s.real_cost = RealCost(at, s);
+			if (s.real_cost < best_sol.real_cost)
+				best_sol = std::move(s);
+		}
+		else if (s.travel_cost < best_sol.travel_cost)
+			best_sol = std::move(s);
+	}
+	params.manipulability_weight = saved_weight;
+	return best_sol;
+}
+
+// Real cost: plan every edge with OMPL and sum the joint motion along the planned paths. A failed edge
+// counts as its straight-line joint distance plus unreachable_penalty, so the cost stays finite.
+double BaseGradientSolver::RealCost(const ObjectPlacement& at, const InnerSolution& sol)
+{
+	SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
+	const std::vector<double> edges = PlanTourJointPathLengths(
+		node, robot_model, planning_scene_monitor, sol.joints, home_joints, group_name, params.real_cost_planning_time,
+		params.real_cost_attempts);
+	double total = 0.0;
+	for (size_t k = 0; k < sol.joints.size(); ++k)
+	{
+		if (k < edges.size() && edges[k] >= 0.0)
+			total += edges[k];
+		else
+			total += JointL2Distance(k == 0 ? home_joints : sol.joints[k - 1], sol.joints[k]) + params.unreachable_penalty;
+	}
+	return total;
+}
+
+// Plans the tour once and swaps the L2 travel in weighted_cost for the planned one.
+InnerSolution BaseGradientSolver::WithPlannedTravel(const ObjectPlacement& at, InnerSolution sol)
+{
+	if (!planned_travel || sol.real_cost >= 0.0)
+		return sol;
+	sol.real_cost = RealCost(at, sol);
+	sol.weighted_cost += sol.real_cost - (params.travel_in_cost ? sol.travel_cost : 0.0);
+	return sol;
+}
+
+double BaseGradientSolver::TravelTerm(const InnerSolution& sol) const
+{
+	return planned_travel ? sol.real_cost : params.travel_in_cost ? sol.travel_cost : 0.0;
+}
+
+// Cost at the final weight, so solutions found at different weights compare fairly.
+double BaseGradientSolver::CostAtFinalWeight(const InnerSolution& sol) const
+{
+	return TravelTerm(sol) - lambda_final * sol.sum_manipulability -
+		params_in.softmin_manipulability_weight * sol.softmin_manipulability +
+		params.unreachable_penalty * (sol.num_total - sol.num_reachable) + sol.miss_cost;
+}
+
+// Cost for comparisons: while either side misses a viewpoint, without planned travel -- it jumps when an
+// arm pose switches family and the gradient doesn't see it, so it mustn't veto reaching.
+double BaseGradientSolver::CompareCost(const InnerSolution& s, bool reach_phase) const
+{
+	if (!reach_phase || s.real_cost < 0.0)
+		return s.weighted_cost;
+	return s.weighted_cost - (s.real_cost - (params.travel_in_cost ? s.travel_cost : 0.0));
+}
+
+// More viewpoints reached wins; cost only breaks ties. Used for comparing and for accepting moves.
+bool BaseGradientSolver::Better(const InnerSolution& a, const InnerSolution& b) const
+{
+	const bool reach_phase = !a.all_reachable || !b.all_reachable;
+	return a.num_reachable > b.num_reachable ||
+		(a.num_reachable == b.num_reachable && CompareCost(a, reach_phase) < CompareCost(b, reach_phase));
+}
+
+// History entry, and the descent's best so far (most viewpoints reached, then cost at the final weight).
+void BaseGradientSolver::Record(const ObjectPlacement& at, const InnerSolution& s)
+{
+	InnerSolution sf = s;
+	sf.weighted_cost = CostAtFinalWeight(s);
+	result.history.push_back({static_cast<double>(restart_idx), at.x, at.y, at.z, sf.weighted_cost});
+	if (sf.num_reachable > rr.sol.num_reachable ||
+		(sf.num_reachable == rr.sol.num_reachable && sf.weighted_cost < rr.cost))
+	{
+		rr.placement = at;
+		rr.sol = sf;
+		rr.cost = sf.weighted_cost;
+		rr.ok = sf.all_reachable;
+	}
+}
+
+void BaseGradientSolver::Remember(const InnerSolution& s)
+{
+	for (size_t k = 0; k < s.tour.size(); ++k)
+	{
+		last_good[static_cast<size_t>(s.tour[k])] = s.joints[k];
+		last_closest[static_cast<size_t>(s.tour[k])].clear();
+	}
+	for (size_t m = 0; m < s.missed_vp.size(); ++m)
+		if (!s.missed_q[m].empty())
+			last_closest[static_cast<size_t>(s.missed_vp[m])] = s.missed_q[m];
+}
+
+// Locked axes (min == max) get no share of a step.
+Eigen::Vector3d BaseGradientSolver::LockAxes(Eigen::Vector3d v) const
+{
+	const BaseGradientBounds& bb = params.bounds;
+	if (bb.x_min == bb.x_max)
+		v(0) = 0.0;
+	if (bb.y_min == bb.y_max)
+		v(1) = 0.0;
+	if (bb.z_min == bb.z_max)
+		v(2) = 0.0;
+	return v;
+}
+
+// Viewpoint v is reached in `from_sol` but missed at `probe`: the direction whose opposite loses it -- its
+// manipulability slope (reach edge) or, failing that, its gap slope at the probe. Zero if neither opposes
+// `step_dir`.
+Eigen::Vector3d BaseGradientSolver::LossDirection(
+	int v, const InnerSolution& from_sol, const InnerSolution& probe, const Eigen::Vector3d& step_dir)
+{
+	const Eigen::Vector3d none = Eigen::Vector3d::Zero();
+	const auto it = std::find(from_sol.tour.begin(), from_sol.tour.end(), v);
+	if (it == from_sol.tour.end())
+		return none;  // already missed where the step starts
+	Eigen::Vector3d h = LockAxes(ManipulabilityOffsetGradient(
+		state, jmg, tool0_link, from_sol.joints[static_cast<size_t>(it - from_sol.tour.begin())],
+		params.jacobian_damping, params.manipulability_limit_sharpness));
+	if (step_dir.dot(h) < 0.0)
+		return h;
+	// Not the reach edge: use the direction that shrinks its gap at the probe instead.
+	const size_t m =
+		static_cast<size_t>(std::find(probe.missed_vp.begin(), probe.missed_vp.end(), v) - probe.missed_vp.begin());
+	if (m >= probe.missed_q.size() || probe.missed_q[m].empty())
+		return none;  // no collision-free closest pose: no gap slope
+	const Eigen::Matrix<double, 6, 1>& pose_error = probe.missed_gap[m];
+	const double gap = WeightedPoseGap(pose_error, params.rot_metric_scale);
+	if (gap < 1e-9)
+		return none;
+	Eigen::Matrix<double, 6, 1> weighted_error = pose_error;
+	weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
+	h = -LockAxes(PlacementJacobian().transpose() * weighted_error / gap);
+	return step_dir.dot(h) < 0.0 ? h : none;  // the step doesn't grow its gap either
+}
+
+// A wall blocks steps within this angle of the step that failed.
+const double kWallHalfAngle = M_PI / 4.0;
+
+// The direction nearest to `a` (unit) outside every wall's cone, even one turned far from `a`; zero only if
+// it can't get out.
+Eigen::Vector3d BaseGradientSolver::AimWithinWalls(const Eigen::Vector3d& a) const
+{
+	const Eigen::Vector3d none = Eigen::Vector3d::Zero();
+	if (walls.empty() || a.norm() < 1e-9)
+		return a;
+	// Push the direction out of each cone it is in, onto the cone's edge (just past it), until it is in none.
+	const double edge = kWallHalfAngle + 0.01;
+	Eigen::Vector3d d = a.normalized();
+	for (int it = 0; it < 20; ++it)
+	{
+		bool moved = false;
+		for (const Wall& w : walls)
+		{
+			if (d.dot(w.n) <= std::cos(kWallHalfAngle))
+				continue;
+			Eigen::Vector3d side = d - d.dot(w.n) * w.n;
+			if (side.norm() < 1e-9)
+				side = w.n.unitOrthogonal();
+			const Eigen::Vector3d next = LockAxes(std::cos(edge) * w.n + std::sin(edge) * side.normalized());
+			if (next.norm() < 1e-9)
+				return none;
+			d = next.normalized();
+			moved = true;
+		}
+		if (!moved)
+			return d;
+	}
+	return none;  // the cones cover every nearby direction
+}
+
+// The direction farthest from every failed step: maximizes the smallest angle to any wall's axis. Ascent on
+// that smallest angle from each wall's opposite; zero if no walls.
+Eigen::Vector3d BaseGradientSolver::FarthestFromWalls() const
+{
+	auto nearest_wall = [&](const Eigen::Vector3d& d, double* cos_out) {
+		const Wall* nearest = nullptr;
+		double c = -2.0;
+		for (const Wall& w : walls)
+			if (d.dot(w.n) > c)
+			{
+				c = d.dot(w.n);
+				nearest = &w;
+			}
+		*cos_out = c;
+		return nearest;
+	};
+	Eigen::Vector3d best = Eigen::Vector3d::Zero();
+	double best_cos = 2.0;	// cosine to the nearest axis; smaller is farther
+	for (const Wall& start : walls)
+	{
+		Eigen::Vector3d d = LockAxes(-start.n);
+		if (d.norm() < 1e-9)
+			continue;
+		d.normalize();
+		for (int it = 0; it < 100; ++it)
+		{
+			double c;
+			const Wall* nearest = nearest_wall(d, &c);
+			// Turn away from the nearest axis, within the sphere.
+			const Eigen::Vector3d away = -(nearest->n - nearest->n.dot(d) * d);
+			if (away.norm() < 1e-9)
+				break;
+			const Eigen::Vector3d next = LockAxes(d + 0.05 * away.normalized());
+			if (next.norm() < 1e-9)
+				break;
+			d = next.normalized();
+		}
+		double c;
+		nearest_wall(d, &c);
+		if (c < best_cos)
+		{
+			best_cos = c;
+			best = d;
+		}
+	}
+	return best;
+}
+
+// Wall for viewpoint v lost by a step along `step_dir` from `at`; `room` is its comfort direction.
+bool BaseGradientSolver::AddWall(
+	int v, const Eigen::Vector3d& step_dir, const Eigen::Vector3d& room, const ObjectPlacement& at)
+{
+	if (step_dir.norm() < 1e-9)
+		return false;
+	const Eigen::Vector3d dir = step_dir.normalized();
+	for (const Wall& w : walls)
+		if (w.n.dot(dir) > std::cos(0.1))
+			return false;  // this step's cone is already there (one cone per failed step)
+	walls.push_back({dir, room, at, v});
+	if (params.trace_line_search)
+		RCLCPP_INFO(
+			node->get_logger(), "    wall: vp %d, blocked dir (%+.2f, %+.2f, %+.2f), room (%+.2f, %+.2f, %+.2f), %zu walls",
+			v, dir(0), dir(1), dir(2), room(0), room(1), room(2), walls.size());
+	return true;
+}
+
+// Cost terms before and after weighting, one per line, fixed columns.
+void BaseGradientSolver::LogCostTerms(const InnerSolution& sol)
+{
+	const double travel_weight = (planned_travel || params.travel_in_cost) ? 1.0 : 0.0;
+	const double travel_raw = planned_travel ? sol.real_cost : sol.travel_cost;
+	auto row = [&](const char* name, double raw, double weight) {
+		RCLCPP_INFO(node->get_logger(), "    %-16s %12.4f %10.1f %12.2f", name, raw, weight, raw * weight);
+	};
+	RCLCPP_INFO(node->get_logger(), "    %-16s %12s %10s %12s", "term", "raw", "weight", "weighted");
+	row(planned_travel ? "planned travel" : "L2 travel", travel_raw, travel_weight);
+	row("manipulability", sol.sum_manipulability, -params.manipulability_weight);
+	row("soft-min manip", sol.softmin_manipulability, -params.softmin_manipulability_weight);
+	row("missed count", static_cast<double>(sol.num_total - sol.num_reachable), params.unreachable_penalty);
+	row("miss gap (m)", sol.gap_sum, params.miss_gap_weight);
+	RCLCPP_INFO(node->get_logger(), "    %-16s %12s %10s %12.2f", "total cost", "", "", sol.weighted_cost);
+}
+
+// Per missed viewpoint, what blocks it at its closest pose: gap, joints near a limit, closest pairs.
+void BaseGradientSolver::LogMissed(const ObjectPlacement& at, const InnerSolution& sol)
+{
+	auto closest = [](const collision_detection::DistanceResult& r) {
+		const auto& d = r.minimum_distance;
+		if (d.distance > 1e3)
+			return std::string("none within 1 m");
+		char buf[160];
+		std::snprintf(
+			buf, sizeof(buf), "%s - %s %.1f mm", d.link_names[0].c_str(), d.link_names[1].c_str(), d.distance * 1000.0);
+		return std::string(buf);
+	};
+	SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
+	for (size_t m = 0; m < sol.missed_vp.size(); ++m)
+	{
+		const int v = sol.missed_vp[m];
+		if (m >= sol.missed_q.size() || sol.missed_q[m].empty())
+		{
+			RCLCPP_INFO(node->get_logger(), "    missed vp %2d: no collision-free closest pose", v);
+			continue;
+		}
+		const std::vector<double>& q = sol.missed_q[m];
+		const Eigen::Matrix<double, 6, 1>& e = sol.missed_gap[m];
+		std::string limits;
+		for (size_t k = 0; k < q.size(); ++k)
+		{
+			const moveit::core::VariableBounds& b = robot_model->getVariableBounds(jmg->getVariableNames()[k]);
+			const double range = b.max_position_ - b.min_position_;
+			if (!b.position_bounded_ || range <= 0.0)
+				continue;
+			if (q[k] - b.min_position_ < 0.02 * range)
+				limits += " j" + std::to_string(k + 1) + "@min";
+			else if (b.max_position_ - q[k] < 0.02 * range)
+				limits += " j" + std::to_string(k + 1) + "@max";
+		}
+		state.setJointGroupPositions(jmg, q);
+		state.update();
+		collision_detection::DistanceRequest req = MakeClosePairRequest(state, jmg, 1.0);
+		collision_detection::DistanceResult self_res, world_res;
+		{
+			planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
+			req.acm = &locked_scene->getAllowedCollisionMatrix();
+			req.enableGroup(locked_scene->getRobotModel());
+			locked_scene->getCollisionEnv()->distanceSelf(req, self_res, state);
+			locked_scene->getCollisionEnv()->distanceRobot(req, world_res, state);
+		}
+		RCLCPP_INFO(
+			node->get_logger(), "    missed vp %2d: gap %.1f mm %.1f deg | near limit:%s | arm-object %s | arm-arm %s", v,
+			e.head<3>().norm() * 1000.0, e.tail<3>().norm() * 180.0 / M_PI, limits.empty() ? " none" : limits.c_str(),
+			closest(world_res).c_str(), closest(self_res).c_str());
+	}
+}
+
+void BaseGradientSolver::Publish(const Eigen::Vector3d& neg_grad)
+{
+	PublishProgress(
+		node, params, object_pose_obj, tour_poses_obj, base_history, neg_grad, base, state, jmg, cur);
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------------------------
 
@@ -1830,987 +2930,43 @@ BaseGradientResult SolveBaseGradient(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
 	const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const std::vector<double>& start_reference_joints,
-	const BaseGradientParams& params_in)
+	const BaseGradientParams& params)
 {
-	// Mutable copy: manipulability_after_reach switches the comfort weights off while viewpoints are missed.
-	BaseGradientParams params = params_in;
-	const double lambda_final = params_in.manipulability_weight;
-	ReseedRng(params.random_seed);
-	// Object and viewpoints relative to the object's position; MakePlacement puts them at an absolute one.
-	const Eigen::Isometry3d object_pose_obj = MakeIsometry(Eigen::Vector3d::Zero(), object_rotation_nominal);
-	std::vector<Eigen::Isometry3d> tour_poses_obj = tour_tcp_poses_nominal;
-	for (Eigen::Isometry3d& t : tour_poses_obj)
-		t.translation() -= object_translation_nominal;
-	const int n = static_cast<int>(tour_poses_obj.size());
-	std::vector<int> input_order(static_cast<size_t>(n));  // viewpoints in the order given (lock_input_order)
-	std::iota(input_order.begin(), input_order.end(), 0);
+	BaseGradientSolver solver(
+		node, robot_model, planning_scene_monitor, group_name, object_translation_nominal, object_rotation_nominal,
+		tour_tcp_poses_nominal, start_reference_joints, params);
+	const int n = static_cast<int>(tour_tcp_poses_nominal.size());
 
-	moveit::core::RobotState state(robot_model);
-	state.setToDefaultValues();
-	const moveit::core::JointModelGroup* jmg = state.getJointModelGroup(group_name);
-	const moveit::core::LinkModel* tool0_link = robot_model->getLinkModel("tool0");
-
-	state.setJointGroupPositions(jmg, start_reference_joints);
-	state.update();
-	Eigen::Vector3d home_tcp_local = state.getGlobalLinkTransform("tool0").translation();
-
-	BaseGradientResult result;
-	result.num_total = n;
-
-	const std::vector<double>& fallback_seed = start_reference_joints;
-
-	auto joint_path_len = [&](const InnerSolution& s) {
-		double len = 0.0;
-		const std::vector<double>* prev = &start_reference_joints;
-		for (const auto& q : s.joints)
-		{
-			len += JointL2Distance(*prev, q);
-			prev = &q;
-		}
-		return len;
-	};
-
-	struct RestartResult
-	{
-		ObjectPlacement placement;
-		InnerSolution sol;
-		double cost = std::numeric_limits<double>::max();
-		bool ok = false;  // fully reachable
-	};
-
-	// One full gradient descent from `base`, warm-started internally but starting IK/GTSP cold.
-	// warm: IK seeds from an earlier solution (restarts), or null to start from the home config.
-	auto run_descent = [&](ObjectPlacement base, int restart_idx, const InnerSolution* warm) -> RestartResult {
-		base = ProjectToBounds(base, params.bounds);
-		params.random_seed = params_in.random_seed + restart_idx;  // each restart draws its own IK luck
-		params.manipulability_weight = lambda_final;
-		// manipulability_after_reach: comfort terms (lambda, soft-min) off while any viewpoint is missed, so the
-		// step follows the miss gaps instead of being outvoted; back on once everything is reached.
-		bool manipulability_on = !params.manipulability_after_reach;
-		auto comfort_off = [&]() {
-			params.manipulability_weight = 0.0;
-			params.softmin_manipulability_weight = 0.0;
-		};
-		if (!manipulability_on)
-			comfort_off();
-		std::vector<ObjectPlacement> base_history{base};
-		std::vector<std::vector<double>> seeds =
-			warm ? SeedsFromSolution(*warm, fallback_seed, static_cast<size_t>(n))
-				 : std::vector<std::vector<double>>(static_cast<size_t>(n), fallback_seed);
-		int stall_count = 0;
-		std::vector<Wall> walls;  // room-then-reach: remembered across iterations while nearby
-		// Each viewpoint's joints from the last time it was reached: seeds its closest-IK gap once missed.
-		std::vector<std::vector<double>> last_good(static_cast<size_t>(n));
-		// Each missed viewpoint's last closest-IK pose: seeds the next closest IK so the gap stays continuous.
-		std::vector<std::vector<double>> last_closest(static_cast<size_t>(n));
-		auto remember = [&](const InnerSolution& s) {
-			for (size_t k = 0; k < s.tour.size(); ++k)
-			{
-				last_good[static_cast<size_t>(s.tour[k])] = s.joints[k];
-				last_closest[static_cast<size_t>(s.tour[k])].clear();
-			}
-			for (size_t m = 0; m < s.missed_vp.size(); ++m)
-				if (!s.missed_q[m].empty())
-					last_closest[static_cast<size_t>(s.missed_vp[m])] = s.missed_q[m];
-		};
-
-		// Real cost: plan every edge with OMPL and sum the joint motion along the planned paths. A failed edge
-		// counts as its straight-line joint distance plus unreachable_penalty, so the cost stays finite.
-		const bool use_real_cost = params.real_cost_planning_time > 0.0;
-		auto real_cost_of = [&](const ObjectPlacement& at, const InnerSolution& sol) {
-			SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
-			const std::vector<double> edges = PlanTourJointPathLengths(
-				node, robot_model, planning_scene_monitor, sol.joints, start_reference_joints, group_name,
-				params.real_cost_planning_time, params.real_cost_attempts);
-			double total = 0.0;
-			for (size_t k = 0; k < sol.joints.size(); ++k)
-			{
-				if (k < edges.size() && edges[k] >= 0.0)
-					total += edges[k];
-				else
-					total += JointL2Distance(k == 0 ? start_reference_joints : sol.joints[k - 1], sol.joints[k]) +
-						params.unreachable_penalty;
-			}
-			return total;
-		};
-		// planned_travel_in_cost: the travel part of the cost is the planned joint travel instead of the L2 estimate.
-		const bool planned_travel = params.planned_travel_in_cost && use_real_cost;
-		auto travel_term = [&](const InnerSolution& sol) {
-			return planned_travel ? sol.real_cost : params.travel_in_cost ? sol.travel_cost : 0.0;
-		};
-		// Plans the tour once and swaps the L2 travel in weighted_cost for the planned one.
-		auto add_planned_travel = [&](const ObjectPlacement& at, InnerSolution& sol) {
-			if (!planned_travel || sol.real_cost >= 0.0)
-				return;
-			sol.real_cost = real_cost_of(at, sol);
-			sol.weighted_cost += sol.real_cost - (params.travel_in_cost ? sol.travel_cost : 0.0);
-		};
-
-		RestartResult rr;
-		rr.placement = base;
-
-		auto record = [&](const ObjectPlacement& b, const InnerSolution& s) {
-			// Re-score at the full weight so points found with comfort off compare fairly.
-			InnerSolution sf = s;
-			sf.weighted_cost = travel_term(s) - lambda_final * s.sum_manipulability -
-				params_in.softmin_manipulability_weight * s.softmin_manipulability +
-				params.unreachable_penalty * (s.num_total - s.num_reachable) + s.miss_cost;
-			result.history.push_back(
-				{static_cast<double>(restart_idx), b.x, b.y, b.z, sf.weighted_cost});
-			// Best seen: most viewpoints reached, then cost.
-			if (sf.num_reachable > rr.sol.num_reachable ||
-				(sf.num_reachable == rr.sol.num_reachable && sf.weighted_cost < rr.cost))
-			{
-				rr.placement = b;
-				rr.sol = sf;
-				rr.cost = sf.weighted_cost;
-				rr.ok = sf.all_reachable;
-			}
-		};
-
-		ReseedRng(params.random_seed);
-		InnerSolution cur = BestOfNInnerSolve(
-			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds,
-			start_reference_joints, home_tcp_local, base, params, warm ? &warm->tour : nullptr,
-			params.max_solutions_per_candidate, params.lock_input_order ? &input_order : nullptr);
-		result.num_inner_solves += std::max(1, params.gtsp_num_restart);
-		add_planned_travel(base, cur);
-
-		if (cur.tour.empty())
-		{
-			RCLCPP_WARN(node->get_logger(), "restart %d: no tour pose reachable at the start placement", restart_idx + 1);
-			return rr;
-		}
-
-		record(base, cur);
-		remember(cur);
-		PublishProgress(
-			node, params, object_pose_obj, tour_poses_obj, base_history, Eigen::Vector3d::Zero(), base,
-			state, jmg, cur);
-		// Cost terms before and after weighting, one per line, fixed columns.
-		auto log_cost_terms = [&](const InnerSolution& sol) {
-			const double travel_weight = (planned_travel || params.travel_in_cost) ? 1.0 : 0.0;
-			const double travel_raw = planned_travel ? sol.real_cost : sol.travel_cost;
-			auto row = [&](const char* name, double raw, double weight) {
-				RCLCPP_INFO(node->get_logger(), "    %-16s %12.4f %10.1f %12.2f", name, raw, weight, raw * weight);
-			};
-			RCLCPP_INFO(node->get_logger(), "    %-16s %12s %10s %12s", "term", "raw", "weight", "weighted");
-			row(planned_travel ? "planned travel" : "L2 travel", travel_raw, travel_weight);
-			row("manipulability", sol.sum_manipulability, -params.manipulability_weight);
-			row("soft-min manip", sol.softmin_manipulability, -params.softmin_manipulability_weight);
-			row("missed count", static_cast<double>(sol.num_total - sol.num_reachable), params.unreachable_penalty);
-			row("miss gap (m)", sol.gap_sum, params.miss_gap_weight);
-			RCLCPP_INFO(node->get_logger(), "    %-16s %12s %10s %12.2f", "total cost", "", "", sol.weighted_cost);
-		};
-		// Per missed viewpoint, what blocks it at its closest pose: gap, joints near a limit, closest pairs.
-		auto log_missed = [&](const ObjectPlacement& at, const InnerSolution& sol) {
-			SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
-			for (size_t m = 0; m < sol.missed_vp.size(); ++m)
-			{
-				const int v = sol.missed_vp[m];
-				if (m >= sol.missed_q.size() || sol.missed_q[m].empty())
-				{
-					RCLCPP_INFO(node->get_logger(), "    missed vp %2d: no collision-free closest pose", v);
-					continue;
-				}
-				const std::vector<double>& q = sol.missed_q[m];
-				const Eigen::Matrix<double, 6, 1>& e = sol.missed_gap[m];
-				std::string limits;
-				for (size_t k = 0; k < q.size(); ++k)
-				{
-					const moveit::core::VariableBounds& b = robot_model->getVariableBounds(jmg->getVariableNames()[k]);
-					const double range = b.max_position_ - b.min_position_;
-					if (!b.position_bounded_ || range <= 0.0)
-						continue;
-					if (q[k] - b.min_position_ < 0.02 * range)
-						limits += " j" + std::to_string(k + 1) + "@min";
-					else if (b.max_position_ - q[k] < 0.02 * range)
-						limits += " j" + std::to_string(k + 1) + "@max";
-				}
-				state.setJointGroupPositions(jmg, q);
-				state.update();
-				collision_detection::DistanceRequest req = MakeClosePairRequest(state, jmg, 1.0);
-				collision_detection::DistanceResult self_res, world_res;
-				{
-					planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
-					req.acm = &locked_scene->getAllowedCollisionMatrix();
-					req.enableGroup(locked_scene->getRobotModel());
-					locked_scene->getCollisionEnv()->distanceSelf(req, self_res, state);
-					locked_scene->getCollisionEnv()->distanceRobot(req, world_res, state);
-				}
-				auto closest = [](const collision_detection::DistanceResult& r) {
-					const auto& d = r.minimum_distance;
-					if (d.distance > 1e3)
-						return std::string("none within 1 m");
-					char buf[160];
-					std::snprintf(buf, sizeof(buf), "%s - %s %.1f mm", d.link_names[0].c_str(), d.link_names[1].c_str(),
-								  d.distance * 1000.0);
-					return std::string(buf);
-				};
-				RCLCPP_INFO(
-					node->get_logger(),
-					"    missed vp %2d: gap %.1f mm %.1f deg | near limit:%s | arm-object %s | arm-arm %s", v,
-					e.head<3>().norm() * 1000.0, e.tail<3>().norm() * 180.0 / M_PI, limits.empty() ? " none" : limits.c_str(),
-					closest(world_res).c_str(), closest(self_res).c_str());
-			}
-		};
-		RCLCPP_INFO(
-			node->get_logger(),
-			"restart %d/%d iter 0: abs (%.4f, %.4f, %.4f) m  reachable %d/%d",
-			restart_idx + 1, std::max(1, params.descent_num_restart), base.x, base.y, base.z, cur.num_reachable, n);
-		log_cost_terms(cur);
-		log_missed(base, cur);
-
-		// Cost at the final weight, so solutions found at different weights compare fairly.
-		auto cost_at_final_weight = [&](const InnerSolution& sol) {
-			return travel_term(sol) - lambda_final * sol.sum_manipulability -
-				params_in.softmin_manipulability_weight * sol.softmin_manipulability +
-				params.unreachable_penalty * (sol.num_total - sol.num_reachable) + sol.miss_cost;
-		};
-		// Refine at a fixed placement: more full solves, each warm-started from the best so far, scored at the
-		// final weight. With freeze_order the viewpoint order is kept and only the arm poses are re-picked.
-		// Lowest real cost if enabled, else lowest L2 travel; never fewer viewpoints reached.
-		auto refine = [&](const ObjectPlacement& at, InnerSolution best_sol, int num_solves) {
-			// Travel-only tours: no manipulability preference when picking arm poses.
-			const double saved_weight = params.manipulability_weight;
-			params.manipulability_weight = 0.0;
-			best_sol.weighted_cost = cost_at_final_weight(best_sol);
-			if (use_real_cost && best_sol.real_cost < 0.0)
-				best_sol.real_cost = real_cost_of(at, best_sol);
-			for (int i = 0; i < num_solves && rclcpp::ok(); ++i)
-			{
-				const std::vector<std::vector<double>> refine_seeds =
-					SeedsFromSolution(best_sol, fallback_seed, static_cast<size_t>(n));
-				const std::vector<int>* order_lock = params.lock_input_order ? &input_order
-					: params.freeze_order										   ? &best_sol.tour
-																				   : nullptr;
-				InnerSolution s = InnerSolve(
-					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, refine_seeds,
-					start_reference_joints, home_tcp_local, at, params, &best_sol.tour,
-					params.max_solutions_per_candidate, order_lock);
-				result.num_inner_solves += 1;
-				if (s.num_reachable < best_sol.num_reachable)
-					continue;
-				if (use_real_cost)
-				{
-					s.real_cost = real_cost_of(at, s);
-					if (s.real_cost < best_sol.real_cost)
-						best_sol = std::move(s);
-				}
-				else if (s.travel_cost < best_sol.travel_cost)
-					best_sol = std::move(s);
-			}
-			params.manipulability_weight = saved_weight;
-			return best_sol;
-		};
-
-		bool refined_at_reach = false;
-		for (int outer = 0; outer < params.max_outer_iterations && rclcpp::ok() && !cur.tour.empty(); ++outer)
-		{
-			// Option "stay at A": the first time everything is reached, log what refining right here would give.
-			if (params.refine_at_reach > 0 && cur.all_reachable && !refined_at_reach)
-			{
-				refined_at_reach = true;
-				InnerSolution start = cur;
-				if (use_real_cost && start.real_cost < 0.0)
-					start.real_cost = real_cost_of(base, start);
-				const InnerSolution at_reach = refine(base, start, params.refine_at_reach);
-				RCLCPP_INFO(
-					node->get_logger(),
-					"  restart %d: refined %d solves at first all-reached abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  "
-					"real %.2f -> %.2f",
-					restart_idx + 1, params.refine_at_reach, base.x, base.y, base.z, start.travel_cost,
-					at_reach.travel_cost, start.real_cost, at_reach.real_cost);
-			}
-			if (params.stop_when_all_reached && cur.all_reachable)
-			{
-				RCLCPP_INFO(node->get_logger(), "  restart %d: all viewpoints reached -- stopping", restart_idx + 1);
-				break;
-			}
-			if (outer > 0)
-			{
-				if (params.manipulability_after_reach && manipulability_on && !cur.all_reachable)
-				{
-					manipulability_on = false;
-					comfort_off();
-					RCLCPP_INFO(node->get_logger(), "  restart %d: viewpoint missed -- comfort terms off", restart_idx + 1);
-				}
-				else if (!manipulability_on && cur.all_reachable)
-				{
-					manipulability_on = true;
-					params.manipulability_weight = lambda_final;
-					params.softmin_manipulability_weight = params_in.softmin_manipulability_weight;
-					RCLCPP_INFO(node->get_logger(), "  restart %d: all reached -- comfort terms on", restart_idx + 1);
-				}
-				cur.weighted_cost = travel_term(cur) - params.manipulability_weight * cur.sum_manipulability -
-					params.softmin_manipulability_weight * cur.softmin_manipulability +
-					params.unreachable_penalty * (cur.num_total - cur.num_reachable) + cur.miss_cost;
-			}
-			Eigen::Vector3d g = AnalyticGradient(
-				state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, start_reference_joints,
-				home_tcp_local, base, params, cur.missed_vp, cur.missed_gap, cur.missed_q);
-
-			if (params.trace_line_search)
-			{
-				// Each term's own descent direction (translation part of -gradient) and size.
-				auto part = [&](bool manip, double gap_weight) {
-					BaseGradientParams p = params;
-					p.travel_gradient = false;
-					p.manipulability_gradient = manip;
-					p.miss_gap_weight = gap_weight;
-					return AnalyticGradient(
-						state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, start_reference_joints,
-						home_tcp_local, base, p, cur.missed_vp, cur.missed_gap, cur.missed_q);
-				};
-				auto describe = [](const Eigen::Vector3d& gp) {
-					const Eigen::Vector3d d = -gp;
-					const double nrm = d.norm();
-					const Eigen::Vector3d u = nrm > 1e-9 ? Eigen::Vector3d(d / nrm) : Eigen::Vector3d::Zero();
-					char buf[96];
-					std::snprintf(buf, sizeof(buf), "|%.1f| dir (%+.2f, %+.2f, %+.2f)", nrm, u.x(), u.y(), u.z());
-					return std::string(buf);
-				};
-				RCLCPP_INFO(
-					node->get_logger(), "    directions: manip %s  gap %s  total %s",
-					describe(part(params.manipulability_gradient, 0.0)).c_str(),
-					describe(part(false, params.miss_gap_weight)).c_str(), describe(g).c_str());
-			}
-			if (params.fd_gradient_check)
-			{
-				Eigen::Vector3d g_fd = FiniteDifferenceGradient(
-					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, cur.tour,
-					cur.joints, start_reference_joints, home_tcp_local, base, params);
-				RCLCPP_INFO(
-					node->get_logger(),
-					"    grad check [x y z]  analytic (%+.4f %+.4f %+.4f)  central-diff (%+.4f %+.4f %+.4f)", g(0), g(1),
-					g(2), g_fd(0), g_fd(1), g_fd(2));
-			}
-
-			// Locked axes (min == max) get no share of the step.
-			const BaseGradientBounds& bb = params.bounds;
-			auto to_u = [&](Eigen::Vector3d v) {
-				if (bb.x_min == bb.x_max)
-					v(0) = 0.0;
-				if (bb.y_min == bb.y_max)
-					v(1) = 0.0;
-				if (bb.z_min == bb.z_max)
-					v(2) = 0.0;
-				return v;
-			};
-			const Eigen::Vector3d g_u = to_u(g);
-			double gnorm = g_u.norm();
-			if (gnorm < 1e-6)
-			{
-				RCLCPP_INFO(node->get_logger(), "  restart %d: gradient ~ 0 -- converged", restart_idx + 1);
-				PublishProgress(
-					node, params, object_pose_obj, tour_poses_obj, base_history,
-					Eigen::Vector3d(-g), base, state, jmg, cur);
-				break;
-			}
-
-			// Backtracking line search. Each probe is one solve, compared with one solve at the current point
-			// (same effort); the accepted offset gets a best-of-N solve, kept only if it beats the current one.
-			Eigen::Vector3d dir_u = -g_u / gnorm;
-			seeds = SeedsFromSolution(cur, fallback_seed, static_cast<size_t>(n));
-			for (int v : cur.missed_vp)
-			{
-				const size_t vi = static_cast<size_t>(v);
-				if (!last_closest[vi].empty())
-					seeds[vi] = last_closest[vi];
-				else if (!last_good[vi].empty())
-					seeds[vi] = last_good[vi];
-			}
-			// Locked viewpoint order: the input order from the start (lock_input_order), or the current order
-			// once everything is reached (freeze_order). Only arm poses are re-picked; null = GTSP reorders.
-			const std::vector<int> locked_order = cur.tour;
-			const std::vector<int>* order_lock = params.lock_input_order ? &input_order
-				: (params.freeze_order && cur.all_reachable)			   ? &locked_order
-																		   : nullptr;
-			auto solve_at = [&](const ObjectPlacement& at, int max_solutions) {
-				ReseedRng(params.random_seed);
-				return InnerSolve(
-					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, start_reference_joints,
-					home_tcp_local, at, params, &cur.tour, max_solutions, order_lock);
-			};
-			// Tracked probes: every viewpoint follows its current arm pose (one warm IK attempt, fixed order), so
-			// nearby placements compare the same arm poses; the full solve at an accepted spot searches anew.
-			BaseGradientParams track_params = params;
-			track_params.tracking = true;
-			auto quick_solve = [&](const ObjectPlacement& at) {
-				if (!params.track_probes)
-					return solve_at(at, params.max_solutions_per_candidate);
-				ReseedRng(params.random_seed);
-				return InnerSolve(
-					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, start_reference_joints,
-					home_tcp_local, at, track_params, &cur.tour, 1, &locked_order);
-			};
-			InnerSolution here_quick = quick_solve(base);
-			add_planned_travel(base, here_quick);
-			result.num_inner_solves += 1;
-			double step = params.initial_step;
-			bool accepted = false;
-			ObjectPlacement b_new = base;
-			InnerSolution next;
-			// Cost for comparisons: while either side misses a viewpoint, without planned travel -- it jumps when an
-			// arm pose switches family and the gradient doesn't see it, so it mustn't veto reaching. Reaching first.
-			auto cmp_cost = [&](const InnerSolution& s, bool reach_phase) {
-				if (!reach_phase || s.real_cost < 0.0)
-					return s.weighted_cost;
-				return s.weighted_cost - (s.real_cost - (params.travel_in_cost ? s.travel_cost : 0.0));
-			};
-			auto reaching = [](const InnerSolution& a, const InnerSolution& b) {
-				return !a.all_reachable || !b.all_reachable;
-			};
-			// More viewpoints reached wins; cost only breaks ties. Used for comparing and for accepting moves.
-			auto better = [&](const InnerSolution& a, const InnerSolution& b) {
-				const bool r = reaching(a, b);
-				return a.num_reachable > b.num_reachable ||
-					(a.num_reachable == b.num_reachable && cmp_cost(a, r) < cmp_cost(b, r));
-			};
-			// Viewpoint v is reached here but missed at cand: the direction (step metric) whose opposite loses it --
-			// its manipulability slope (reach edge) or, failing that, its gap slope at cand. Zero if neither fits step_dir.
-			// `from_sol`: the solution where the step starts (v is reached there).
-			auto loss_direction = [&](int v, const InnerSolution& from_sol, const InnerSolution& probe,
-									  const Eigen::Vector3d& step_dir) {
-				const Eigen::Vector3d none = Eigen::Vector3d::Zero();
-				const auto it = std::find(from_sol.tour.begin(), from_sol.tour.end(), v);
-				if (it == from_sol.tour.end())
-					return none;  // already missed where the step starts
-				Eigen::Vector3d h = to_u(ManipulabilityOffsetGradient(
-					state, jmg, tool0_link, from_sol.joints[static_cast<size_t>(it - from_sol.tour.begin())],
-					params.jacobian_damping, params.manipulability_limit_sharpness));
-				if (step_dir.dot(h) < 0.0)
-					return h;
-				// Not the reach edge: use the direction that shrinks its gap at the probe instead.
-				const size_t m = static_cast<size_t>(
-					std::find(probe.missed_vp.begin(), probe.missed_vp.end(), v) - probe.missed_vp.begin());
-				if (m >= probe.missed_q.size() || probe.missed_q[m].empty())
-					return none;  // no collision-free closest pose: no gap slope
-				const Eigen::Matrix<double, 6, 1>& pose_error = probe.missed_gap[m];
-				const double gap = WeightedPoseGap(pose_error, params.rot_metric_scale);
-				if (gap < 1e-9)
-					return none;
-				Eigen::Matrix<double, 6, 1> weighted_error = pose_error;
-				weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-				h = -to_u(PlacementJacobian().transpose() * weighted_error / gap);
-				return step_dir.dot(h) < 0.0 ? h : none;  // the step doesn't grow its gap either
-			};
-			// Room-then-reach walls: forget walls learned far away; aim_within_walls gives the direction nearest to `a`
-			// (unit) outside every wall's cone, even one turned far from `a` (zero only if it can't get out).
-			const double kWallRadius = 0.1;  // step metric (m): walls learned farther away no longer apply
-			auto u_dist = [&](const ObjectPlacement& a, const ObjectPlacement& b) {
-				return ToOffsetVec(a, b).norm();
-			};
-			walls.erase(
-				std::remove_if(walls.begin(), walls.end(), [&](const Wall& w) { return u_dist(w.at, base) > kWallRadius; }),
-				walls.end());
-			const double kWallHalfAngle = M_PI / 4.0;  // a wall blocks steps within this angle of the failed step
-			auto aim_within_walls = [&](const Eigen::Vector3d& a) {
-				const Eigen::Vector3d none = Eigen::Vector3d::Zero();
-				if (walls.empty() || a.norm() < 1e-9)
-					return a;
-				const Eigen::Vector3d a_u = a.normalized();
-				// Push the direction out of each cone it is in, onto the cone's edge (just past it), until it is in none.
-				const double edge = kWallHalfAngle + 0.01;
-				Eigen::Vector3d d = a_u;
-				for (int it = 0; it < 20; ++it)
-				{
-					bool moved = false;
-					for (const Wall& w : walls)
-					{
-						if (d.dot(w.n) <= std::cos(kWallHalfAngle))
-							continue;
-						Eigen::Vector3d side = d - d.dot(w.n) * w.n;
-						if (side.norm() < 1e-9)
-							side = w.n.unitOrthogonal();
-						Eigen::Vector3d next = to_u(std::cos(edge) * w.n + std::sin(edge) * side.normalized());
-						if (next.norm() < 1e-9)
-							return none;
-						d = next.normalized();
-						moved = true;
-					}
-					if (!moved)
-						return d;
-				}
-				return none;  // the cones cover every nearby direction
-			};
-			// The direction farthest from every failed step: maximizes the smallest angle to any wall's axis. Ascent on
-			// that smallest angle from each wall's opposite; zero if no walls.
-			auto farthest_from_walls = [&]() -> Eigen::Vector3d {
-				Eigen::Vector3d best = Eigen::Vector3d::Zero();
-				double best_cos = 2.0;  // cosine to the nearest axis; smaller is farther
-				auto nearest_cos = [&](const Eigen::Vector3d& d, const Wall** nearest) {
-					double c = -2.0;
-					for (const Wall& w : walls)
-						if (d.dot(w.n) > c)
-						{
-							c = d.dot(w.n);
-							*nearest = &w;
-						}
-					return c;
-				};
-				for (const Wall& start : walls)
-				{
-					Eigen::Vector3d d = to_u(-start.n);
-					if (d.norm() < 1e-9)
-						continue;
-					d.normalize();
-					for (int it = 0; it < 100; ++it)
-					{
-						const Wall* nearest = nullptr;
-						nearest_cos(d, &nearest);
-						// Turn away from the nearest axis, within the sphere.
-						const Eigen::Vector3d away = -(nearest->n - nearest->n.dot(d) * d);
-						if (away.norm() < 1e-9)
-							break;
-						const Eigen::Vector3d next = to_u(d + 0.05 * away.normalized());
-						if (next.norm() < 1e-9)
-							break;
-						d = next.normalized();
-					}
-					const Wall* nearest = nullptr;
-					const double c = nearest_cos(d, &nearest);
-					if (c < best_cos)
-					{
-						best_cos = c;
-						best = d;
-					}
-				}
-				return best;
-			};
-			// Wall for viewpoint v lost by a step along `step_dir` from `at`; `room` is its comfort direction.
-			auto add_wall = [&](int v, const Eigen::Vector3d& step_dir, const Eigen::Vector3d& room, const ObjectPlacement& at) {
-				if (step_dir.norm() < 1e-9)
-					return false;
-				const Eigen::Vector3d n = step_dir.normalized();
-				for (const Wall& w : walls)
-					if (w.n.dot(n) > std::cos(0.1))
-						return false;  // this step's cone is already there (one cone per failed step)
-				walls.push_back({n, room, at, v});
-				if (params.trace_line_search)
-					RCLCPP_INFO(
-						node->get_logger(), "    wall: vp %d, blocked dir (%+.2f, %+.2f, %+.2f), room (%+.2f, %+.2f, %+.2f), %zu walls",
-						v, n(0), n(1), n(2), room(0), room(1), room(2), walls.size());
-				return true;
-			};
-			if (params.room_then_reach && !walls.empty())
-			{
-				const Eigen::Vector3d d = aim_within_walls(dir_u);
-				if (d.norm() >= 0.1)
-					dir_u = d.normalized();  // stay off known walls
-			}
-			// Gradient line search: shrink the step until a probe is better.
-			for (int ls = 0; ls < params.max_line_search_iters;)
-			{
-				ObjectPlacement cand = ProjectToBounds(
-					{base.x + step * dir_u(0), base.y + step * dir_u(1), base.z + step * dir_u(2)},
-					params.bounds);
-				// weighted_cost carries the unreachable penalty, so a probe that drops a viewpoint fails.
-				InnerSolution probe = quick_solve(cand);
-				result.num_inner_solves += 1;
-				if (probe.num_reachable >= here_quick.num_reachable)
-					add_planned_travel(cand, probe);  // plan only probes that could be accepted
-				if (params.trace_line_search)
-				{
-					std::string lost;
-					for (int v : here_quick.tour)
-						if (std::find(probe.tour.begin(), probe.tour.end(), v) == probe.tour.end())
-							lost += " " + std::to_string(v);
-					RCLCPP_INFO(
-						node->get_logger(),
-						"    probe step=%.4f m abs (%.4f, %.4f, %.4f): reached %d vs %d here, cost %.2f vs %.2f here "
-						"(sum_w %.3f vs %.3f, planned %.2f vs %.2f)  lost:%s",
-						step, cand.x, cand.y, cand.z, probe.num_reachable, here_quick.num_reachable, probe.weighted_cost,
-						here_quick.weighted_cost, probe.sum_manipulability, here_quick.sum_manipulability, probe.real_cost,
-						here_quick.real_cost, lost.empty() ? " none" : lost.c_str());
-				}
-				// Never trade away a reached viewpoint, whatever the cost says. Compared with the quick solve
-				// here (same IK effort), so a viewpoint the quick solve merely failed to find doesn't block the step.
-				if (better(probe, here_quick))
-				{
-					accepted = true;
-					b_new = cand;
-					next = std::move(probe);
-					break;
-				}
-				step *= params.step_shrink;
-				++ls;
-			}
-
-			// Room then reach: stuck with misses, walk toward each missed viewpoint (closest first). An aim step that
-			// reaches it is accepted; one that loses nothing walks on (whatever the cost); one that loses
-			// viewpoints adds walls, then a room move along their room side gives the blockers room. Up to kMaxDetours.
-			if (!accepted && params.room_then_reach && !here_quick.missed_vp.empty())
-			{
-				const int kMaxDetours = 6;  // aim steps + room moves per missed viewpoint
-				auto lost_from = [](const InnerSolution& from, const InnerSolution& to) {
-					std::vector<int> lost;
-					for (int v : from.tour)
-						if (std::find(to.tour.begin(), to.tour.end(), v) == to.tour.end())
-							lost.push_back(v);
-					return lost;
-				};
-				auto list = [](const std::vector<int>& v) {
-					std::string out;
-					for (int x : v)
-						out += " " + std::to_string(x);
-					return out.empty() ? std::string(" none") : out;
-				};
-				auto shifted = [&](const ObjectPlacement& at, const Eigen::Vector3d& d, double size) {
-					return ProjectToBounds(
-						{at.x + size * d(0), at.y + size * d(1), at.z + size * d(2)},
-						params.bounds);
-				};
-				// Missed viewpoints, smallest gap first.
-				std::vector<size_t> order(here_quick.missed_vp.size());
-				std::iota(order.begin(), order.end(), 0);
-				std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-					return WeightedPoseGap(here_quick.missed_gap[a], params.rot_metric_scale) <
-						WeightedPoseGap(here_quick.missed_gap[b], params.rot_metric_scale);
-				});
-				for (size_t oi = 0; oi < order.size() && !accepted; ++oi)
-				{
-					const int target = here_quick.missed_vp[order[oi]];
-					ObjectPlacement at = base;
-					InnerSolution here_at = here_quick;
-					for (int detour = 0; detour <= kMaxDetours && !accepted; ++detour)
-					{
-						// Aim: the target's gap-shrinking direction at `at`, kept off the walls.
-						const size_t mi = static_cast<size_t>(
-							std::find(here_at.missed_vp.begin(), here_at.missed_vp.end(), target) - here_at.missed_vp.begin());
-						if (mi >= here_at.missed_vp.size() || mi >= here_at.missed_gap.size())
-							break;
-						Eigen::Matrix<double, 6, 1> pose_error = here_at.missed_gap[mi];
-						if (detour == 0)
-						{
-							// Steadier aim: the full solve's closest pose may be nearer than the tracked one.
-							const auto ci = std::find(cur.missed_vp.begin(), cur.missed_vp.end(), target);
-							const size_t c = static_cast<size_t>(ci - cur.missed_vp.begin());
-							if (ci != cur.missed_vp.end() && c < cur.missed_gap.size() &&
-								WeightedPoseGap(cur.missed_gap[c], params.rot_metric_scale) <
-									WeightedPoseGap(pose_error, params.rot_metric_scale))
-								pose_error = cur.missed_gap[c];
-						}
-						const double gap = WeightedPoseGap(pose_error, params.rot_metric_scale);
-						if (gap < 1e-9)
-							break;
-						Eigen::Matrix<double, 6, 1> weighted_error = pose_error;
-						weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-						const Eigen::Vector3d aim_raw = -to_u(PlacementJacobian().transpose() * weighted_error);
-						if (aim_raw.norm() < 1e-9)
-							break;
-						const Eigen::Vector3d aim_d = aim_within_walls(aim_raw.normalized());
-						if (aim_d.norm() < 0.1)
-						{
-							if (params.trace_line_search)
-								RCLCPP_INFO(node->get_logger(), "    aim vp %d: walls leave no way toward it", target);
-							break;
-						}
-						const Eigen::Vector3d aim = aim_d.normalized();
-						std::vector<int> lost_all;
-						// Every lost viewpoint outvotes the one target: the room move follows their average comfort direction.
-						Eigen::Vector3d room_raw = Eigen::Vector3d::Zero();
-						bool walked = false;
-						for (double size : {params.initial_step, 0.5 * params.initial_step})
-						{
-							const ObjectPlacement cand = shifted(at, aim, size);
-							InnerSolution probe = quick_solve(cand);
-							result.num_inner_solves += 1;
-							if (probe.num_reachable >= here_quick.num_reachable)
-								add_planned_travel(cand, probe);
-							const std::vector<int> lost = lost_from(here_at, probe);
-							// Counts only if it reaches more and loses nothing; a small cost win alone isn't the goal here.
-							const bool ok =
-								lost_from(here_quick, probe).empty() && probe.num_reachable > here_quick.num_reachable;
-							// While viewpoints are missed the cost may rise: a walk-on step only has to lose nothing.
-							const bool walk = !ok && lost.empty();
-							if (params.trace_line_search)
-								RCLCPP_INFO(
-									node->get_logger(),
-									"    aim vp %d (detour %d) step=%.4f m dir (%+.2f, %+.2f, %+.2f) abs (%.4f, %.4f, %.4f): reached %d "
-									"vs %d here, cost %.2f vs %.2f here  lost:%s -> %s",
-									target, detour, size, aim(0), aim(1), aim(2), cand.x, cand.y, cand.z, probe.num_reachable,
-									here_quick.num_reachable, probe.weighted_cost, here_quick.weighted_cost, list(lost).c_str(),
-									ok ? "accepted" : walk ? "walk on" : "rejected");
-							if (ok)
-							{
-								accepted = true;
-								b_new = cand;
-								next = std::move(probe);
-								step = size;
-								break;
-							}
-							if (walk)
-							{
-								at = cand;
-								here_at = std::move(probe);
-								walked = true;
-								break;
-							}
-							for (int v : lost)
-							{
-								const Eigen::Vector3d comfort = loss_direction(v, here_at, probe, aim);
-								add_wall(v, aim, comfort, at);
-								if (comfort.norm() > 1e-9)
-									room_raw += comfort.normalized();
-								lost_all.push_back(v);
-							}
-							if (!lost.empty())
-								break;  // walls learned: make room rather than shrink
-						}
-						if (accepted || detour == kMaxDetours)
-							break;
-						if (walked)
-							continue;  // aim again from the new spot
-						if (lost_all.empty())
-							break;  // no loss, no gain, over budget: nothing to make room for
-
-						// Room: along the lost viewpoints' comfort directions (outside all walls). While viewpoints are missed
-						// the cost may rise here: a room move only has to lose nothing. A room move that loses viewpoints gets
-						// its own wall; the second try goes the way still left: the direction farthest from every failed step.
-						if (room_raw.norm() < 1e-9)
-							break;
-						bool moved = false;
-						for (int attempt = 0; attempt < 2 && !moved && !accepted; ++attempt)
-						{
-							Eigen::Vector3d want = room_raw;
-							if (attempt > 0)
-							{
-								want = farthest_from_walls();
-								if (want.norm() < 1e-9)
-									break;
-							}
-							const Eigen::Vector3d room_d = aim_within_walls(want.normalized());
-							if (room_d.norm() < 0.1)
-								break;
-							const Eigen::Vector3d room = room_d.normalized();
-							std::vector<int> room_lost;
-							for (double size : {params.initial_step, 0.5 * params.initial_step})
-							{
-								const ObjectPlacement cand = shifted(at, room, size);
-								InnerSolution rp = quick_solve(cand);
-								result.num_inner_solves += 1;
-								const std::vector<int> lost = lost_from(here_at, rp);
-								if (lost.empty())
-									add_planned_travel(cand, rp);
-								const bool gained =
-									lost_from(here_quick, rp).empty() && rp.num_reachable > here_quick.num_reachable;
-								const bool ok = lost.empty();
-								if (params.trace_line_search)
-									RCLCPP_INFO(
-										node->get_logger(),
-										"    room for%s (try %d) step=%.4f m dir (%+.2f, %+.2f, %+.2f) abs (%.4f, %.4f, %.4f): "
-										"reached %d, cost %.2f vs %.2f here  lost:%s -> %s",
-										list(lost_all).c_str(), attempt + 1, size, room(0), room(1), room(2), cand.x, cand.y,
-										cand.z, rp.num_reachable, rp.weighted_cost, here_quick.weighted_cost,
-										list(lost).c_str(), gained ? "gained, accepted" : ok ? "moved" : "rejected");
-								if (gained)
-								{
-									accepted = true;
-									b_new = cand;
-									next = std::move(rp);
-									step = size;
-									break;
-								}
-								if (ok)
-								{
-									at = cand;
-									here_at = std::move(rp);
-									moved = true;
-									break;
-								}
-								if (room_lost.empty())
-									room_lost = lost;
-							}
-							if (!moved && !accepted && !room_lost.empty())
-								add_wall(room_lost.front(), room, Eigen::Vector3d::Zero(), at);
-						}
-						if (!moved)
-							break;
-					}
-				}
-			}
-
-
-			InnerSolution committed;
-			if (accepted)
-			{
-				ReseedRng(params.random_seed);
-				committed = BestOfNInnerSolve(
-					state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds,
-					start_reference_joints, home_tcp_local, b_new, params, &next.tour,
-					params.max_solutions_per_candidate, order_lock);
-				result.num_inner_solves += std::max(1, params.gtsp_num_restart);
-				add_planned_travel(b_new, committed);
-				if (better(next, committed))
-					committed = std::move(next);
-				const bool keep = better(committed, cur);
-				if (params.trace_line_search)
-					RCLCPP_INFO(
-						node->get_logger(), "    full solve: reached %d vs %d current, cost %.2f vs %.2f current -> %s",
-						committed.num_reachable, cur.num_reachable, committed.weighted_cost, cur.weighted_cost,
-						keep ? "accepted" : "rejected");
-				if (!keep)
-					accepted = false;  // quick probe looked better but the full solve isn't
-			}
-
-			if (!accepted)
-			{
-				if (cur.all_reachable)
-					RCLCPP_INFO(node->get_logger(), "  restart %d: no step reduces the tour cost -- converged", restart_idx + 1);
-				else
-					RCLCPP_WARN(
-						node->get_logger(), "  restart %d: no step reduces the tour cost with %d/%d reachable -- stuck",
-						restart_idx + 1, cur.num_reachable, n);
-				PublishProgress(
-					node, params, object_pose_obj, tour_poses_obj, base_history,
-					Eigen::Vector3d(-g), base, state, jmg, cur);
-				break;
-			}
-
-			double base_move = ToOffsetVec(b_new, base).norm();
-			double rel_impr = (cur.weighted_cost - committed.weighted_cost) / std::max(std::abs(cur.weighted_cost), 1e-9);
-			// Progress even if the cost rose: a viewpoint gained.
-			const bool gained = committed.num_reachable > cur.num_reachable;
-
-			base = b_new;
-			cur = std::move(committed);
-			remember(cur);
-			base_history.push_back(base);
-			record(base, cur);
-
-			RCLCPP_INFO(
-				node->get_logger(),
-				"restart %d/%d iter %d/%d: abs (%.4f, %.4f, %.4f) m  reachable %d/%d  |grad|=%.4f  step=%.4f m",
-				restart_idx + 1, std::max(1, params.descent_num_restart), outer + 1, params.max_outer_iterations, base.x,
-				base.y, base.z, cur.num_reachable, n, gnorm, step);
-			log_cost_terms(cur);
-			log_missed(base, cur);
-
-			PublishProgress(
-				node, params, object_pose_obj, tour_poses_obj, base_history,
-				Eigen::Vector3d(-g), base, state, jmg, cur);
-
-			if (!gained && rel_impr < params.convergence_tolerance_cost)
-			{
-				if (++stall_count >= std::max(1, params.patience))
-				{
-					RCLCPP_INFO(
-						node->get_logger(), "  restart %d: %d iterations with <%.1e relative gain -- stopping early",
-						restart_idx + 1, stall_count, params.convergence_tolerance_cost);
-					break;
-				}
-			}
-			else
-			{
-				stall_count = 0;
-			}
-
-			if (!gained && base_move < params.convergence_tolerance_offset && rel_impr < params.convergence_tolerance_cost)
-			{
-				RCLCPP_INFO(node->get_logger(), "  restart %d: placement settled -- converged", restart_idx + 1);
-				break;
-			}
-		}
-
-		// Option "keep descending": refine wherever the descent ended.
-		if (params.refine_solves > 0 && !rr.sol.tour.empty())
-		{
-			InnerSolution start = rr.sol;
-			if (use_real_cost && start.real_cost < 0.0)
-				start.real_cost = real_cost_of(rr.placement, start);
-			rr.sol = refine(rr.placement, start, params.refine_solves);  // best of start and the refine solves
-			rr.cost = cost_at_final_weight(rr.sol);
-			rr.ok = rr.sol.all_reachable;
-			RCLCPP_INFO(
-				node->get_logger(),
-				"  restart %d: refined %d solves at final abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  real %.2f -> %.2f",
-				restart_idx + 1, params.refine_solves, rr.placement.x, rr.placement.y, rr.placement.z, start.travel_cost,
-				rr.sol.travel_cost, start.real_cost, rr.sol.real_cost);
-		}
-
-		// Elbow-swing smoothing at the result (all reached only): same order, smoothed poses, object nudged with them.
-		// Kept only if the planned travel (else the L2 travel) drops, like refine.
-		if (params.elbow_swing && rr.ok && !rr.sol.tour.empty())
-		{
-			InnerSolution before = rr.sol;
-			if (use_real_cost && before.real_cost < 0.0)
-				before.real_cost = real_cost_of(rr.placement, before);
-			const ElbowSwingResult es = ElbowSwingSmooth(
-				state, jmg, tool0_link, planning_scene_monitor, object_pose_obj, tour_poses_obj, before.tour,
-				before.joints, start_reference_joints, rr.placement, params);
-			// Rescore the smoothed tour; every viewpoint is still reached, so there are no missed-pose terms.
-			InnerSolution s = before;
-			s.joints = es.joints;
-			s.travel_cost = TourWeightedCost(
-				es.placement, s.tour, s.joints, tour_poses_obj, start_reference_joints, home_tcp_local, params);
-			s.sum_manipulability =
-				SumManipulability(state, jmg, tool0_link, s.joints, params.manipulability_limit_sharpness);
-			if (params_in.softmin_manipulability_weight > 0.0)
-			{
-				std::vector<double> ws;
-				for (const auto& q : s.joints)
-					ws.push_back(Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness));
-				s.softmin_manipulability = SoftMin(ws, params.softmin_tau);
-			}
-			s.real_cost = use_real_cost ? real_cost_of(es.placement, s) : -1.0;
-			s.weighted_cost = (params.travel_in_cost ? s.travel_cost : 0.0) -
-				params.manipulability_weight * s.sum_manipulability -
-				params.softmin_manipulability_weight * s.softmin_manipulability;
-			if (planned_travel)
-				s.weighted_cost += s.real_cost - (params.travel_in_cost ? s.travel_cost : 0.0);
-			const bool keep = use_real_cost ? s.real_cost < before.real_cost : s.travel_cost < before.travel_cost;
-			RCLCPP_INFO(
-				node->get_logger(),
-				"  restart %d: elbow swing %d iters: joint path %.2f -> %.2f rad, big moves %d -> %d, object moved %.4f m to abs (%.4f, %.4f, "
-				"%.4f) m, real %.2f -> %.2f%s  (rejected tries: ik %d, limits %d, collision %d, longer %d)",
-				restart_idx + 1, es.iters, es.travel_before, es.travel_after, es.big_moves_before, es.big_moves_after, ToOffsetVec(es.placement, rr.placement).norm(),
-				es.placement.x, es.placement.y, es.placement.z, before.real_cost, s.real_cost, keep ? "  <-- kept" : "", es.fail_ik,
-				es.fail_limits, es.fail_collision, es.fail_longer);
-			if (keep)
-			{
-				rr.placement = es.placement;
-				rr.sol = std::move(s);
-			}
-			else
-				rr.sol = std::move(before);
-			rr.cost = cost_at_final_weight(rr.sol);
-		}
-
-		return rr;  // record() runs at least once, so rr holds this restart's best-cost solution
-	};
-
+	// Restarts: the first descent starts at the given position, later ones at the best so far with a new IK
+	// seed. Stops once every viewpoint is reached.
 	const int descent_num_restart = std::max(1, params.descent_num_restart);
 	RestartResult overall;
-
 	for (int r = 0; r < descent_num_restart && rclcpp::ok(); ++r)
 	{
-		ObjectPlacement start =
+		const ObjectPlacement start =
 			(r == 0) ? ObjectPlacement{
 						   std::isnan(params.initial_x) ? object_translation_nominal.x() : params.initial_x,
 						   std::isnan(params.initial_y) ? object_translation_nominal.y() : params.initial_y,
 						   std::isnan(params.initial_z) ? object_translation_nominal.z() : params.initial_z}
 					 : overall.placement;  // restarts change only the IK seed
-		RestartResult rr = run_descent(start, r, r == 0 ? nullptr : &overall.sol);
+		RestartResult rr = solver.RunDescent(start, r, r == 0 ? nullptr : &overall.sol);
 
 		// More viewpoints reached wins, then lower cost.
 		const bool improved = (r == 0) || rr.sol.num_reachable > overall.sol.num_reachable ||
 			(rr.sol.num_reachable == overall.sol.num_reachable && rr.cost < overall.cost);
-
 		RCLCPP_INFO(
 			node->get_logger(),
 			"restart %d/%d done: total cost=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, %.4f, %.4f) m%s",
-			r + 1, descent_num_restart, rr.cost,
-			rr.sol.travel_cost + params.unreachable_penalty * (n - rr.sol.num_reachable), rr.sol.sum_manipulability,
-			rr.sol.num_reachable, n,
-			rr.placement.x, rr.placement.y, rr.placement.z, (r > 0 && improved) ? "  <-- new best" : "");
-
+			r + 1, descent_num_restart, rr.cost, rr.sol.travel_cost + params.unreachable_penalty * (n - rr.sol.num_reachable),
+			rr.sol.sum_manipulability, rr.sol.num_reachable, n, rr.placement.x, rr.placement.y, rr.placement.z,
+			(r > 0 && improved) ? "  <-- new best" : "");
 		if (improved)
 			overall = rr;
 		if (overall.ok)
 			break;  // every viewpoint reached: no more restarts needed
 	}
 
+	BaseGradientResult result = solver.result;
 	const InnerSolution& fin = overall.sol;
 	result.x = overall.placement.x;
 	result.y = overall.placement.y;
@@ -2818,9 +2974,8 @@ BaseGradientResult SolveBaseGradient(
 	result.tour_order = fin.tour;
 	result.joint_solutions = fin.joints;
 	// Report the honest tour cost -- strip the unreachable penalty baked in for comparison.
-	result.total_weighted_cost =
-		fin.weighted_cost - params.unreachable_penalty * (fin.num_total - fin.num_reachable);
-	result.total_joint_path_length = joint_path_len(fin);
+	result.total_weighted_cost = fin.weighted_cost - params.unreachable_penalty * (fin.num_total - fin.num_reachable);
+	result.total_joint_path_length = JointPathLength(start_reference_joints, fin);
 	result.num_reachable = fin.num_reachable;
 	result.ok = overall.ok;
 
@@ -2832,14 +2987,12 @@ BaseGradientResult SolveBaseGradient(
 			node->get_logger(),
 			"Done. Object abs (%.4f, %.4f, %.4f) m -- reaches "
 			"all %d poses, tour joint path %.4f rad, travel %.2f, sum_w %.3f (weighted cost %.4f).",
-			result.x, result.y, result.z, n,
-			result.total_joint_path_length, fin.travel_cost, fin.sum_manipulability, result.total_weighted_cost);
+			result.x, result.y, result.z, n, result.total_joint_path_length, fin.travel_cost, fin.sum_manipulability,
+			result.total_weighted_cost);
 	else
 		RCLCPP_WARN(
-			node->get_logger(),
-			"Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses.", result.x, result.y, result.z,
-			result.num_reachable, n);
-
+			node->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses.", result.x, result.y,
+			result.z, result.num_reachable, n);
 	return result;
 }
 
