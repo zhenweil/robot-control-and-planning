@@ -81,8 +81,9 @@ struct Params
 	int bg_elbow_swing_iters = 50;
 	double bg_elbow_swing_object_step = 0.01;
 	double bg_elbow_swing_joint_step = 0.1;
-	double bg_elbow_swing_jump_threshold = 1.0;
-	double bg_elbow_swing_jump_weight = 10.0;
+	int bg_refine_ik_solutions = 8;
+	double bg_reconfig_threshold = 1.0;
+	double bg_reconfig_weight = 10.0;
 	bool bg_travel_gradient = true;
 	bool bg_manipulability_gradient = true;
 	bool bg_travel_in_cost = true;
@@ -325,8 +326,9 @@ private:
 		this->declareIfNeeded("bg_elbow_swing_iters", this->params.bg_elbow_swing_iters);
 		this->declareIfNeeded("bg_elbow_swing_object_step", this->params.bg_elbow_swing_object_step);
 		this->declareIfNeeded("bg_elbow_swing_joint_step", this->params.bg_elbow_swing_joint_step);
-		this->declareIfNeeded("bg_elbow_swing_jump_threshold", this->params.bg_elbow_swing_jump_threshold);
-		this->declareIfNeeded("bg_elbow_swing_jump_weight", this->params.bg_elbow_swing_jump_weight);
+		this->declareIfNeeded("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
+		this->declareIfNeeded("bg_reconfig_threshold", this->params.bg_reconfig_threshold);
+		this->declareIfNeeded("bg_reconfig_weight", this->params.bg_reconfig_weight);
 		this->declareIfNeeded("bg_travel_gradient", this->params.bg_travel_gradient);
 		this->declareIfNeeded("bg_manipulability_gradient", this->params.bg_manipulability_gradient);
 		this->declareIfNeeded("bg_travel_in_cost", this->params.bg_travel_in_cost);
@@ -404,8 +406,9 @@ private:
 		this->get_parameter("bg_elbow_swing_iters", this->params.bg_elbow_swing_iters);
 		this->get_parameter("bg_elbow_swing_object_step", this->params.bg_elbow_swing_object_step);
 		this->get_parameter("bg_elbow_swing_joint_step", this->params.bg_elbow_swing_joint_step);
-		this->get_parameter("bg_elbow_swing_jump_threshold", this->params.bg_elbow_swing_jump_threshold);
-		this->get_parameter("bg_elbow_swing_jump_weight", this->params.bg_elbow_swing_jump_weight);
+		this->get_parameter("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
+		this->get_parameter("bg_reconfig_threshold", this->params.bg_reconfig_threshold);
+		this->get_parameter("bg_reconfig_weight", this->params.bg_reconfig_weight);
 		this->get_parameter("bg_travel_gradient", this->params.bg_travel_gradient);
 		this->get_parameter("bg_manipulability_gradient", this->params.bg_manipulability_gradient);
 		this->get_parameter("bg_travel_in_cost", this->params.bg_travel_in_cost);
@@ -507,8 +510,9 @@ private:
 		bg.elbow_swing_iters = this->params.bg_elbow_swing_iters;
 		bg.elbow_swing_object_step = this->params.bg_elbow_swing_object_step;
 		bg.elbow_swing_joint_step = this->params.bg_elbow_swing_joint_step;
-		bg.elbow_swing_jump_threshold = this->params.bg_elbow_swing_jump_threshold;
-		bg.elbow_swing_jump_weight = this->params.bg_elbow_swing_jump_weight;
+		bg.refine_ik_solutions = this->params.bg_refine_ik_solutions;
+		bg.reconfig_threshold = this->params.bg_reconfig_threshold;
+		bg.reconfig_weight = this->params.bg_reconfig_weight;
 		bg.travel_gradient = this->params.bg_travel_gradient;
 		bg.manipulability_gradient = this->params.bg_manipulability_gradient;
 		bg.travel_in_cost = this->params.bg_travel_in_cost;

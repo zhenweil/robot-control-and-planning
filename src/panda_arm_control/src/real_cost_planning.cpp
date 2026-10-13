@@ -307,7 +307,7 @@ double MeasureTrajectoryEndEffectorDistance(const robot_trajectory::RobotTraject
 
 // Sums per-joint L2 deltas between consecutive trajectory waypoints -- the actual joint-space
 // path length traveled, from the same trajectory, not a separate straight-line estimate.
-double MeasureTrajectoryJointDistance(const robot_trajectory::RobotTrajectoryPtr& trajectory)
+double MeasureTrajectoryJointDistance(const robot_trajectory::RobotTrajectoryPtr& trajectory, bool count_last_joint = true)
 {
 	if (!trajectory || trajectory->getWayPointCount() < 2)
 		return 0.0;
@@ -323,7 +323,8 @@ double MeasureTrajectoryJointDistance(const robot_trajectory::RobotTrajectoryPtr
 		trajectory->getWayPoint(i).copyJointGroupPositions(jmg, cur);
 
 		double step = 0.0;
-		for (size_t j = 0; j < cur.size(); ++j)
+		const size_t counted = (count_last_joint || cur.empty()) ? cur.size() : cur.size() - 1;
+		for (size_t j = 0; j < counted; ++j)
 			step += (cur[j] - prev[j]) * (cur[j] - prev[j]);
 		dist += std::sqrt(step);
 
@@ -635,7 +636,7 @@ std::vector<double> PlanTourJointPathLengths(
 	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const std::vector<std::vector<double>>& waypoint_joints, const std::vector<double>& start_reference_joints,
-	const std::string& group_name, double planning_time, int num_planning_attempts)
+	const std::string& group_name, double planning_time, int num_planning_attempts, bool count_last_joint)
 {
 	QuietPlanningLoggers(node);
 	planning_pipeline::PlanningPipeline pipeline(robot_model, node, "ompl");
@@ -681,7 +682,7 @@ std::vector<double> PlanTourJointPathLengths(
 			planning_interface::MotionPlanResponse res;
 			if (!pipeline.generatePlan(scene, req, res) || !res.trajectory_)
 				continue;
-			const double length = MeasureTrajectoryJointDistance(res.trajectory_);
+			const double length = MeasureTrajectoryJointDistance(res.trajectory_, count_last_joint);
 			if (best < 0.0 || length < best)
 				best = length;
 		}

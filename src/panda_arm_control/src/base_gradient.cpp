@@ -104,10 +104,18 @@ Eigen::Vector3d ToOffsetVec(const ObjectPlacement& a, const ObjectPlacement& b) 
 	return Eigen::Vector3d(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
+// Joint travel leaves out the last joint (joint 7, the flange spin about the camera axis): that roll doesn't
+// matter for a viewpoint, so its motion isn't counted.
+size_t CountedJoints(const std::vector<double>& a, const std::vector<double>& b)
+{
+	const size_t n = std::min(a.size(), b.size());
+	return n > 0 ? n - 1 : 0;
+}
+
 double JointL2Distance(const std::vector<double>& a, const std::vector<double>& b)
 {
 	double d = 0.0;
-	for (size_t k = 0; k < a.size() && k < b.size(); ++k)
+	for (size_t k = 0; k < CountedJoints(a, b); ++k)
 	{
 		double e = a[k] - b[k];
 		d += e * e;
@@ -118,9 +126,31 @@ double JointL2Distance(const std::vector<double>& a, const std::vector<double>& 
 double MaxJointDeviation(const std::vector<double>& a, const std::vector<double>& b)
 {
 	double m = 0.0;
-	for (size_t k = 0; k < a.size() && k < b.size(); ++k)
+	for (size_t k = 0; k < CountedJoints(a, b); ++k)
 		m = std::max(m, std::abs(a[k] - b[k]));
 	return m;
+}
+
+// Sum over joints of (turn past `thr`)^2: zero unless the move is a reconfiguration.
+double ReconfigPenalty(const std::vector<double>& a, const std::vector<double>& b, double thr)
+{
+	double p = 0.0;
+	for (size_t k = 0; k < CountedJoints(a, b); ++k)
+	{
+		const double ex = std::abs(a[k] - b[k]) - thr;
+		if (ex > 0.0)
+			p += ex * ex;
+	}
+	return p;
+}
+
+// Moves (home edge included) where some joint turns more than `thr`.
+int CountReconfigs(const std::vector<double>& home, const std::vector<std::vector<double>>& joints, double thr)
+{
+	int c = 0;
+	for (size_t k = 0; k < joints.size(); ++k)
+		c += MaxJointDeviation(k == 0 ? home : joints[k - 1], joints[k]) > thr ? 1 : 0;
+	return c;
 }
 
 // Yoshikawa manipulability w = sqrt(det(J J^T)) of tool0 at q.
@@ -513,7 +543,9 @@ double WeightedEdgeCost(
 {
 	return params.cartesian_distance_weight * (pa - pb).norm() +
 		params.joint_distance_weight * JointL2Distance(qa, qb) +
-		params.max_joint_deviation_weight * MaxJointDeviation(qa, qb);
+		params.max_joint_deviation_weight * MaxJointDeviation(qa, qb) +
+		(params.edge_reconfig_weight > 0.0 ? params.edge_reconfig_weight * ReconfigPenalty(qa, qb, params.reconfig_threshold)
+										   : 0.0);
 }
 
 // One RNG for all random IK starts, seeded from random_seed in SolveBaseGradient: MoveIt's default RNGs
@@ -1273,7 +1305,7 @@ struct ElbowSwingResult
 {
 	double travel_before = 0.0;  // joint path length home -> tour (rad)
 	double travel_after = 0.0;
-	int big_moves_before = 0;  // moves where one joint turns more than elbow_swing_jump_threshold
+	int big_moves_before = 0;  // moves where one joint turns more than reconfig_threshold
 	int big_moves_after = 0;
 	int iters = 0;
 	int fail_ik = 0, fail_limits = 0, fail_collision = 0, fail_longer = 0;  // rejected tries, by first failed check
@@ -1307,24 +1339,14 @@ ElbowSwingResult ElbowSwingSmooth(
 		}
 		return len;
 	};
-	const double thr = params.elbow_swing_jump_threshold, w_jump = params.elbow_swing_jump_weight;
+	const double thr = params.reconfig_threshold, w_jump = params.reconfig_weight;
 	auto goal = [&](const std::vector<std::vector<double>>& qs) {
 		double f = path_len(qs);
 		for (size_t k = 0; k < qs.size(); ++k)
-			for (size_t j = 0; j < qs[k].size(); ++j)
-			{
-				const double ex = std::abs(qs[k][j] - (k == 0 ? home_joints : qs[k - 1])[j]) - thr;
-				if (ex > 0.0)
-					f += w_jump * ex * ex;
-			}
+			f += w_jump * ReconfigPenalty(k == 0 ? home_joints : qs[k - 1], qs[k], thr);
 		return f;
 	};
-	auto big_moves = [&](const std::vector<std::vector<double>>& qs) {
-		int c = 0;
-		for (size_t k = 0; k < qs.size(); ++k)
-			c += MaxJointDeviation(k == 0 ? home_joints : qs[k - 1], qs[k]) > thr ? 1 : 0;
-		return c;
-	};
+	auto big_moves = [&](const std::vector<std::vector<double>>& qs) { return CountReconfigs(home_joints, qs, thr); };
 	auto jacobian = [&](const std::vector<double>& q) {
 		state.setJointGroupPositions(jmg, q);
 		state.update();
@@ -1381,7 +1403,7 @@ ElbowSwingResult ElbowSwingSmooth(
 			if (d.norm() < 1e-9)
 				continue;
 			Eigen::VectorXd gd = d.normalized();
-			for (int j = 0; j < dof; ++j)
+			for (int j = 0; j + 1 < dof; ++j)  // joint 7 isn't counted
 			{
 				const double ex = std::abs(d(j)) - thr;
 				if (ex > 0.0)
@@ -1577,8 +1599,8 @@ Eigen::Vector3d AnalyticGradient(
 	auto add_edge = [&](const std::vector<double>& qa, const std::vector<double>& qb, const Eigen::MatrixXd& dqa,
 					   const Eigen::MatrixXd& dqb, const Eigen::MatrixXd& dpa, const Eigen::MatrixXd& dpb,
 					   const Eigen::Vector3d& pa, const Eigen::Vector3d& pb) {
-		Eigen::VectorXd dq(dof);
-		for (size_t i = 0; i < dof; ++i)
+		Eigen::VectorXd dq = Eigen::VectorXd::Zero(dof);
+		for (size_t i = 0; i < CountedJoints(qa, qb); ++i)
 			dq(i) = qa[i] - qb[i];
 		Eigen::MatrixXd ddiff = dqa - dqb;  // dof x 3
 
@@ -2049,6 +2071,7 @@ bool BaseGradientSolver::StartDescent(const ObjectPlacement& start, int restart_
 	last_good.assign(static_cast<size_t>(n), {});
 	last_closest.assign(static_cast<size_t>(n), {});
 	refined_at_reach = false;
+	params.softmin_manipulability_weight = params_in.softmin_manipulability_weight;
 	rr = RestartResult{};
 	rr.placement = base;
 
@@ -2532,11 +2555,35 @@ void BaseGradientSolver::RefineResult()
 	rr.sol = Refine(rr.placement, start, params.refine_solves);	 // best of start and the refine solves
 	rr.cost = CostAtFinalWeight(rr.sol);
 	rr.ok = rr.sol.all_reachable;
+	// Where the remaining reconfigurations are: viewpoints, the joint that turns most, and by how much.
+	std::string where;
+	for (size_t k = 0; k < rr.sol.joints.size(); ++k)
+	{
+		const std::vector<double>& a = k == 0 ? home_joints : rr.sol.joints[k - 1];
+		const std::vector<double>& b = rr.sol.joints[k];
+		if (MaxJointDeviation(a, b) <= params.reconfig_threshold)
+			continue;
+		size_t jmax = 0;
+		for (size_t j = 0; j < CountedJoints(a, b); ++j)
+			if (std::abs(b[j] - a[j]) > std::abs(b[jmax] - a[jmax]))
+				jmax = j;
+		char buf[64];
+		std::snprintf(
+			buf, sizeof(buf), " %s->%d j%zu %+.2f", k == 0 ? "home" : std::to_string(rr.sol.tour[k - 1]).c_str(),
+			rr.sol.tour[k], jmax + 1, b[jmax] - a[jmax]);
+		where += buf;
+	}
+	int moved = 0;  // viewpoint-order positions that changed
+	for (size_t k = 0; k < rr.sol.tour.size(); ++k)
+		moved += (k >= start.tour.size() || start.tour[k] != rr.sol.tour[k]) ? 1 : 0;
 	RCLCPP_INFO(
 		node->get_logger(),
-		"  restart %d: refined %d solves at final abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  real %.2f -> %.2f",
+		"  restart %d: refined %d solves at final abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  real %.2f -> %.2f  "
+		"order changed at %d/%zu positions  reconfigurations %d -> %d:%s",
 		restart_idx + 1, params.refine_solves, rr.placement.x, rr.placement.y, rr.placement.z, start.travel_cost,
-		rr.sol.travel_cost, start.real_cost, rr.sol.real_cost);
+		rr.sol.travel_cost, start.real_cost, rr.sol.real_cost, moved, rr.sol.tour.size(),
+		CountReconfigs(home_joints, start.joints, params.reconfig_threshold),
+		CountReconfigs(home_joints, rr.sol.joints, params.reconfig_threshold), where.empty() ? " none" : where.c_str());
 }
 
 // Elbow-swing smoothing at the result (all reached only): same order, smoothed poses, object nudged with them.
@@ -2612,17 +2659,14 @@ InnerSolution BaseGradientSolver::QuickSolve(const ObjectPlacement& at)
 		track_params, &cur.tour, 1, &locked_order);
 }
 
-// Refine at a fixed placement: more full solves, each warm-started from the best so far, scored at the
-// final weight. With freeze_order the viewpoint order is kept and only the arm poses are re-picked.
-// Lowest real cost if enabled, else lowest L2 travel; never fewer viewpoints reached.
+// Refine at a fixed placement: more full solves, each warm-started from the best so far, with more IK choices
+// and GTSP edges that penalize reconfigurations. With freeze_order the viewpoint order is kept and only the arm
+// poses are re-picked. Keeps the lowest cost (planned travel and comfort); never fewer viewpoints reached.
 InnerSolution BaseGradientSolver::Refine(const ObjectPlacement& at, InnerSolution best_sol, int num_solves)
 {
-	// Travel-only tours: no manipulability preference when picking arm poses.
-	const double saved_weight = params.manipulability_weight;
-	params.manipulability_weight = 0.0;
-	best_sol.weighted_cost = CostAtFinalWeight(best_sol);
 	if (use_real_cost && best_sol.real_cost < 0.0)
 		best_sol.real_cost = RealCost(at, best_sol);
+	best_sol.weighted_cost = CostAtFinalWeight(best_sol);
 	for (int i = 0; i < num_solves && rclcpp::ok(); ++i)
 	{
 		const std::vector<std::vector<double>> refine_seeds =
@@ -2630,22 +2674,22 @@ InnerSolution BaseGradientSolver::Refine(const ObjectPlacement& at, InnerSolutio
 		const std::vector<int>* refine_lock = params.lock_input_order ? &input_order
 			: params.freeze_order									  ? &best_sol.tour
 																	  : nullptr;
+		params.edge_reconfig_weight = params.reconfig_weight;
 		InnerSolution s = InnerSolve(
 			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, refine_seeds, home_joints,
-			home_tcp_local, at, params, &best_sol.tour, params.max_solutions_per_candidate, refine_lock);
+			home_tcp_local, at, params, &best_sol.tour, params.refine_ik_solutions, refine_lock);
+		params.edge_reconfig_weight = 0.0;
 		result.num_inner_solves += 1;
 		if (s.num_reachable < best_sol.num_reachable)
 			continue;
+		// Travel without the penalty, so it compares with the descent's.
+		s.travel_cost = TourWeightedCost(at, s.tour, s.joints, tour_poses_obj, home_joints, home_tcp_local, params);
 		if (use_real_cost)
-		{
 			s.real_cost = RealCost(at, s);
-			if (s.real_cost < best_sol.real_cost)
-				best_sol = std::move(s);
-		}
-		else if (s.travel_cost < best_sol.travel_cost)
+		s.weighted_cost = CostAtFinalWeight(s);
+		if (s.weighted_cost < best_sol.weighted_cost)
 			best_sol = std::move(s);
 	}
-	params.manipulability_weight = saved_weight;
 	return best_sol;
 }
 
@@ -2656,7 +2700,7 @@ double BaseGradientSolver::RealCost(const ObjectPlacement& at, const InnerSoluti
 	SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
 	const std::vector<double> edges = PlanTourJointPathLengths(
 		node, robot_model, planning_scene_monitor, sol.joints, home_joints, group_name, params.real_cost_planning_time,
-		params.real_cost_attempts);
+		params.real_cost_attempts, /*count_last_joint=*/false);
 	double total = 0.0;
 	for (size_t k = 0; k < sol.joints.size(); ++k)
 	{

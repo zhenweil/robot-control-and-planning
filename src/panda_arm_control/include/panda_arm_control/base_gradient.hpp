@@ -77,14 +77,18 @@ struct BaseGradientParams
 	int patience = 3; // stop optimization if no improvement after this many iterations
 	bool stop_when_all_reached = false;  // end each descent as soon as every viewpoint is reached
 	int refine_solves = 0;  // extra full solves at each descent's result, warm-started from the best so far
+	int refine_ik_solutions = 8;  // IK solutions per viewpoint in refine solves: more same-branch choices for GTSP
+	// Reconfiguration: a move turning any joint (joint 7 aside) more than reconfig_threshold. Refine's GTSP edges
+	// and elbow swing add reconfig_weight per rad^2 of turn past it.
+	double reconfig_threshold = 1.0;
+	double reconfig_weight = 10.0;
+	double edge_reconfig_weight = 0.0;  // internal: reconfig_weight while refining, 0 otherwise
 	// Elbow-swing smoothing, after refine: slide each arm pose along its self-motion and move the object with them
 	// to shorten the tour's joint travel; kept only if the planned travel drops.
 	bool elbow_swing = false;
 	int elbow_swing_iters = 50;
 	double elbow_swing_object_step = 0.01;  // m: first object step
 	double elbow_swing_joint_step = 0.1;  // first step along each pose's self-motion (times the travel slope)
-	double elbow_swing_jump_threshold = 1.0;  // rad: a move turning any joint more than this counts as a big move
-	double elbow_swing_jump_weight = 10.0;  // penalty per rad^2 of turn past the threshold; 0 = path length only
 	bool travel_gradient = true;  // false: the descent direction ignores tour travel (cost still includes it)
 	bool manipulability_gradient = true;  // false: the descent direction ignores the manipulability terms
 	bool travel_in_cost = true;  // false: the placement cost leaves out travel (GTSP still orders by travel)
