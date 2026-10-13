@@ -2631,10 +2631,11 @@ double BaseGradientSolver::RealCost(const ObjectPlacement& at, const InnerSoluti
 	return total;
 }
 
-// Plans the tour once and swaps the L2 travel in weighted_cost for the planned one.
+// Plans the tour once and swaps the L2 travel in weighted_cost for the planned one. Only once every viewpoint
+// is reached: before that, comparisons go by reached count and miss gap, so planning would be wasted.
 InnerSolution BaseGradientSolver::WithPlannedTravel(const ObjectPlacement& at, InnerSolution sol)
 {
-	if (!planned_travel || sol.real_cost >= 0.0)
+	if (!planned_travel || !sol.all_reachable || sol.real_cost >= 0.0)
 		return sol;
 	sol.real_cost = RealCost(at, sol);
 	sol.weighted_cost += sol.real_cost - (params.travel_in_cost ? sol.travel_cost : 0.0);
@@ -2643,7 +2644,9 @@ InnerSolution BaseGradientSolver::WithPlannedTravel(const ObjectPlacement& at, I
 
 double BaseGradientSolver::TravelTerm(const InnerSolution& sol) const
 {
-	return planned_travel ? sol.real_cost : params.travel_in_cost ? sol.travel_cost : 0.0;
+	if (planned_travel && sol.real_cost >= 0.0)
+		return sol.real_cost;
+	return params.travel_in_cost ? sol.travel_cost : 0.0;  // not planned yet: what weighted_cost holds
 }
 
 // Cost at the final weight, so solutions found at different weights compare fairly.
@@ -2847,7 +2850,7 @@ bool BaseGradientSolver::AddWall(
 void BaseGradientSolver::LogCostTerms(const InnerSolution& sol)
 {
 	const double travel_weight = (planned_travel || params.travel_in_cost) ? 1.0 : 0.0;
-	const double travel_raw = planned_travel ? sol.real_cost : sol.travel_cost;
+	const double travel_raw = planned_travel ? TravelTerm(sol) : sol.travel_cost;  // 0 until planned (all reached)
 	auto row = [&](const char* name, double raw, double weight) {
 		RCLCPP_INFO(node->get_logger(), "    %-16s %12.4f %10.1f %12.2f", name, raw, weight, raw * weight);
 	};
