@@ -123,11 +123,6 @@ def generate_launch_description():
         description="false: the placement cost leaves out travel (GTSP still orders viewpoints by travel).",
     )
     travel_in_cost = ParameterValue(LaunchConfiguration("travel_in_cost"), value_type=bool)
-    manipulability_weight_initial_arg = DeclareLaunchArgument(
-        "manipulability_weight_initial", default_value="40.0", description="Starting lambda (manipulability weight)."
-    )
-    manipulability_weight_initial = ParameterValue(
-        LaunchConfiguration("manipulability_weight_initial"), value_type=float)
     miss_gap_weight_arg = DeclareLaunchArgument(
         "miss_gap_weight", default_value="5000.0", description="Weight on missed viewpoints' closest-IK gap (0 = no miss gradient)."
     )
@@ -239,10 +234,6 @@ def generate_launch_description():
         "bg_max_joint_deviation_weight": 1.0,
         # Objective = travel cost - this * sum of manipulability (sum is ~2.8 for 38 viewpoints).
         "bg_manipulability_weight": 0.0,
-        # Start each descent at this weight and multiply by the decay per outer iteration down to the
-        # value above (40 * 0.8^k, snapped to it once within 5%: ~14 iterations to reach 0).
-        "bg_manipulability_weight_initial": manipulability_weight_initial,
-        "bg_manipulability_weight_decay": 0.8,
         # Reach-margin barrier: objective also subtracts this * sum of log(manipulability).
         # A missed viewpoint costs the penalty + this * its closest-IK pose gap (m), capped at the cap.
         "bg_miss_gap_weight": miss_gap_weight,
@@ -390,7 +381,6 @@ def generate_launch_description():
             travel_gradient_arg,
             manipulability_gradient_arg,
             travel_in_cost_arg,
-            manipulability_weight_initial_arg,
             miss_gap_weight_arg,
             freeze_order_arg,
             lock_input_order_arg,

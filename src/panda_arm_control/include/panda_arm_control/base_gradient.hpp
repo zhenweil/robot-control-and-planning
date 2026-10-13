@@ -32,8 +32,6 @@ struct BaseGradientParams
 
 	// Manupulability: sqrt(J*J^T)
 	double manipulability_weight = 0.0;
-	double manipulability_weight_initial = 40.0;
-	double manipulability_weight_decay = 0.8;
 	// Missed viewpoints add their closest-IK pose's manipulability too (cost and gradient).
 	bool manipulability_include_missed = false;
 	// Range-aware manipulability: each joint's Jacobian column is scaled by 1 - exp(-k (q-lo)(hi-q)/range^2),

@@ -49,8 +49,6 @@ struct Params
 	double bg_cartesian_distance_weight = 0.0;
 	double bg_max_joint_deviation_weight = 1.0;
 	double bg_manipulability_weight = 0.0;
-	double bg_manipulability_weight_initial = 40.0;
-	double bg_manipulability_weight_decay = 0.8;
 	double bg_miss_gap_weight = 5000.0;
 	bool bg_manipulability_include_missed = false;
 	double bg_manipulability_limit_sharpness = 0.0;
@@ -299,9 +297,6 @@ private:
 		this->declareIfNeeded("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->declareIfNeeded("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
 		this->declareIfNeeded("bg_manipulability_weight", this->params.bg_manipulability_weight);
-		this->declareIfNeeded(
-			"bg_manipulability_weight_initial", this->params.bg_manipulability_weight_initial);
-		this->declareIfNeeded("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->declareIfNeeded("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
 		this->declareIfNeeded("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
 		this->declareIfNeeded("bg_manipulability_limit_sharpness", this->params.bg_manipulability_limit_sharpness);
@@ -382,8 +377,6 @@ private:
 		this->get_parameter("bg_cartesian_distance_weight", this->params.bg_cartesian_distance_weight);
 		this->get_parameter("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
 		this->get_parameter("bg_manipulability_weight", this->params.bg_manipulability_weight);
-		this->get_parameter("bg_manipulability_weight_initial", this->params.bg_manipulability_weight_initial);
-		this->get_parameter("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->get_parameter("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
 		this->get_parameter("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
 		this->get_parameter("bg_manipulability_limit_sharpness", this->params.bg_manipulability_limit_sharpness);
@@ -486,8 +479,6 @@ private:
 		bg.cartesian_distance_weight = this->params.bg_cartesian_distance_weight;
 		bg.max_joint_deviation_weight = this->params.bg_max_joint_deviation_weight;
 		bg.manipulability_weight = this->params.bg_manipulability_weight;
-		bg.manipulability_weight_initial = this->params.bg_manipulability_weight_initial;
-		bg.manipulability_weight_decay = this->params.bg_manipulability_weight_decay;
 		bg.miss_gap_weight = this->params.bg_miss_gap_weight;
 		bg.manipulability_include_missed = this->params.bg_manipulability_include_missed;
 		bg.manipulability_limit_sharpness = this->params.bg_manipulability_limit_sharpness;

@@ -1828,8 +1828,7 @@ BaseGradientResult SolveBaseGradient(
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const std::vector<double>& start_reference_joints,
 	const BaseGradientParams& params_in)
 {
-	// Mutable copy: each descent anneals manipulability_weight from its initial value down to
-	// params_in.manipulability_weight; results are compared at that final weight.
+	// Mutable copy: manipulability_after_reach switches the comfort weights off while viewpoints are missed.
 	BaseGradientParams params = params_in;
 	const double lambda_final = params_in.manipulability_weight;
 	SeededRngSlot() = std::make_unique<random_numbers::RandomNumberGenerator>(
@@ -1878,11 +1877,10 @@ BaseGradientResult SolveBaseGradient(
 
 	// One full gradient descent from `base`, warm-started internally but starting IK/GTSP cold.
 	// warm: IK seeds from an earlier solution (restarts), or null to start from the home config.
-	// Every descent starts at the initial weight; it decays only while all viewpoints are reached.
 	auto run_descent = [&](ObjectPlacement base, int restart_idx, const InnerSolution* warm) -> RestartResult {
 		base = ProjectToBounds(base, params.bounds);
 		params.random_seed = params_in.random_seed + restart_idx;  // each restart draws its own IK luck
-		params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
+		params.manipulability_weight = lambda_final;
 		// manipulability_after_reach: comfort terms (lambda, soft-min) off while any viewpoint is missed, so the
 		// step follows the miss gaps instead of being outvoted; back on once everything is reached.
 		bool manipulability_on = !params.manipulability_after_reach;
@@ -1949,7 +1947,7 @@ BaseGradientResult SolveBaseGradient(
 		rr.placement = base;
 
 		auto record = [&](const ObjectPlacement& b, const InnerSolution& s) {
-			// Re-score at the final weight so points found during annealing compare fairly.
+			// Re-score at the full weight so points found with comfort off compare fairly.
 			InnerSolution sf = s;
 			sf.weighted_cost = travel_term(s) - lambda_final * s.sum_manipulability -
 				params_in.softmin_manipulability_weight * s.softmin_manipulability +
@@ -2128,40 +2126,23 @@ BaseGradientResult SolveBaseGradient(
 			}
 			if (outer > 0)
 			{
-				// Hold the weight high (reach recovery) while any viewpoint is missed; decay it otherwise.
 				if (params.manipulability_after_reach && manipulability_on && !cur.all_reachable)
 				{
 					manipulability_on = false;
 					comfort_off();
 					RCLCPP_INFO(node->get_logger(), "  restart %d: viewpoint missed -- comfort terms off", restart_idx + 1);
 				}
-				else if (!manipulability_on)
+				else if (!manipulability_on && cur.all_reachable)
 				{
-					if (cur.all_reachable)
-					{
-						manipulability_on = true;
-						params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
-						params.softmin_manipulability_weight = params_in.softmin_manipulability_weight;
-						RCLCPP_INFO(node->get_logger(), "  restart %d: all reached -- comfort terms on", restart_idx + 1);
-					}
-				}
-				else if (!cur.all_reachable)
-					params.manipulability_weight = std::max(lambda_final, params_in.manipulability_weight_initial);
-				else
-					params.manipulability_weight = std::max(
-						lambda_final, params.manipulability_weight * params_in.manipulability_weight_decay);
-				// Snap to the final weight once within 5% of the starting gap, so a final weight of 0 ends.
-				if (manipulability_on && params.manipulability_weight - lambda_final <
-					0.05 * (params_in.manipulability_weight_initial - lambda_final))
+					manipulability_on = true;
 					params.manipulability_weight = lambda_final;
+					params.softmin_manipulability_weight = params_in.softmin_manipulability_weight;
+					RCLCPP_INFO(node->get_logger(), "  restart %d: all reached -- comfort terms on", restart_idx + 1);
+				}
 				cur.weighted_cost = travel_term(cur) - params.manipulability_weight * cur.sum_manipulability -
 					params.softmin_manipulability_weight * cur.softmin_manipulability +
 					params.unreachable_penalty * (cur.num_total - cur.num_reachable) + cur.miss_cost;
 			}
-			// A stop rule hit while still annealing jumps the weight to its final value instead of stopping,
-			// so the descent ends at the final objective without waiting out the decay.
-			const bool annealing = params.manipulability_weight > lambda_final * (1.0 + 1e-6);
-
 			Eigen::Vector3d g = AnalyticGradient(
 				state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, start_reference_joints,
 				home_tcp_local, base, params, cur.missed_vp, cur.missed_gap, cur.missed_q);
@@ -2670,12 +2651,6 @@ BaseGradientResult SolveBaseGradient(
 					accepted = false;  // quick probe looked better but the full solve isn't
 			}
 
-			// While viewpoints are missed the weight is held, so retrying the same offset changes nothing.
-			if (!accepted && annealing && cur.all_reachable)
-			{
-				params.manipulability_weight = lambda_final;
-				continue;
-			}
 			if (!accepted)
 			{
 				if (cur.all_reachable)
@@ -2717,12 +2692,6 @@ BaseGradientResult SolveBaseGradient(
 			{
 				if (++stall_count >= std::max(1, params.patience))
 				{
-					if (annealing)
-					{
-						params.manipulability_weight = lambda_final;
-						stall_count = 0;
-						continue;
-					}
 					RCLCPP_INFO(
 						node->get_logger(), "  restart %d: %d iterations with <%.1e relative gain -- stopping early",
 						restart_idx + 1, stall_count, params.convergence_tolerance_cost);
@@ -2736,12 +2705,6 @@ BaseGradientResult SolveBaseGradient(
 
 			if (!gained && base_move < params.convergence_tolerance_offset && rel_impr < params.convergence_tolerance_cost)
 			{
-				if (annealing)
-				{
-					params.manipulability_weight = lambda_final;
-					stall_count = 0;
-					continue;
-				}
 				RCLCPP_INFO(node->get_logger(), "  restart %d: placement settled -- converged", restart_idx + 1);
 				break;
 			}
