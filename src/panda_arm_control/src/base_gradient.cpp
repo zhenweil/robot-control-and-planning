@@ -123,17 +123,22 @@ double MaxJointDeviation(const std::vector<double>& a, const std::vector<double>
 }
 
 // Yoshikawa manipulability w = sqrt(det(J J^T)) of tool0 at q.
-// Per-joint range factor s = 1 - exp(-k (q - lo)(hi - q) / range^2): ~1 mid-range, 0 at a limit; ds = ds/dq.
+// Per-joint room score s = 1 - exp(-k (q - lo)(hi - q) / range^2): ~1 mid-range, 0 at a limit; slope = ds/dq.
 // k <= 0 or an unbounded joint: s = 1. Scales the joint's Jacobian column (penalized manipulability).
-void JointRangeFactors(
+struct JointRoom
+{
+	Eigen::VectorXd score;
+	Eigen::VectorXd slope;
+};
+
+JointRoom JointRoomScore(
 	const moveit::core::JointModelGroup* jmg, const moveit::core::RobotModelConstPtr& model,
-	const std::vector<double>& q, double k, Eigen::VectorXd& s, Eigen::VectorXd& ds)
+	const std::vector<double>& q, double k)
 {
 	const int n = static_cast<int>(q.size());
-	s = Eigen::VectorXd::Ones(n);
-	ds = Eigen::VectorXd::Zero(n);
+	JointRoom room{Eigen::VectorXd::Ones(n), Eigen::VectorXd::Zero(n)};
 	if (k <= 0.0)
-		return;
+		return room;
 	for (int i = 0; i < n; ++i)
 	{
 		const moveit::core::VariableBounds& b =
@@ -144,13 +149,14 @@ void JointRangeFactors(
 		const double qi = q[static_cast<size_t>(i)];
 		const double u = std::max(0.0, (qi - b.min_position_) * (b.max_position_ - qi)) / (range * range);
 		const double e = std::exp(-k * u);
-		s(i) = 1.0 - e;
+		room.score(i) = 1.0 - e;
 		if (u > 0.0)
-			ds(i) = k * e * (b.min_position_ + b.max_position_ - 2.0 * qi) / (range * range);
+			room.slope(i) = k * e * (b.min_position_ + b.max_position_ - 2.0 * qi) / (range * range);
 	}
+	return room;
 }
 
-// w = sqrt(det(Js Js^T)), Js = J with each joint's column scaled by its range factor (limit_sharpness 0 = plain).
+// w = sqrt(det(Js Js^T)), Js = J with each joint's column scaled by its room score (limit_sharpness 0 = plain).
 double Manipulability(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
 	const moveit::core::LinkModel* tool0_link, const std::vector<double>& q, double limit_sharpness)
@@ -159,8 +165,7 @@ double Manipulability(
 	state.update();
 	Eigen::MatrixXd J;
 	state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
-	Eigen::VectorXd s, ds;
-	JointRangeFactors(jmg, state.getRobotModel(), q, limit_sharpness, s, ds);
+	const Eigen::VectorXd s = JointRoomScore(jmg, state.getRobotModel(), q, limit_sharpness).score;
 	const Eigen::MatrixXd Js = J * s.asDiagonal();
 	return std::sqrt(std::max(0.0, (Js * Js.transpose()).determinant()));
 }
@@ -176,8 +181,9 @@ Eigen::VectorXd ManipulabilityJointGradient(
 	Eigen::MatrixXd J;  // 6 x n, [linear; angular] in the base frame
 	state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
 	const int n = static_cast<int>(J.cols());
-	Eigen::VectorXd s, ds;
-	JointRangeFactors(jmg, state.getRobotModel(), q, limit_sharpness, s, ds);
+	const JointRoom room = JointRoomScore(jmg, state.getRobotModel(), q, limit_sharpness);
+	const Eigen::VectorXd& s = room.score;
+	const Eigen::VectorXd& ds = room.slope;
 	const Eigen::MatrixXd Js = J * s.asDiagonal();
 	const Eigen::MatrixXd A = Js * Js.transpose();
 	const double w = std::sqrt(std::max(0.0, A.determinant()));
