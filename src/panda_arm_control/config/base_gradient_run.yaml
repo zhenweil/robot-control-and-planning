@@ -41,7 +41,4 @@
     bg_manipulability_after_reach: false      # comfort terms (manipulability, soft-min) off while any viewpoint is missed
     bg_manipulability_include_missed: true   # missed viewpoints count with their closest IK pose
     bg_manipulability_limit_sharpness: 20.0  # joints near a limit count less in manipulability; 0 = plain
-    bg_self_clearance_weight: 0.2            # -sum log(arm-arm pair distance); 0 = off
-    bg_joint_limit_weight: 10.0              # penalty as joints near their limits; 0 = off
-    bg_joint_limit_zone: 0.15                # share of a joint's range from its limit where the penalty starts
     bg_miss_gap_weight: 200.0

@@ -43,13 +43,6 @@ struct BaseGradientParams
 	// shares of the push add up to 1, so one bad pose can't take over (unlike log). 0 = off.
 	double softmin_manipulability_weight = 0.0;
 	double softmin_tau = 0.01;
-	// Self-clearance: each arm pose costs -weight * sum over all arm-arm pairs of log(distance), so the
-	// gradient always spreads the links apart (folded postures cost more). 0 = off.
-	double self_clearance_weight = 0.0;
-	// Joint-limit room: each arm pose costs weight * sum over joints within `zone` (share of range) of a limit of
-	// ((zone - f) / zone)^2, f = share of range to the nearest limit. Warns before a joint runs out. 0 = off.
-	double joint_limit_weight = 0.0;
-	double joint_limit_zone = 0.15;
 	// A missed viewpoint costs unreachable_penalty + miss_gap_weight * min(gap, miss_gap_cap), where gap
 	// is its closest-IK pose gap (m, rotation scaled by rot_metric_scale): gives misses a gradient.
 	double miss_gap_weight = 5000.0;

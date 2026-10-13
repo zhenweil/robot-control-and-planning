@@ -282,67 +282,6 @@ void FindClosePairs(
 	ClosePairSeparationGradients(world_res, state, jmg, margin, close_pair_gradients, dists);
 }
 
-// Joint-limit room at q: each joint closer to a limit than `zone` (share of its range) adds ((zone - f) / zone)^2,
-// f = distance to the nearest limit / range: 0 outside the zone, 1 at the limit. grad_q = its joint gradient.
-double JointLimitRoomCost(
-	const moveit::core::JointModelGroup* jmg, const moveit::core::RobotModelConstPtr& model, const std::vector<double>& q,
-	double zone, Eigen::VectorXd& grad_q)
-{
-	grad_q = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(q.size()));
-	double cost = 0.0;
-	for (size_t i = 0; i < q.size(); ++i)
-	{
-		const moveit::core::VariableBounds& b = model->getVariableBounds(jmg->getVariableNames()[i]);
-		const double range = b.max_position_ - b.min_position_;
-		if (!b.position_bounded_ || range <= 0.0 || zone <= 0.0)
-			continue;
-		const double to_min = (q[i] - b.min_position_) / range;
-		const double to_max = (b.max_position_ - q[i]) / range;
-		const double f = std::max(0.0, std::min(to_min, to_max));
-		if (f >= zone)
-			continue;
-		const double s = (zone - f) / zone;
-		cost += s * s;
-		const double df_dq = (to_min < to_max ? 1.0 : -1.0) / range;
-		grad_q(static_cast<Eigen::Index>(i)) = -2.0 * s / zone * df_dq;
-	}
-	return cost;
-}
-
-// Self-clearance at q: -sum over all arm-arm pairs of log(distance), and its joint gradient. No cutoff, so
-// every pose gets a push to spread the links apart; close pairs push hardest (slope 1/d).
-double SelfClearanceCost(
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, moveit::core::RobotState& state,
-	const moveit::core::JointModelGroup* jmg, const std::vector<double>& q, Eigen::VectorXd& grad_q)
-{
-	const double all_pairs = 1e3;	// m: distance threshold large enough to return every pair
-	const double min_dist = 1e-3;	// m: floor for touching or overlapping pairs
-	grad_q = Eigen::VectorXd::Zero(jmg->getVariableCount());
-	if (q.empty())
-		return 0.0;
-	state.setJointGroupPositions(jmg, q);
-	state.update();
-	collision_detection::DistanceRequest req = MakeClosePairRequest(state, jmg, all_pairs);
-	collision_detection::DistanceResult res;
-	{
-		planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
-		req.acm = &locked_scene->getAllowedCollisionMatrix();
-		req.enableGroup(locked_scene->getRobotModel());  // scene's model: links are matched by pointer
-		locked_scene->getCollisionEnv()->distanceSelf(req, res, state);
-	}
-	std::vector<Eigen::RowVectorXd> rows;
-	std::vector<double> dists;
-	ClosePairSeparationGradients(res, state, jmg, all_pairs, rows, dists);
-	double cost = 0.0;
-	for (size_t i = 0; i < rows.size(); ++i)
-	{
-		const double d = std::max(min_dist, dists[i]);
-		cost -= std::log(d);
-		grad_q -= rows[i].transpose() / d;
-	}
-	return cost;
-}
-
 // Pose gap in meters: |position|^2 + (rot_scale * |rotation|)^2, square-rooted.
 double WeightedPoseGap(const Eigen::Matrix<double, 6, 1>& e, double rot_scale)
 {
@@ -1006,17 +945,8 @@ struct InnerSolution
 	std::vector<Eigen::Matrix<double, 6, 1>> missed_gap;
 	std::vector<std::vector<double>> missed_q;  // parallel: closest collision-free pose, empty if none
 	double miss_cost = 0.0;  // miss_gap_weight * sum of capped gaps
-	// self_clearance_weight * penalty, over visited (and, if manipulability includes them, missed) poses.
-	double clearance_cost = 0.0;
-	double clearance_sum = 0.0;  // unweighted self-clearance: -sum log(distance)
 	double softmin_manipulability = 0.0;  // SoftMin of w over visited (and included missed) poses
 	double gap_sum = 0.0;		 // unweighted sum of capped miss gaps (m)
-	std::vector<Eigen::VectorXd> clearance_grad;		 // parallel to joints: weighted d(penalty)/dq
-	std::vector<Eigen::VectorXd> missed_clearance_grad;  // parallel to missed_q
-	double limit_cost = 0.0;  // joint_limit_weight * limit_sum
-	double limit_sum = 0.0;   // unweighted joint-limit room penalty
-	std::vector<Eigen::VectorXd> limit_grad;		 // parallel to joints: weighted d(penalty)/dq
-	std::vector<Eigen::VectorXd> missed_limit_grad;  // parallel to missed_q
 	int num_rescued = 0;  // missed by IK, reached via a collision-free closest-IK hit
 	int num_no_free = 0;  // closest IK found no collision-free posture at all (gap taken as the cap)
 	double real_cost = -1.0;  // planned joint travel (sum of ||dq|| along OMPL paths); -1 = not computed
@@ -1191,40 +1121,6 @@ InnerSolution InnerSolve(
 					ws.push_back(Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness));
 		out.softmin_manipulability = SoftMin(ws, params.softmin_tau);
 	}
-	if (params.self_clearance_weight > 0.0)
-	{
-		auto add_clearance = [&](const std::vector<double>& q, std::vector<Eigen::VectorXd>& grads) {
-			Eigen::VectorXd gq;
-			const double c =
-				SelfClearanceCost(planning_scene_monitor, state, jmg, q, gq);
-			out.clearance_sum += c;
-			out.clearance_cost += params.self_clearance_weight * c;
-			grads.push_back(params.self_clearance_weight * gq);
-		};
-		for (const auto& q : out.joints)
-			add_clearance(q, out.clearance_grad);
-		if (params.manipulability_include_missed)
-			for (const auto& q : missed_q)
-				add_clearance(q, out.missed_clearance_grad);
-	}
-	if (params.joint_limit_weight > 0.0)
-	{
-		auto add_limit = [&](const std::vector<double>& q, std::vector<Eigen::VectorXd>& grads) {
-			Eigen::VectorXd gq = Eigen::VectorXd::Zero(jmg->getVariableCount());
-			if (!q.empty())
-			{
-				const double c = JointLimitRoomCost(jmg, state.getRobotModel(), q, params.joint_limit_zone, gq);
-				out.limit_sum += c;
-				out.limit_cost += params.joint_limit_weight * c;
-			}
-			grads.push_back(params.joint_limit_weight * gq);
-		};
-		for (const auto& q : out.joints)
-			add_limit(q, out.limit_grad);
-		if (params.manipulability_include_missed)
-			for (const auto& q : missed_q)
-				add_limit(q, out.missed_limit_grad);
-	}
 	out.num_rescued = num_rescued;
 	out.num_no_free = num_no_free;
 	out.missed_vp = std::move(missed_vp);
@@ -1236,7 +1132,7 @@ InnerSolution InnerSolve(
 
 	out.weighted_cost = (params.travel_in_cost ? out.travel_cost : 0.0) - params.manipulability_weight * out.sum_manipulability -
 		params.softmin_manipulability_weight * out.softmin_manipulability +
-		params.unreachable_penalty * (out.num_total - out.num_reachable) + out.miss_cost + out.clearance_cost + out.limit_cost;
+		params.unreachable_penalty * (out.num_total - out.num_reachable) + out.miss_cost;
 	return out;
 }
 
@@ -1586,9 +1482,7 @@ Eigen::Vector3d AnalyticGradient(
 	const std::vector<int>& tour, const std::vector<std::vector<double>>& joints, const std::vector<double>& home_joints,
 	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params,
 	const std::vector<int>& missed_vp, const std::vector<Eigen::Matrix<double, 6, 1>>& missed_gap,
-	const std::vector<std::vector<double>>& missed_q, const std::vector<Eigen::VectorXd>& clearance_grad,
-	const std::vector<Eigen::VectorXd>& missed_clearance_grad, const std::vector<Eigen::VectorXd>& limit_grad,
-	const std::vector<Eigen::VectorXd>& missed_limit_grad)
+	const std::vector<std::vector<double>>& missed_q)
 {
 	const size_t n = tour.size();
 	Eigen::Isometry3d xform = MakePlacement(base);
@@ -1629,11 +1523,6 @@ Eigen::Vector3d AnalyticGradient(
 		softmin_w.push_back(w);
 		softmin_dw_db.push_back(dw_db);
 	}
-	// Self-clearance: d(penalty)/db = (dq/db)^T d(penalty)/dq.
-	for (size_t k = 0; k < n && k < clearance_grad.size(); ++k)
-		g += dq_db[k].transpose() * clearance_grad[k];
-	for (size_t k = 0; k < n && k < limit_grad.size(); ++k)
-		g += dq_db[k].transpose() * limit_grad[k];
 	// Missed viewpoints: same chain at the closest pose, as if the arm followed the viewpoint.
 	for (size_t m = 0; m < missed_vp.size() && m < missed_q.size() && params.manipulability_include_missed; ++m)
 	{
@@ -1657,10 +1546,6 @@ Eigen::Vector3d AnalyticGradient(
 			softmin_w.push_back(w);
 			softmin_dw_db.push_back(dw_db);
 		}
-		if (m < missed_clearance_grad.size())
-			g += dq_db_missed.transpose() * missed_clearance_grad[m];
-		if (m < missed_limit_grad.size())
-			g += dq_db_missed.transpose() * missed_limit_grad[m];
 	}
 	// d(-sigma softmin)/db = -sigma * sum_i share_i * dw_i/db
 	if (params.softmin_manipulability_weight > 0.0 && !softmin_w.empty())
@@ -2068,7 +1953,7 @@ BaseGradientResult SolveBaseGradient(
 			InnerSolution sf = s;
 			sf.weighted_cost = travel_term(s) - lambda_final * s.sum_manipulability -
 				params_in.softmin_manipulability_weight * s.softmin_manipulability +
-				params.unreachable_penalty * (s.num_total - s.num_reachable) + s.miss_cost + s.clearance_cost + s.limit_cost;
+				params.unreachable_penalty * (s.num_total - s.num_reachable) + s.miss_cost;
 			result.history.push_back(
 				{static_cast<double>(restart_idx), b.x, b.y, b.z, sf.weighted_cost});
 			// Best seen: most viewpoints reached, then cost.
@@ -2112,8 +1997,6 @@ BaseGradientResult SolveBaseGradient(
 			row(planned_travel ? "planned travel" : "L2 travel", travel_raw, travel_weight);
 			row("manipulability", sol.sum_manipulability, -params.manipulability_weight);
 			row("soft-min manip", sol.softmin_manipulability, -params.softmin_manipulability_weight);
-			row("self clearance", sol.clearance_sum, params.self_clearance_weight);
-			row("joint-limit room", sol.limit_sum, params.joint_limit_weight);
 			row("missed count", static_cast<double>(sol.num_total - sol.num_reachable), params.unreachable_penalty);
 			row("miss gap (m)", sol.gap_sum, params.miss_gap_weight);
 			RCLCPP_INFO(node->get_logger(), "    %-16s %12s %10s %12.2f", "total cost", "", "", sol.weighted_cost);
@@ -2181,7 +2064,7 @@ BaseGradientResult SolveBaseGradient(
 		auto cost_at_final_weight = [&](const InnerSolution& sol) {
 			return travel_term(sol) - lambda_final * sol.sum_manipulability -
 				params_in.softmin_manipulability_weight * sol.softmin_manipulability +
-				params.unreachable_penalty * (sol.num_total - sol.num_reachable) + sol.miss_cost + sol.clearance_cost + sol.limit_cost;
+				params.unreachable_penalty * (sol.num_total - sol.num_reachable) + sol.miss_cost;
 		};
 		// Refine at a fixed placement: more full solves, each warm-started from the best so far, scored at the
 		// final weight. With freeze_order the viewpoint order is kept and only the arm poses are re-picked.
@@ -2273,7 +2156,7 @@ BaseGradientResult SolveBaseGradient(
 					params.manipulability_weight = lambda_final;
 				cur.weighted_cost = travel_term(cur) - params.manipulability_weight * cur.sum_manipulability -
 					params.softmin_manipulability_weight * cur.softmin_manipulability +
-					params.unreachable_penalty * (cur.num_total - cur.num_reachable) + cur.miss_cost + cur.clearance_cost + cur.limit_cost;
+					params.unreachable_penalty * (cur.num_total - cur.num_reachable) + cur.miss_cost;
 			}
 			// A stop rule hit while still annealing jumps the weight to its final value instead of stopping,
 			// so the descent ends at the final objective without waiting out the decay.
@@ -2281,24 +2164,19 @@ BaseGradientResult SolveBaseGradient(
 
 			Eigen::Vector3d g = AnalyticGradient(
 				state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, start_reference_joints,
-				home_tcp_local, base, params, cur.missed_vp, cur.missed_gap, cur.missed_q, cur.clearance_grad,
-				cur.missed_clearance_grad, cur.limit_grad, cur.missed_limit_grad);
+				home_tcp_local, base, params, cur.missed_vp, cur.missed_gap, cur.missed_q);
 
 			if (params.trace_line_search)
 			{
 				// Each term's own descent direction (translation part of -gradient) and size.
-				auto part = [&](bool manip, double gap_weight, bool clear, bool limit) {
+				auto part = [&](bool manip, double gap_weight) {
 					BaseGradientParams p = params;
 					p.travel_gradient = false;
 					p.manipulability_gradient = manip;
 					p.miss_gap_weight = gap_weight;
 					return AnalyticGradient(
 						state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, start_reference_joints,
-						home_tcp_local, base, p, cur.missed_vp, cur.missed_gap, cur.missed_q,
-						clear ? cur.clearance_grad : std::vector<Eigen::VectorXd>{},
-						clear ? cur.missed_clearance_grad : std::vector<Eigen::VectorXd>{},
-						limit ? cur.limit_grad : std::vector<Eigen::VectorXd>{},
-						limit ? cur.missed_limit_grad : std::vector<Eigen::VectorXd>{});
+						home_tcp_local, base, p, cur.missed_vp, cur.missed_gap, cur.missed_q);
 				};
 				auto describe = [](const Eigen::Vector3d& gp) {
 					const Eigen::Vector3d d = -gp;
@@ -2309,11 +2187,9 @@ BaseGradientResult SolveBaseGradient(
 					return std::string(buf);
 				};
 				RCLCPP_INFO(
-					node->get_logger(), "    directions: manip %s  gap %s  clear %s  limit %s  total %s",
-					describe(part(params.manipulability_gradient, 0.0, false, false)).c_str(),
-					describe(part(false, params.miss_gap_weight, false, false)).c_str(),
-					describe(part(false, 0.0, true, false)).c_str(), describe(part(false, 0.0, false, true)).c_str(),
-					describe(g).c_str());
+					node->get_logger(), "    directions: manip %s  gap %s  total %s",
+					describe(part(params.manipulability_gradient, 0.0)).c_str(),
+					describe(part(false, params.miss_gap_weight)).c_str(), describe(g).c_str());
 			}
 			if (params.fd_gradient_check)
 			{
@@ -2933,32 +2809,10 @@ BaseGradientResult SolveBaseGradient(
 					ws.push_back(Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness));
 				s.softmin_manipulability = SoftMin(ws, params.softmin_tau);
 			}
-			s.clearance_sum = s.clearance_cost = s.limit_sum = s.limit_cost = 0.0;
-			s.clearance_grad.clear();
-			s.limit_grad.clear();
-			for (const auto& q : s.joints)
-			{
-				Eigen::VectorXd gq;
-				if (params.self_clearance_weight > 0.0)
-				{
-					const double c = SelfClearanceCost(planning_scene_monitor, state, jmg, q, gq);
-					s.clearance_sum += c;
-					s.clearance_cost += params.self_clearance_weight * c;
-					s.clearance_grad.push_back(params.self_clearance_weight * gq);
-				}
-				if (params.joint_limit_weight > 0.0)
-				{
-					gq = Eigen::VectorXd::Zero(jmg->getVariableCount());
-					const double c = JointLimitRoomCost(jmg, state.getRobotModel(), q, params.joint_limit_zone, gq);
-					s.limit_sum += c;
-					s.limit_cost += params.joint_limit_weight * c;
-					s.limit_grad.push_back(params.joint_limit_weight * gq);
-				}
-			}
 			s.real_cost = use_real_cost ? real_cost_of(es.placement, s) : -1.0;
 			s.weighted_cost = (params.travel_in_cost ? s.travel_cost : 0.0) -
 				params.manipulability_weight * s.sum_manipulability -
-				params.softmin_manipulability_weight * s.softmin_manipulability + s.clearance_cost + s.limit_cost;
+				params.softmin_manipulability_weight * s.softmin_manipulability;
 			if (planned_travel)
 				s.weighted_cost += s.real_cost - (params.travel_in_cost ? s.travel_cost : 0.0);
 			const bool keep = use_real_cost ? s.real_cost < before.real_cost : s.travel_cost < before.travel_cost;

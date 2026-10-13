@@ -53,9 +53,6 @@ struct Params
 	double bg_manipulability_weight_decay = 0.8;
 	double bg_miss_gap_weight = 5000.0;
 	bool bg_manipulability_include_missed = false;
-	double bg_self_clearance_weight = 0.0;
-	double bg_joint_limit_weight = 0.0;
-	double bg_joint_limit_zone = 0.15;
 	double bg_manipulability_limit_sharpness = 0.0;
 	double bg_softmin_manipulability_weight = 0.0;
 	double bg_softmin_tau = 0.01;
@@ -308,9 +305,6 @@ private:
 		this->declareIfNeeded("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->declareIfNeeded("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
 		this->declareIfNeeded("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
-		this->declareIfNeeded("bg_self_clearance_weight", this->params.bg_self_clearance_weight);
-		this->declareIfNeeded("bg_joint_limit_weight", this->params.bg_joint_limit_weight);
-		this->declareIfNeeded("bg_joint_limit_zone", this->params.bg_joint_limit_zone);
 		this->declareIfNeeded("bg_manipulability_limit_sharpness", this->params.bg_manipulability_limit_sharpness);
 		this->declareIfNeeded("bg_softmin_manipulability_weight", this->params.bg_softmin_manipulability_weight);
 		this->declareIfNeeded("bg_softmin_tau", this->params.bg_softmin_tau);
@@ -394,9 +388,6 @@ private:
 		this->get_parameter("bg_manipulability_weight_decay", this->params.bg_manipulability_weight_decay);
 		this->get_parameter("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
 		this->get_parameter("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
-		this->get_parameter("bg_self_clearance_weight", this->params.bg_self_clearance_weight);
-		this->get_parameter("bg_joint_limit_weight", this->params.bg_joint_limit_weight);
-		this->get_parameter("bg_joint_limit_zone", this->params.bg_joint_limit_zone);
 		this->get_parameter("bg_manipulability_limit_sharpness", this->params.bg_manipulability_limit_sharpness);
 		this->get_parameter("bg_softmin_manipulability_weight", this->params.bg_softmin_manipulability_weight);
 		this->get_parameter("bg_softmin_tau", this->params.bg_softmin_tau);
@@ -502,9 +493,6 @@ private:
 		bg.manipulability_weight_decay = this->params.bg_manipulability_weight_decay;
 		bg.miss_gap_weight = this->params.bg_miss_gap_weight;
 		bg.manipulability_include_missed = this->params.bg_manipulability_include_missed;
-		bg.self_clearance_weight = this->params.bg_self_clearance_weight;
-		bg.joint_limit_weight = this->params.bg_joint_limit_weight;
-		bg.joint_limit_zone = this->params.bg_joint_limit_zone;
 		bg.manipulability_limit_sharpness = this->params.bg_manipulability_limit_sharpness;
 		bg.softmin_manipulability_weight = this->params.bg_softmin_manipulability_weight;
 		bg.softmin_tau = this->params.bg_softmin_tau;
