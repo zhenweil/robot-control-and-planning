@@ -16,7 +16,6 @@
 
     # Descent
     bg_descent_num_restart: 3
-    bg_descent_restart_perturbation: 0.0     # restarts only change the IK seed, not the start position
     bg_stop_when_all_reached: true
     bg_elbow_swing: false                    # after refine: swing each arm pose's elbow and nudge the object to shorten travel
     bg_room_then_reach: true                 # when stuck: aim at a missed viewpoint; if a blocker is lost, give it room first

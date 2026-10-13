@@ -66,7 +66,6 @@ struct Params
 	int bg_gtsp_num_restart = 2;  // min-of-N inner solves wherever a committed cost matters
 
 	int bg_descent_num_restart = 6;
-	double bg_descent_restart_perturbation = 0.05;
 	int bg_max_outer_iterations = 50;
 	double bg_initial_step = 0.02;
 	double bg_step_shrink = 0.25;
@@ -312,7 +311,6 @@ private:
 		this->declareIfNeeded("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->declareIfNeeded("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
 		this->declareIfNeeded("bg_descent_num_restart", this->params.bg_descent_num_restart);
-		this->declareIfNeeded("bg_descent_restart_perturbation", this->params.bg_descent_restart_perturbation);
 		this->declareIfNeeded("bg_max_outer_iterations", this->params.bg_max_outer_iterations);
 		this->declareIfNeeded("bg_initial_step", this->params.bg_initial_step);
 		this->declareIfNeeded("bg_step_shrink", this->params.bg_step_shrink);
@@ -392,7 +390,6 @@ private:
 		this->get_parameter("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->get_parameter("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
 		this->get_parameter("bg_descent_num_restart", this->params.bg_descent_num_restart);
-		this->get_parameter("bg_descent_restart_perturbation", this->params.bg_descent_restart_perturbation);
 		this->get_parameter("bg_max_outer_iterations", this->params.bg_max_outer_iterations);
 		this->get_parameter("bg_initial_step", this->params.bg_initial_step);
 		this->get_parameter("bg_step_shrink", this->params.bg_step_shrink);
@@ -496,7 +493,6 @@ private:
 		bg.gtsp_num_restart = this->params.bg_gtsp_num_restart;
 		bg.gtsp_two_opt_rounds = this->params.bg_gtsp_two_opt_rounds;
 		bg.descent_num_restart = this->params.bg_descent_num_restart;
-		bg.descent_restart_perturbation = this->params.bg_descent_restart_perturbation;
 		bg.max_outer_iterations = this->params.bg_max_outer_iterations;
 		bg.initial_step = this->params.bg_initial_step;
 		bg.step_shrink = this->params.bg_step_shrink;

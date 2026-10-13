@@ -65,7 +65,6 @@ struct BaseGradientParams
 
 	// Base gradient parameters
 	int descent_num_restart = 3;
-	double descent_restart_perturbation = 0.1; // sigma value of gaussian perturbation
 	int max_outer_iterations = 50;
 	double initial_step = 0.02;
 	double step_shrink = 0.25;

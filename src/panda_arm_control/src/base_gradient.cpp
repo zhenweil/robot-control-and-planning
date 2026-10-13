@@ -103,13 +103,6 @@ Eigen::Vector3d ToOffsetVec(const ObjectPlacement& a, const ObjectPlacement& b) 
 	return Eigen::Vector3d(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
-// Gaussian kick around `center`: sigma_m meters on x/y/z.
-ObjectPlacement PerturbOffset(const ObjectPlacement& center, std::mt19937& rng, double sigma_m)
-{
-	std::normal_distribution<double> nm(0.0, sigma_m);
-	return {center.x + nm(rng), center.y + nm(rng), center.z + nm(rng)};
-}
-
 double JointL2Distance(const std::vector<double>& a, const std::vector<double>& b)
 {
 	double d = 0.0;
@@ -2777,7 +2770,6 @@ BaseGradientResult SolveBaseGradient(
 		return rr;  // record() runs at least once, so rr holds this restart's best-cost solution
 	};
 
-	std::mt19937 rng(static_cast<unsigned int>(params.random_seed));
 	const int descent_num_restart = std::max(1, params.descent_num_restart);
 	RestartResult overall;
 
@@ -2788,7 +2780,7 @@ BaseGradientResult SolveBaseGradient(
 						   std::isnan(params.initial_x) ? object_translation_nominal.x() : params.initial_x,
 						   std::isnan(params.initial_y) ? object_translation_nominal.y() : params.initial_y,
 						   std::isnan(params.initial_z) ? object_translation_nominal.z() : params.initial_z}
-					 : PerturbOffset(overall.placement, rng, params.descent_restart_perturbation);
+					 : overall.placement;  // restarts change only the IK seed
 		RestartResult rr = run_descent(start, r, r == 0 ? nullptr : &overall.sol);
 
 		// More viewpoints reached wins, then lower cost.

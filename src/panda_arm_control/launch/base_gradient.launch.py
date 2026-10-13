@@ -250,10 +250,8 @@ def generate_launch_description():
         "bg_ik_retries_per_point": ik_retries_per_point,
         "bg_gtsp_num_restart": gtsp_num_restart,
         "bg_gtsp_two_opt_rounds": 5,
-        # Basin hopping (1 = single descent). Each restart after the first descends from the best
-        # offset so far kicked by a Gaussian of std-dev descent_restart_perturbation (m).
+        # Descents (1 = single). Each restart starts from the best position so far with a new IK seed.
         "bg_descent_num_restart": descent_num_restart,
-        "bg_descent_restart_perturbation": 0.05,
         "bg_max_outer_iterations": max_outer_iterations,
         "bg_initial_step": 0.02,
         "bg_step_shrink": 0.25,
