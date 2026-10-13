@@ -517,31 +517,26 @@ double WeightedEdgeCost(
 
 // One RNG for all random IK starts, seeded from random_seed in SolveBaseGradient: MoveIt's default RNGs
 // seed from the clock, so without this the same seed still gives a different run.
-std::unique_ptr<random_numbers::RandomNumberGenerator>& SeededRngSlot()
-{
-	static std::unique_ptr<random_numbers::RandomNumberGenerator> rng;
-	return rng;
-}
+std::unique_ptr<random_numbers::RandomNumberGenerator> seeded_rng;
 
 random_numbers::RandomNumberGenerator& SeededRng()
 {
-	auto& rng = SeededRngSlot();
-	if (!rng)
-		rng = std::make_unique<random_numbers::RandomNumberGenerator>(42);
-	return *rng;
+	if (!seeded_rng)
+		seeded_rng = std::make_unique<random_numbers::RandomNumberGenerator>(42);
+	return *seeded_rng;
 }
 
 // Restart the IK random starts from `seed`. Done before every solve in the descent, so each placement is
 // scored with the same luck: the same spot gives the same answer, and nearby spots compare fairly.
 void ReseedRng(int seed)
 {
-	SeededRngSlot() = std::make_unique<random_numbers::RandomNumberGenerator>(static_cast<boost::uint32_t>(std::max(1, seed)));
+	seeded_rng = std::make_unique<random_numbers::RandomNumberGenerator>(static_cast<boost::uint32_t>(std::max(1, seed)));
 }
 
 // IK with a fixed amount of work: attempts > 0 runs that many single KDL attempts (a tiny timeout gives one
 // each; the first from the current state, the rest from random states), so a seed gives the same answer
 // regardless of CPU speed. attempts <= 0: one time-limited call (timeout).
-bool SolveIk(
+bool CollisionFreeExactIk(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg, const geometry_msgs::msg::Pose& target,
 	int attempts, double timeout, const moveit::core::GroupStateValidityCallbackFn& validity,
 	random_numbers::RandomNumberGenerator* rng = nullptr)
@@ -585,7 +580,7 @@ std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 
 		state.setJointGroupPositions(jmg, seed_per_viewpoint[i]);
 		// Tracking: one attempt from the current pose; the random search below runs only if the arm can't follow.
-		if (SolveIk(
+		if (CollisionFreeExactIk(
 				state, jmg, target_local, params.tracking ? 1 : params.ik_attempts, params.ik_timeout, validity_callback,
 				rng))
 		{
@@ -602,7 +597,7 @@ std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
 			if (sols.empty() && attempt >= 4)
 				break;
 			state.setToRandomPositions(jmg, rng ? *rng : SeededRng());
-			if (!SolveIk(state, jmg, target_local, params.ik_attempts, params.ik_timeout, validity_callback, rng))
+			if (!CollisionFreeExactIk(state, jmg, target_local, params.ik_attempts, params.ik_timeout, validity_callback, rng))
 				continue;
 			std::vector<double> s;
 			state.copyJointGroupPositions(jmg, s);
@@ -1222,7 +1217,7 @@ TrackResult TrackTour(
 		Eigen::Vector3d p = (xform * tour_poses_obj[tour[k]]).translation();
 
 		state.setJointGroupPositions(jmg, seeds[k]);
-		bool ok = SolveIk(state, jmg, target_local, params.ik_attempts, params.ik_timeout, validity_callback);
+		bool ok = CollisionFreeExactIk(state, jmg, target_local, params.ik_attempts, params.ik_timeout, validity_callback);
 		if (ok)
 		{
 			state.copyJointGroupPositions(jmg, r.joints[k]);
@@ -1840,8 +1835,7 @@ BaseGradientResult SolveBaseGradient(
 	// Mutable copy: manipulability_after_reach switches the comfort weights off while viewpoints are missed.
 	BaseGradientParams params = params_in;
 	const double lambda_final = params_in.manipulability_weight;
-	SeededRngSlot() = std::make_unique<random_numbers::RandomNumberGenerator>(
-		static_cast<boost::uint32_t>(std::max(1, params.random_seed)));
+	ReseedRng(params.random_seed);
 	// Object and viewpoints relative to the object's position; MakePlacement puts them at an absolute one.
 	const Eigen::Isometry3d object_pose_obj = MakeIsometry(Eigen::Vector3d::Zero(), object_rotation_nominal);
 	std::vector<Eigen::Isometry3d> tour_poses_obj = tour_tcp_poses_nominal;
