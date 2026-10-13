@@ -207,12 +207,20 @@ Eigen::VectorXd ManipulabilityJointGradient(
 	return g;
 }
 
-// If two points are too close, use jacobian to push them apart
-void ClosePairSeparationGradients(
-	const collision_detection::DistanceResult& res, const moveit::core::RobotState& state,
-	const moveit::core::JointModelGroup* jmg, double margin, std::vector<Eigen::RowVectorXd>& close_pair_gradients,
-	std::vector<double>& dists)
+// Close point pairs: per pair, d(distance)/dq (a row over the group's joints) and its distance.
+struct ClosePairs
 {
+	std::vector<Eigen::RowVectorXd> gradients;
+	std::vector<double> dists;
+};
+
+// If two points are too close, use jacobian to push them apart
+// Used to find closest IK solution
+ClosePairs ClosePairSeparationGradients(
+	const collision_detection::DistanceResult& res, const moveit::core::RobotState& state,
+	const moveit::core::JointModelGroup* jmg, double margin)
+{
+	ClosePairs pairs;
 	const auto& model = state.getRobotModel();
 	for (const auto& pair_entry : res.distances)
 		for (const auto& d : pair_entry.second)
@@ -242,10 +250,11 @@ void ClosePairSeparationGradients(
 			}
 			if (any_robot_side && row.norm() > 1e-9)
 			{
-				close_pair_gradients.push_back(row);
-				dists.push_back(d.distance);
+				pairs.gradients.push_back(row);
+				pairs.dists.push_back(d.distance);
 			}
 		}
+	return pairs;
 }
 
 // Distance request for arm-arm and arm-object pairs closer than `threshold`.
@@ -264,10 +273,9 @@ collision_detection::DistanceRequest MakeClosePairRequest(
 }
 
 // Pairs within `margin` at the state's current pose, with d(distance)/dq rows.
-void FindClosePairs(
+ClosePairs FindClosePairs(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const moveit::core::RobotState& state,
-	const moveit::core::JointModelGroup* jmg, collision_detection::DistanceRequest& req, double margin,
-	std::vector<Eigen::RowVectorXd>& close_pair_gradients, std::vector<double>& dists)
+	const moveit::core::JointModelGroup* jmg, collision_detection::DistanceRequest& req, double margin)
 {
 	collision_detection::DistanceResult self_res, world_res;
 	planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
@@ -277,8 +285,11 @@ void FindClosePairs(
 	req.enableGroup(locked_scene->getRobotModel());
 	locked_scene->getCollisionEnv()->distanceSelf(req, self_res, state);
 	locked_scene->getCollisionEnv()->distanceRobot(req, world_res, state);
-	ClosePairSeparationGradients(self_res, state, jmg, margin, close_pair_gradients, dists);
-	ClosePairSeparationGradients(world_res, state, jmg, margin, close_pair_gradients, dists);
+	ClosePairs pairs = ClosePairSeparationGradients(self_res, state, jmg, margin);
+	const ClosePairs world = ClosePairSeparationGradients(world_res, state, jmg, margin);
+	pairs.gradients.insert(pairs.gradients.end(), world.gradients.begin(), world.gradients.end());
+	pairs.dists.insert(pairs.dists.end(), world.dists.begin(), world.dists.end());
+	return pairs;
 }
 
 // Pose gap in meters: |position|^2 + (rot_scale * |rotation|)^2, square-rooted.
@@ -375,9 +386,7 @@ ClosestIkResult CollisionAwareClosestIk(
 		const double gap = WeightedPoseGap(pose_error, rot_scale);
 
 		// Arm-arm and arm-object pairs within the margin.
-		std::vector<Eigen::RowVectorXd> close_pair_gradients;
-		std::vector<double> dists;
-		FindClosePairs(planning_scene_monitor, state, jmg, req, margin, close_pair_gradients, dists);
+		const ClosePairs pairs = FindClosePairs(planning_scene_monitor, state, jmg, req, margin);
 		// Full validity check (same as IK and the planner) before keeping a pose: the distance query alone
 		// let through self-collisions near the base (hand vs link0, link5 vs link7).
 		if (gap < best.gap && IsStateCollisionFree(planning_scene_monitor, &state, jmg, q.data()) &&
@@ -399,12 +408,12 @@ ClosestIkResult CollisionAwareClosestIk(
 
 		Eigen::MatrixXd J;
 		state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
-		Eigen::MatrixXd Jc(static_cast<Eigen::Index>(close_pair_gradients.size()), dof);
-		Eigen::VectorXd r(static_cast<Eigen::Index>(close_pair_gradients.size()));
-		for (size_t k = 0; k < close_pair_gradients.size(); ++k)
+		Eigen::MatrixXd Jc(static_cast<Eigen::Index>(pairs.gradients.size()), dof);
+		Eigen::VectorXd r(static_cast<Eigen::Index>(pairs.gradients.size()));
+		for (size_t k = 0; k < pairs.gradients.size(); ++k)
 		{
-			Jc.row(static_cast<Eigen::Index>(k)) = close_pair_gradients[k];
-			r(static_cast<Eigen::Index>(k)) = margin - dists[k];
+			Jc.row(static_cast<Eigen::Index>(k)) = pairs.gradients[k];
+			r(static_cast<Eigen::Index>(k)) = margin - pairs.dists[k];
 		}
 		const Eigen::VectorXd manip_grad = ManipulabilityJointGradient(state, jmg, tool0_link, q, limit_sharpness);
 		// Step using only the joints in `mask`. Priority: pairs out to the margin, then the target, then
