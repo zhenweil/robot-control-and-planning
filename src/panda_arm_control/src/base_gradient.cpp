@@ -1368,6 +1368,200 @@ Eigen::Vector3d ManipulabilityOffsetGradient(
 	return dq_db.transpose() * ManipulabilityJointGradient(state, jmg, tool0_link, q, limit_sharpness);
 }
 
+struct ElbowSwingResult
+{
+	double travel_before = 0.0;  // joint path length home -> tour (rad)
+	double travel_after = 0.0;
+	int big_moves_before = 0;  // moves where one joint turns more than elbow_swing_jump_threshold
+	int big_moves_after = 0;
+	int iters = 0;
+	int fail_ik = 0, fail_limits = 0, fail_collision = 0, fail_longer = 0;  // rejected tries, by first failed check
+	ObjectPlacement placement;
+	std::vector<std::vector<double>> joints;  // parallel to the tour
+};
+
+// Elbow-swing smoothing: shortens the tour's joint path (home first) for a fixed viewpoint order. Each step moves
+// the object along the summed pull of all poses (each pose follows it through its Jacobian) and slides each pose
+// along its self-motion (Jacobian null space), so the tool stays on its viewpoint. Small IK corrections remove
+// drift; a step is kept only if all poses stay collision-free and within limits and the goal drops. Goal: path
+// length plus jump_weight * sum over moves and joints of (turn - threshold)^2 past the threshold, so big jumps
+// (reconfigurations) shrink first.
+ElbowSwingResult ElbowSwingSmooth(
+	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
+	const moveit::core::LinkModel* tool0_link, const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
+	const std::vector<int>& tour, const std::vector<std::vector<double>>& joints, const std::vector<double>& home_joints,
+	const ObjectPlacement& base, const BaseGradientParams& params)
+{
+	const size_t n = tour.size();
+	const int dof = static_cast<int>(jmg->getVariableCount());
+	auto to_vec = [](const std::vector<double>& q) { return Eigen::Map<const Eigen::VectorXd>(q.data(), q.size()); };
+	auto path_len = [&](const std::vector<std::vector<double>>& qs) {
+		double len = 0.0;
+		const std::vector<double>* prev = &home_joints;
+		for (const auto& q : qs)
+		{
+			len += JointL2Distance(*prev, q);
+			prev = &q;
+		}
+		return len;
+	};
+	const double thr = params.elbow_swing_jump_threshold, w_jump = params.elbow_swing_jump_weight;
+	auto goal = [&](const std::vector<std::vector<double>>& qs) {
+		double f = path_len(qs);
+		for (size_t k = 0; k < qs.size(); ++k)
+			for (size_t j = 0; j < qs[k].size(); ++j)
+			{
+				const double ex = std::abs(qs[k][j] - (k == 0 ? home_joints : qs[k - 1])[j]) - thr;
+				if (ex > 0.0)
+					f += w_jump * ex * ex;
+			}
+		return f;
+	};
+	auto big_moves = [&](const std::vector<std::vector<double>>& qs) {
+		int c = 0;
+		for (size_t k = 0; k < qs.size(); ++k)
+			c += MaxJointDeviation(k == 0 ? home_joints : qs[k - 1], qs[k]) > thr ? 1 : 0;
+		return c;
+	};
+	auto jacobian = [&](const std::vector<double>& q) {
+		state.setJointGroupPositions(jmg, q);
+		state.update();
+		Eigen::MatrixXd J;  // 6 x dof, [linear; angular] in the base frame
+		state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
+		return J;
+	};
+	auto pinv = [&](const Eigen::MatrixXd& J) {
+		Eigen::MatrixXd JJt = J * J.transpose();
+		JJt.diagonal().array() += params.jacobian_damping * params.jacobian_damping;
+		return Eigen::MatrixXd(J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6)));
+	};
+	// Pulls q onto `target` with a few damped Newton steps, clamped to the joint limits (a pose at a limit
+	// would otherwise fail every step); false if it doesn't get within tolerance.
+	auto correct = [&](std::vector<double>& q, const Eigen::Isometry3d& target) {
+		for (int it = 0; it < 10; ++it)
+		{
+			jmg->enforcePositionBounds(q.data());
+			state.setJointGroupPositions(jmg, q);
+			state.update();
+			const Eigen::Isometry3d& tcp = state.getGlobalLinkTransform(tool0_link);
+			Eigen::Matrix<double, 6, 1> e;
+			e.head<3>() = target.translation() - tcp.translation();
+			const Eigen::AngleAxisd aa(target.rotation() * tcp.rotation().transpose());
+			e.tail<3>() = aa.angle() * aa.axis();
+			if (e.head<3>().norm() < 1e-5 && e.tail<3>().norm() < 1e-4)
+				return true;
+			Eigen::MatrixXd J;
+			state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
+			const Eigen::VectorXd dq = pinv(J) * e;
+			for (int j = 0; j < dof; ++j)
+				q[static_cast<size_t>(j)] += dq(j);
+		}
+		return false;
+	};
+
+	ElbowSwingResult out;
+	out.placement = base;
+	out.joints = joints;
+	out.travel_before = out.travel_after = path_len(joints);
+	out.big_moves_before = out.big_moves_after = big_moves(joints);
+	double best_goal = goal(joints);
+	if (n == 0)
+		return out;
+	double object_step = params.elbow_swing_object_step;
+	double joint_step = params.elbow_swing_joint_step;
+	for (int iter = 0; iter < params.elbow_swing_iters && object_step > 1e-5; ++iter)
+	{
+		// Pull on each pose: the slope of the goal (home edge + both neighbours).
+		std::vector<Eigen::VectorXd> g(n, Eigen::VectorXd::Zero(dof));
+		for (size_t k = 0; k < n; ++k)
+		{
+			const Eigen::VectorXd d = to_vec(out.joints[k]) - to_vec(k == 0 ? home_joints : out.joints[k - 1]);
+			if (d.norm() < 1e-9)
+				continue;
+			Eigen::VectorXd gd = d.normalized();
+			for (int j = 0; j < dof; ++j)
+			{
+				const double ex = std::abs(d(j)) - thr;
+				if (ex > 0.0)
+					gd(j) += 2.0 * w_jump * ex * (d(j) > 0.0 ? 1.0 : -1.0);
+			}
+			g[k] += gd;
+			if (k > 0)
+				g[k - 1] -= gd;
+		}
+		std::vector<Eigen::MatrixXd> Jp(n), N(n);
+		Eigen::Vector3d g_obj = Eigen::Vector3d::Zero();
+		for (size_t k = 0; k < n; ++k)
+		{
+			const Eigen::MatrixXd J = jacobian(out.joints[k]);
+			Jp[k] = pinv(J);
+			N[k] = Eigen::MatrixXd::Identity(dof, dof) - Jp[k] * J;
+			g_obj += (Jp[k] * PlacementJacobian()).transpose() * g[k];  // path slope w.r.t. the object position
+		}
+
+		bool moved = false;
+		while (object_step > 1e-5 && !moved)
+		{
+			const Eigen::Vector3d dp = g_obj.norm() > 1e-9 ? Eigen::Vector3d(-object_step * g_obj.normalized())
+														  : Eigen::Vector3d::Zero();
+			const ObjectPlacement cand = ProjectToBounds(
+				{out.placement.x + dp(0), out.placement.y + dp(1), out.placement.z + dp(2)}, params.bounds);
+			const Eigen::Vector3d dp_real = ToOffsetVec(cand, out.placement);
+			const Eigen::Isometry3d xform = MakePlacement(cand);
+			SetObjectPose(planning_scene_monitor, xform * object_pose_obj);
+			std::vector<std::vector<double>> qs = out.joints;
+			bool ok = true;
+			for (size_t k = 0; k < n && ok; ++k)
+			{
+				const Eigen::VectorXd dq =
+					Jp[k] * PlacementJacobian() * dp_real - joint_step * N[k] * g[k];
+				for (int j = 0; j < dof; ++j)
+					qs[k][static_cast<size_t>(j)] += dq(j);
+				if (!correct(qs[k], xform * tour_poses_obj[static_cast<size_t>(tour[k])]))
+				{
+					++out.fail_ik;
+					ok = false;
+				}
+				else if (!jmg->satisfiesPositionBounds(qs[k].data()))
+				{
+					++out.fail_limits;
+					ok = false;
+				}
+				else if (!IsStateCollisionFree(planning_scene_monitor, &state, jmg, qs[k].data()))
+				{
+					++out.fail_collision;
+					ok = false;
+				}
+			}
+			const double f = ok ? goal(qs) : std::numeric_limits<double>::max();
+			if (ok && f >= best_goal - 1e-6)
+				++out.fail_longer;
+			if (f < best_goal - 1e-6)
+			{
+				best_goal = f;
+				out.placement = cand;
+				out.joints = std::move(qs);
+				out.travel_after = path_len(out.joints);
+				out.big_moves_after = big_moves(out.joints);
+				out.iters = iter + 1;
+				object_step = std::min(1.5 * object_step, params.elbow_swing_object_step);
+				joint_step = std::min(1.5 * joint_step, params.elbow_swing_joint_step);
+				moved = true;
+			}
+			else
+			{
+				object_step *= 0.5;
+				joint_step *= 0.5;
+			}
+		}
+		if (!moved)
+			break;
+	}
+	SetObjectPose(planning_scene_monitor, MakePlacement(out.placement) * object_pose_obj);
+	return out;
+}
+
 // A wall learned from a probe step that lost viewpoint vp: steps within kWallHalfAngle of `n` (the failed step's
 // direction, unit) are blocked. `room` is vp's comfort direction that the step went against (zero if unknown).
 // Forgotten once the object is far from where it was learned.
@@ -2713,6 +2907,76 @@ BaseGradientResult SolveBaseGradient(
 				"  restart %d: refined %d solves at final abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  real %.2f -> %.2f",
 				restart_idx + 1, params.refine_solves, rr.placement.x, rr.placement.y, rr.placement.z, start.travel_cost,
 				rr.sol.travel_cost, start.real_cost, rr.sol.real_cost);
+		}
+
+		// Elbow-swing smoothing at the result (all reached only): same order, smoothed poses, object nudged with them.
+		// Kept only if the planned travel (else the L2 travel) drops, like refine.
+		if (params.elbow_swing && rr.ok && !rr.sol.tour.empty())
+		{
+			InnerSolution before = rr.sol;
+			if (use_real_cost && before.real_cost < 0.0)
+				before.real_cost = real_cost_of(rr.placement, before);
+			const ElbowSwingResult es = ElbowSwingSmooth(
+				state, jmg, tool0_link, planning_scene_monitor, object_pose_obj, tour_poses_obj, before.tour,
+				before.joints, start_reference_joints, rr.placement, params);
+			// Rescore the smoothed tour; every viewpoint is still reached, so there are no missed-pose terms.
+			InnerSolution s = before;
+			s.joints = es.joints;
+			s.travel_cost = TourWeightedCost(
+				es.placement, s.tour, s.joints, tour_poses_obj, start_reference_joints, home_tcp_local, params);
+			s.sum_manipulability =
+				SumManipulability(state, jmg, tool0_link, s.joints, params.manipulability_limit_sharpness);
+			if (params_in.softmin_manipulability_weight > 0.0)
+			{
+				std::vector<double> ws;
+				for (const auto& q : s.joints)
+					ws.push_back(Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness));
+				s.softmin_manipulability = SoftMin(ws, params.softmin_tau);
+			}
+			s.clearance_sum = s.clearance_cost = s.limit_sum = s.limit_cost = 0.0;
+			s.clearance_grad.clear();
+			s.limit_grad.clear();
+			for (const auto& q : s.joints)
+			{
+				Eigen::VectorXd gq;
+				if (params.self_clearance_weight > 0.0)
+				{
+					const double c = SelfClearanceCost(planning_scene_monitor, state, jmg, q, gq);
+					s.clearance_sum += c;
+					s.clearance_cost += params.self_clearance_weight * c;
+					s.clearance_grad.push_back(params.self_clearance_weight * gq);
+				}
+				if (params.joint_limit_weight > 0.0)
+				{
+					gq = Eigen::VectorXd::Zero(jmg->getVariableCount());
+					const double c = JointLimitRoomCost(jmg, state.getRobotModel(), q, params.joint_limit_zone, gq);
+					s.limit_sum += c;
+					s.limit_cost += params.joint_limit_weight * c;
+					s.limit_grad.push_back(params.joint_limit_weight * gq);
+				}
+			}
+			s.real_cost = use_real_cost ? real_cost_of(es.placement, s) : -1.0;
+			s.weighted_cost = (params.travel_in_cost ? s.travel_cost : 0.0) -
+				params.manipulability_weight * s.sum_manipulability -
+				params.softmin_manipulability_weight * s.softmin_manipulability + s.clearance_cost + s.limit_cost;
+			if (planned_travel)
+				s.weighted_cost += s.real_cost - (params.travel_in_cost ? s.travel_cost : 0.0);
+			const bool keep = use_real_cost ? s.real_cost < before.real_cost : s.travel_cost < before.travel_cost;
+			RCLCPP_INFO(
+				node->get_logger(),
+				"  restart %d: elbow swing %d iters: joint path %.2f -> %.2f rad, big moves %d -> %d, object moved %.4f m to abs (%.4f, %.4f, "
+				"%.4f) m, real %.2f -> %.2f%s  (rejected tries: ik %d, limits %d, collision %d, longer %d)",
+				restart_idx + 1, es.iters, es.travel_before, es.travel_after, es.big_moves_before, es.big_moves_after, ToOffsetVec(es.placement, rr.placement).norm(),
+				es.placement.x, es.placement.y, es.placement.z, before.real_cost, s.real_cost, keep ? "  <-- kept" : "", es.fail_ik,
+				es.fail_limits, es.fail_collision, es.fail_longer);
+			if (keep)
+			{
+				rr.placement = es.placement;
+				rr.sol = std::move(s);
+			}
+			else
+				rr.sol = std::move(before);
+			rr.cost = cost_at_final_weight(rr.sol);
 		}
 
 		return rr;  // record() runs at least once, so rr holds this restart's best-cost solution
