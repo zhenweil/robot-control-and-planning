@@ -320,7 +320,7 @@ std::set<std::string> ToolSideLinks(const moveit::core::LinkModel* tool0_link)
 	return links;
 }
 
-// True if a 6 cm thick rod (hand width) from the tool to the target hits nothing (object or arm; the tool side excepted). A closest
+// True if a thin rod (1 cm) from the tool to the target hits nothing (object or arm; the tool side excepted). A closest
 // pose with something in between can't slide onto the viewpoint, so its gap and slope would mislead.
 bool ClearPathToTarget(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, moveit::core::RobotState& state,
@@ -335,7 +335,7 @@ bool ClearPathToTarget(
 	rod_pose.linear() = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d::UnitZ(), local / length).toRotationMatrix();
 	const std::string id = "path_to_target";
 	state.attachBody(
-		id, Eigen::Isometry3d::Identity(), {std::make_shared<shapes::Cylinder>(0.03, length)}, {rod_pose}, tool_side,
+		id, Eigen::Isometry3d::Identity(), {std::make_shared<shapes::Cylinder>(0.005, length)}, {rod_pose}, tool_side,
 		tool0_link->getName());
 	state.update();
 	collision_detection::CollisionRequest req;
