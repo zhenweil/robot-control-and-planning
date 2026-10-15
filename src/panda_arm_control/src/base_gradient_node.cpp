@@ -65,9 +65,11 @@ struct Params
 	int bg_gtsp_num_restart = 2;  // min-of-N inner solves wherever a committed cost matters
 
 	double bg_jump_softmin_weight = 100.0;
-	bool bg_reach_map_jump = false;
+	int bg_reach_outer_iterations = 0;
+	double bg_reach_outer_step = 0.1;
 	std::string bg_reach_map_file;
 	int bg_reach_map_samples = 1000000;
+	bool bg_reach_map_self_collision = true;
 	double bg_reach_map_voxel = 0.04;
 	int bg_reach_map_directions = 100;
 	double bg_reach_map_tau = 0.05;
@@ -117,43 +119,6 @@ struct Params
 	double execution_planning_time = 5.0;
 	int execution_planning_attempts = 5;
 };
-
-std::vector<Eigen::Isometry3d> LoadTourTcpPoses(const std::string& tour_input_dir)
-{
-	std::string json_path = tour_input_dir + "/selected_robot_poses.json";
-	std::ifstream file(json_path);
-	if (!file.is_open())
-		throw std::runtime_error("Could not open tour input file: " + json_path);
-
-	Json::Value root;
-	Json::CharReaderBuilder reader_builder;
-	std::string errs;
-	if (!Json::parseFromStream(reader_builder, file, &root, &errs))
-		throw std::runtime_error("Failed to parse " + json_path + ": " + errs);
-
-	std::vector<std::pair<int, Eigen::Isometry3d>> entries;
-	for (const auto& item : root)
-	{
-		int id = item["id"].asInt();
-		const auto& pos = item["tcp_position"];
-		const auto& quat = item["tcp_quaternion_xyzw"];
-
-		Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
-		pose.translation() = Eigen::Vector3d(pos["x"].asDouble(), pos["y"].asDouble(), pos["z"].asDouble());
-		pose.linear() = Eigen::Quaterniond(
-							 quat["w"].asDouble(), quat["x"].asDouble(), quat["y"].asDouble(), quat["z"].asDouble())
-							 .toRotationMatrix();
-		entries.emplace_back(id, pose);
-	}
-
-	std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-
-	std::vector<Eigen::Isometry3d> poses;
-	poses.reserve(entries.size());
-	for (const auto& e : entries)
-		poses.push_back(e.second);
-	return poses;
-}
 
 // The surface the robot is mounted on: a wide slab just under the base, so no arm pose (IK or closest IK) can reach
 // below it. The base link rests on it, so that pair is allowed to touch.
@@ -315,9 +280,11 @@ private:
 		this->declareIfNeeded("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->declareIfNeeded("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
 		this->declareIfNeeded("bg_jump_softmin_weight", this->params.bg_jump_softmin_weight);
-		this->declareIfNeeded("bg_reach_map_jump", this->params.bg_reach_map_jump);
+		this->declareIfNeeded("bg_reach_outer_iterations", this->params.bg_reach_outer_iterations);
+		this->declareIfNeeded("bg_reach_outer_step", this->params.bg_reach_outer_step);
 		this->declareIfNeeded("bg_reach_map_file", this->params.bg_reach_map_file);
 		this->declareIfNeeded("bg_reach_map_samples", this->params.bg_reach_map_samples);
+		this->declareIfNeeded("bg_reach_map_self_collision", this->params.bg_reach_map_self_collision);
 		this->declareIfNeeded("bg_reach_map_voxel", this->params.bg_reach_map_voxel);
 		this->declareIfNeeded("bg_reach_map_directions", this->params.bg_reach_map_directions);
 		this->declareIfNeeded("bg_reach_map_tau", this->params.bg_reach_map_tau);
@@ -399,9 +366,11 @@ private:
 		this->get_parameter("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->get_parameter("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
 		this->get_parameter("bg_jump_softmin_weight", this->params.bg_jump_softmin_weight);
-		this->get_parameter("bg_reach_map_jump", this->params.bg_reach_map_jump);
+		this->get_parameter("bg_reach_outer_iterations", this->params.bg_reach_outer_iterations);
+		this->get_parameter("bg_reach_outer_step", this->params.bg_reach_outer_step);
 		this->get_parameter("bg_reach_map_file", this->params.bg_reach_map_file);
 		this->get_parameter("bg_reach_map_samples", this->params.bg_reach_map_samples);
+		this->get_parameter("bg_reach_map_self_collision", this->params.bg_reach_map_self_collision);
 		this->get_parameter("bg_reach_map_voxel", this->params.bg_reach_map_voxel);
 		this->get_parameter("bg_reach_map_directions", this->params.bg_reach_map_directions);
 		this->get_parameter("bg_reach_map_tau", this->params.bg_reach_map_tau);
@@ -507,9 +476,11 @@ private:
 		bg.gtsp_num_restart = this->params.bg_gtsp_num_restart;
 		bg.gtsp_two_opt_rounds = this->params.bg_gtsp_two_opt_rounds;
 		bg.jump_softmin_weight = this->params.bg_jump_softmin_weight;
-		bg.reach_map_jump = this->params.bg_reach_map_jump;
+		bg.reach_outer_iterations = this->params.bg_reach_outer_iterations;
+		bg.reach_outer_step = this->params.bg_reach_outer_step;
 		bg.reach_map_file = this->params.bg_reach_map_file;
 		bg.reach_map_samples = this->params.bg_reach_map_samples;
+		bg.reach_map_self_collision = this->params.bg_reach_map_self_collision;
 		bg.reach_map_voxel = this->params.bg_reach_map_voxel;
 		bg.reach_map_directions = this->params.bg_reach_map_directions;
 		bg.reach_map_tau = this->params.bg_reach_map_tau;

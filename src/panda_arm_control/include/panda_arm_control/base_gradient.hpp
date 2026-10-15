@@ -66,11 +66,15 @@ struct BaseGradientParams
 	int descent_num_restart = 3;
 	// Before each restart: climb the reached viewpoints' manipulability (sum + this x soft-min) from the stuck spot.
 	double jump_softmin_weight = 100.0;
-	// Jump instead by climbing a reachability map (reachability_map.hpp, built once from forward kinematics and
-	// cached): soft-min over all viewpoints of how well the arm reaches their position and approach direction. No IK.
-	bool reach_map_jump = false;
+	// Outer loop on a reachability map (reachability_map.hpp; build it first with reachability_map.launch.py): once every
+	// viewpoint is reached, step up the soft-min over all viewpoints of how well the arm reaches their position and
+	// approach direction (no IK), solve again from there, keep the lower cost. The map settings below must match the ones
+	// it was built with (config/reachability_map.yaml).
+	int reach_outer_iterations = 0;  // 0 = off
+	double reach_outer_step = 0.1;  // m, halved when a step doesn't lower the cost
 	std::string reach_map_file;  // cache; empty = ~/.ros/reachability_<group>.bin
 	int reach_map_samples = 1000000;
+	bool reach_map_self_collision = true;
 	double reach_map_voxel = 0.04;  // m
 	int reach_map_directions = 100;  // approach-direction bins
 	double reach_map_tau = 0.05;  // soft-min temperature (map values are 0..1)

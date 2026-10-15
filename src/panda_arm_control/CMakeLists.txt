@@ -90,6 +90,21 @@ add_executable(base_gradient
 	src/base_gradient_node.cpp
 	)
 
+# Builds the reachability map that base_gradient's bg_reach_map_jump loads.
+add_executable(build_reachability_map
+	src/reachability_map.cpp
+	src/build_reachability_map.cpp
+	)
+target_include_directories(build_reachability_map PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+ament_target_dependencies(build_reachability_map rclcpp moveit_ros_planning random_numbers)
+
+# Sanity check: climbs the saved reachability map from a start object position (no IK).
+add_executable(reachability_climb
+	src/reachability_map.cpp
+	src/viewpoint_io.cpp
+	src/reachability_climb.cpp
+	)
+
 # Random-sampling placement baseline (separate from base_gradient).
 add_executable(random_placement
 	src/real_cost_planning.cpp
@@ -97,7 +112,7 @@ add_executable(random_placement
 	src/random_placement_node.cpp
 	)
 
-foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement)
+foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement reachability_climb)
 	target_include_directories(${viewpoint_planner_target} PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		)
@@ -136,7 +151,7 @@ install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement
+install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement build_reachability_map reachability_climb
 	DESTINATION lib/${PROJECT_NAME}
 	)
 

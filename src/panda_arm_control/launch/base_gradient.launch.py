@@ -277,7 +277,7 @@ def generate_launch_description():
         [FindPackageShare("panda_arm_control"), "config", "object_pose.yaml"]
     )
 
-    # Reachability-map generation settings (used when bg_reach_map_jump is on).
+    # Reachability-map generation settings (used by the reachability outer loop, bg_reach_outer_iterations).
     reachability_map_config = PathJoinSubstitution(
         [FindPackageShare("panda_arm_control"), "config", "reachability_map.yaml"]
     )

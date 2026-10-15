@@ -1,10 +1,11 @@
-# Reachability map generation (reachability_map.cpp), used when bg_reach_map_jump is on.
-# Built once from forward kinematics of random joint samples and cached in bg_reach_map_file; it is rebuilt when any
-# setting below (or the robot, group, tool link) changes. Loaded by base_gradient.launch.py before params_file.
+# Reachability map settings. Build the map with: ros2 launch panda_arm_control reachability_map.launch.py
+# base_gradient (bg_reach_outer_iterations > 0) loads it, also reading this file, and only accepts a map built with the same
+# settings (and robot, group, tool link).
 /**:
   ros__parameters:
     bg_reach_map_file: ""                    # cache; empty = ~/.ros/reachability_<group>.bin
-    bg_reach_map_samples: 1000000            # random joint configurations
+    bg_reach_map_samples: 10000000           # random joint configurations
+    bg_reach_map_self_collision: true        # drop samples where the arm hits itself
     bg_reach_map_voxel: 0.04                 # m: position cell size
     bg_reach_map_directions: 100             # approach-direction (tool z) bins over the sphere
     bg_reach_map_limit_sharpness: 20.0       # samples count by their joint-limit room; 0 = all count 1

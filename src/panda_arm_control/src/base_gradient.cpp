@@ -1022,8 +1022,9 @@ public:
 	DescentResult RunDescent(const Position& start, int restart, const TourSolution* warm);
 	// Before a restart: climb the reached viewpoints' manipulability from a stuck spot. Returns where it ends.
 	Position ManipulabilityJump(const Position& from, const TourSolution& warm, int restart);
-	// Alternative: climb the reachability-map score of all viewpoints (no IK).
-	Position ReachabilityJump(const Position& from, int restart);
+	// Outer loop: one step up the reachability-map score of all viewpoints (no IK) from a finished result. Empty if
+	// no matching map is saved or no step raises the score.
+	std::optional<Position> ReachabilityStep(const Position& from, double step, int outer);
 
 	BaseGradientResult result;  // history and solve count; SolveBaseGradient fills in the rest
 
@@ -1103,7 +1104,8 @@ private:
 	const moveit::core::LinkModel* shoulder = nullptr;	// reach margin: shoulder-wrist distance vs its max
 	const moveit::core::LinkModel* wrist = nullptr;
 	double max_reach = 0.0;
-	std::optional<ReachabilityMap> reach_map;  // loaded or built on first use
+	std::optional<ReachabilityMap> reach_map;  // loaded on first use
+	bool reach_map_tried = false;
 	std::vector<int> reach_bins;				   // each viewpoint's approach-direction bin
 
 	// --- Per descent ---
@@ -1612,66 +1614,56 @@ bool Solver::TakeStep(const Step& step, TourSolution committed, int iter, double
 // Gradient ascent on the reached viewpoints' manipulability (sum + jump_softmin_weight x soft-min), whatever is
 // reachable at each spot; misses and travel ignored. Backtracking line search; a step is kept when its full solve
 // raises the score. Ends when no step does, or after `patience` steps of tiny gain.
-// Gradient ascent on the soft-min, over all viewpoints (reached or not), of their reachability-map values; steps from
-// initial_step halving down to 5 mm.
-Position Solver::ReachabilityJump(const Position& from, int restart_in)
+// One step up the soft-min, over all viewpoints (reached or not), of their reachability-map values: `step`, else half or
+// a quarter of it, whichever first raises the score.
+std::optional<Position> Solver::ReachabilityStep(const Position& from, double step, int outer)
 {
-	if (!reach_map)
+	if (!reach_map_tried)
 	{
+		reach_map_tried = true;
 		ReachabilityMap::Options options;
 		options.samples = params.reach_map_samples;
+		options.self_collision = params.reach_map_self_collision;
 		options.voxel = params.reach_map_voxel;
 		options.directions = params.reach_map_directions;
 		options.limit_sharpness = params.reach_map_limit_sharpness;
 		options.seed = params.reach_map_seed;
-		const char* ros_home = std::getenv("HOME");
-		const std::string path = !params.reach_map_file.empty()
-			? params.reach_map_file
-			: std::string(ros_home ? ros_home : "/tmp") + "/.ros/reachability_" + group_name + ".bin";
-		reach_map = ReachabilityMap::LoadOrBuild(path, robot_model, group_name, tool->getName(), options);
-		for (const Eigen::Isometry3d& v : viewpoints)
-			reach_bins.push_back(reach_map->Bin(v.linear().col(2)));
-		if (reach_map->built)
-			RCLCPP_INFO(node->get_logger(), "reachability map built in %.1f s, saved to %s", reach_map->build_seconds, path.c_str());
-		else
-			RCLCPP_INFO(node->get_logger(), "reachability map loaded from %s", path.c_str());
-	}
-	auto score = [&](const Position& at, Eigen::Vector3d* grad) {
-		std::vector<double> values(viewpoints.size());
-		std::vector<Eigen::Vector3d> grads(viewpoints.size());
-		for (size_t v = 0; v < viewpoints.size(); ++v)
-			values[v] = reach_map->Value(reach_bins[v], at + viewpoints[v].translation(), &grads[v]);
-		std::vector<double> shares;
-		const double s = SoftMin(values, params.reach_map_tau, &shares);
-		*grad = Eigen::Vector3d::Zero();
-		for (size_t v = 0; v < values.size(); ++v)
-			*grad += shares[v] * grads[v];
-		*grad = LockAxes(*grad);
-		return s;
-	};
-	Position at = from;
-	Eigen::Vector3d g;
-	const double start_score = score(at, &g);
-	double s = start_score;
-	for (double step = params.initial_step; step >= 0.005 && g.norm() > 1e-12;)
-	{
-		const Position cand = Clamp(at + step * g.normalized(), params.bounds);
-		Eigen::Vector3d g_cand;
-		const double s_cand = score(cand, &g_cand);
-		if (s_cand > s)
+		const std::string path =
+			params.reach_map_file.empty() ? ReachabilityMap::DefaultPath(group_name) : params.reach_map_file;
+		reach_map = ReachabilityMap::Load(path, robot_model, group_name, tool->getName(), options);
+		if (reach_map)
 		{
-			at = cand;
-			s = s_cand;
-			g = g_cand;
+			for (const Eigen::Isometry3d& v : viewpoints)
+				reach_bins.push_back(reach_map->Bin(v.linear().col(2)));
+			RCLCPP_INFO(node->get_logger(), "reachability map loaded from %s", path.c_str());
 		}
 		else
-			step *= 0.5;
+			RCLCPP_WARN(
+				node->get_logger(),
+				"no reachability map built with these settings at %s (ros2 launch panda_arm_control "
+				"reachability_map.launch.py) -- using the manipulability jump",
+				path.c_str());
 	}
-	RCLCPP_INFO(
-		node->get_logger(),
-		"reachability jump %d: score %.4f -> %.4f, moved %.4f m from abs (%.4f, %.4f, %.4f) to (%.4f, %.4f, %.4f)",
-		restart_in + 1, start_score, s, (at - from).norm(), from.x(), from.y(), from.z(), at.x(), at.y(), at.z());
-	return at;
+	if (!reach_map)
+		return std::nullopt;
+	auto score = [&](const Position& at) { return reach_map->ScoreAt(viewpoints, reach_bins, at, params.reach_map_tau).value; };
+	const Eigen::Vector3d g = LockAxes(reach_map->ScoreAt(viewpoints, reach_bins, from, params.reach_map_tau).gradient);
+	const double start_score = score(from);
+	for (double size = step; size >= 0.25 * step - 1e-12 && g.norm() > 1e-12; size *= 0.5)
+	{
+		const Position cand = Clamp(from + size * g.normalized(), params.bounds);
+		const double s = score(cand);
+		if (s > start_score)
+		{
+			RCLCPP_INFO(
+				node->get_logger(),
+				"outer %d: reachability step %.3f m, map score %.4f -> %.4f, abs (%.4f, %.4f, %.4f) -> (%.4f, %.4f, %.4f)",
+				outer, size, start_score, s, from.x(), from.y(), from.z(), cand.x(), cand.y(), cand.z());
+			return cand;
+		}
+	}
+	RCLCPP_INFO(node->get_logger(), "outer %d: no step raises the reachability-map score (%.4f)", outer, start_score);
+	return std::nullopt;
 }
 
 Position Solver::ManipulabilityJump(const Position& from, const TourSolution& warm, int restart_in)
@@ -2672,28 +2664,50 @@ BaseGradientResult SolveBaseGradient(
 	const Position start(
 		start_or_nominal(params.initial_x, 0), start_or_nominal(params.initial_y, 1), start_or_nominal(params.initial_z, 2));
 
-	// Restarts: from the best so far, a manipulability jump, then a new descent with a new IK seed. Stop once every
+	// Inner: descents from `from`; before each restart a manipulability jump from the best so far. Stops once every
 	// viewpoint is reached.
 	const int num_restarts = std::max(1, params.descent_num_restart);
-	DescentResult overall;
-	for (int r = 0; r < num_restarts && rclcpp::ok(); ++r)
+	auto solve_from = [&](const Position& from) {
+		DescentResult best;
+		for (int r = 0; r < num_restarts && rclcpp::ok(); ++r)
+		{
+			const Position at = r == 0 ? from : solver.ManipulabilityJump(best.position, best.sol, r);
+			const DescentResult d = solver.RunDescent(at, r, r == 0 ? nullptr : &best.sol);
+			const bool improved = r == 0 || d.sol.num_reachable > best.sol.num_reachable ||
+				(d.sol.num_reachable == best.sol.num_reachable && d.cost < best.cost);
+			RCLCPP_INFO(
+				node->get_logger(),
+				"restart %d/%d done: total cost=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, %.4f, %.4f) "
+				"m%s",
+				r + 1, num_restarts, d.cost, d.sol.travel + params.unreachable_penalty * (n - d.sol.num_reachable),
+				d.sol.sum_manipulability, d.sol.num_reachable, n, d.position.x(), d.position.y(), d.position.z(),
+				(r > 0 && improved) ? "  <-- new best" : "");
+			if (improved)
+				best = d;
+			if (best.ok)
+				break;
+		}
+		return best;
+	};
+
+	// Outer: once every viewpoint is reached (and refined), step up the reachability map and solve again from there;
+	// keep the result if its cost is lower, else halve the step.
+	DescentResult overall = solve_from(start);
+	double step = params.reach_outer_step;
+	for (int outer = 1; outer <= params.reach_outer_iterations && overall.ok && step >= 0.02 && rclcpp::ok(); ++outer)
 	{
-		const Position from = r == 0 ? start
-			: params.reach_map_jump	 ? solver.ReachabilityJump(overall.position, r)
-									 : solver.ManipulabilityJump(overall.position, overall.sol, r);
-		const DescentResult d = solver.RunDescent(from, r, r == 0 ? nullptr : &overall.sol);
-		const bool improved = r == 0 || d.sol.num_reachable > overall.sol.num_reachable ||
-			(d.sol.num_reachable == overall.sol.num_reachable && d.cost < overall.cost);
-		RCLCPP_INFO(
-			node->get_logger(),
-			"restart %d/%d done: total cost=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, %.4f, %.4f) m%s",
-			r + 1, num_restarts, d.cost, d.sol.travel + params.unreachable_penalty * (n - d.sol.num_reachable),
-			d.sol.sum_manipulability, d.sol.num_reachable, n, d.position.x(), d.position.y(), d.position.z(),
-			(r > 0 && improved) ? "  <-- new best" : "");
-		if (improved)
-			overall = d;
-		if (overall.ok)
+		const std::optional<Position> next = solver.ReachabilityStep(overall.position, step, outer);
+		if (!next)
 			break;
+		const DescentResult d = solve_from(*next);
+		const bool better = d.ok && d.cost < overall.cost;
+		RCLCPP_INFO(
+			node->get_logger(), "outer %d done: reachable %d/%d, cost %.4f vs %.4f best -> %s", outer, d.sol.num_reachable, n,
+			d.cost, overall.cost, better ? "new best" : "kept the best, halving the step");
+		if (better)
+			overall = d;
+		else
+			step *= 0.5;
 	}
 
 	BaseGradientResult result = solver.result;

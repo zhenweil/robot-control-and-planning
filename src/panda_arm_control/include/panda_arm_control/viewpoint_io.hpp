@@ -10,6 +10,9 @@
 
 #include "panda_arm_control/viewpoint_types.hpp"
 
+// Tour TCP poses from <tour_input_dir>/selected_robot_poses.json, ordered by id.
+std::vector<Eigen::Isometry3d> LoadTourTcpPoses(const std::string& tour_input_dir);
+
 // Shared geometry helpers used when placing the object / building markers, common to every
 // viewpoint_planner_* node.
 Eigen::Vector3d ToVector3(const std::vector<double>& v, const Eigen::Vector3d& fallback);

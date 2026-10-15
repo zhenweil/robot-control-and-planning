@@ -1,5 +1,6 @@
 #include "panda_arm_control/viewpoint_io.hpp"
 
+#include <algorithm>
 #include <fstream>
 
 #include <json/json.h>
@@ -432,4 +433,41 @@ geometry_msgs::msg::PoseArray BuildWaypointPoseArray(
 	for (const auto* c : selected)
 		msg.poses.push_back(c->tcp_pose);
 	return msg;
+}
+
+std::vector<Eigen::Isometry3d> LoadTourTcpPoses(const std::string& tour_input_dir)
+{
+	std::string json_path = tour_input_dir + "/selected_robot_poses.json";
+	std::ifstream file(json_path);
+	if (!file.is_open())
+		throw std::runtime_error("Could not open tour input file: " + json_path);
+
+	Json::Value root;
+	Json::CharReaderBuilder reader_builder;
+	std::string errs;
+	if (!Json::parseFromStream(reader_builder, file, &root, &errs))
+		throw std::runtime_error("Failed to parse " + json_path + ": " + errs);
+
+	std::vector<std::pair<int, Eigen::Isometry3d>> entries;
+	for (const auto& item : root)
+	{
+		int id = item["id"].asInt();
+		const auto& pos = item["tcp_position"];
+		const auto& quat = item["tcp_quaternion_xyzw"];
+
+		Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+		pose.translation() = Eigen::Vector3d(pos["x"].asDouble(), pos["y"].asDouble(), pos["z"].asDouble());
+		pose.linear() = Eigen::Quaterniond(
+							 quat["w"].asDouble(), quat["x"].asDouble(), quat["y"].asDouble(), quat["z"].asDouble())
+							 .toRotationMatrix();
+		entries.emplace_back(id, pose);
+	}
+
+	std::sort(entries.begin(), entries.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+
+	std::vector<Eigen::Isometry3d> poses;
+	poses.reserve(entries.size());
+	for (const auto& e : entries)
+		poses.push_back(e.second);
+	return poses;
 }
