@@ -1108,13 +1108,21 @@ private:
 	bool reach_map_tried = false;
 	std::vector<int> reach_bins;				   // each viewpoint's approach-direction bin
 
+	// --- Whole run: every move, kept for RViz ---
+	enum class Move { Kinematic, Jump, Reachability };
+	struct Segment
+	{
+		Position from, to;
+		Move move;
+	};
+	std::vector<Segment> moves;
+
 	// --- Per descent ---
 	int restart = 0;
 	int seed = 0;
 	Position position;	  // current object position
 	TourSolution current;  // full solve at `position`
 	DescentResult best;	  // best of this descent
-	std::vector<Position> trail;
 	std::vector<Joints> seeds;
 	int stall_count = 0;
 	std::vector<Joints> last_reached;  // each viewpoint's joints when last reached
@@ -1200,7 +1208,6 @@ bool Solver::StartDescent(const Position& start, int restart_in, const TourSolut
 	restart = restart_in;
 	seed = params.random_seed + restart;  // each restart draws its own IK luck
 	position = Clamp(start, params.bounds);
-	trail = {position};
 	seeds = warm ? SeedsFrom(*warm, home, num_vp) : std::vector<Joints>(static_cast<size_t>(num_vp), home);
 	stall_count = 0;
 	last_reached.assign(static_cast<size_t>(num_vp), {});
@@ -1581,10 +1588,10 @@ bool Solver::TakeStep(const Step& step, TourSolution committed, int iter, double
 	const double rel_gain = (current.cost - committed.cost) / std::max(std::abs(current.cost), 1e-9);
 	const bool gained = committed.num_reachable > current.num_reachable;  // progress even if the cost rose
 
+	moves.push_back({position, step.at, Move::Kinematic});
 	position = step.at;
 	current = std::move(committed);
 	Remember(current);
-	trail.push_back(position);
 	Record(position, current);
 	RCLCPP_INFO(
 		node->get_logger(), "restart %d/%d iter %d/%d: abs (%.4f, %.4f, %.4f) m  reachable %d/%d  |grad|=%.4f  step=%.4f m",
@@ -1641,7 +1648,7 @@ std::optional<Position> Solver::ReachabilityStep(const Position& from, double st
 			RCLCPP_WARN(
 				node->get_logger(),
 				"no reachability map built with these settings at %s (ros2 launch panda_arm_control "
-				"reachability_map.launch.py) -- using the manipulability jump",
+				"reachability_map.launch.py) -- skipping the reachability steps",
 				path.c_str());
 	}
 	if (!reach_map)
@@ -1659,6 +1666,7 @@ std::optional<Position> Solver::ReachabilityStep(const Position& from, double st
 				node->get_logger(),
 				"outer %d: reachability step %.3f m, map score %.4f -> %.4f, abs (%.4f, %.4f, %.4f) -> (%.4f, %.4f, %.4f)",
 				outer, size, start_score, s, from.x(), from.y(), from.z(), cand.x(), cand.y(), cand.z());
+			moves.push_back({from, cand, Move::Reachability});
 			return cand;
 		}
 	}
@@ -1724,9 +1732,11 @@ Position Solver::ManipulabilityJump(const Position& from, const TourSolution& wa
 		if (score(committed) <= score(current))
 			break;
 		const double gain = (score(committed) - score(current)) / std::max(std::abs(score(current)), 1e-9);
+		moves.push_back({position, step->at, Move::Jump});
 		position = step->at;
 		current = std::move(committed);
 		log_step(iter + 1, step->size);
+		Publish(-g);
 		if (gain >= params.convergence_tolerance_cost)
 			stall_count = 0;
 		else if (++stall_count >= std::max(1, params.patience))
@@ -2548,7 +2558,7 @@ std_msgs::msg::ColorRGBA Rgba(float r, float g, float b, float a)
 	return c;
 }
 
-// Live markers: object mesh, trail of past positions, -gradient arrow, viewpoints (green reached, red missed), and
+// Live markers: object mesh, every move so far (orange kinematic, white jump, cyan reachability), -gradient arrow, viewpoints (green reached, red missed), and
 // each miss's closest pose with a line to its target. The previous publish is cleared first.
 void Solver::Publish(const Eigen::Vector3d& neg_grad)
 {
@@ -2585,20 +2595,26 @@ void Solver::Publish(const Eigen::Vector3d& neg_grad)
 	}
 	markers.markers.push_back(vps);
 
-	if (trail.size() > 1)
+	if (!moves.empty())
 	{
-		Marker line = MakeMarker("base_gradient_trail", Marker::LINE_STRIP, stamp);
-		line.scale.x = 0.004;
-		line.color = Rgba(1.0f, 0.4f, 0.1f, 0.8f);
+		Marker lines = MakeMarker("base_gradient_trail", Marker::LINE_LIST, stamp);
+		lines.scale.x = 0.004;
 		Marker crumbs = MakeMarker("base_gradient_history", Marker::SPHERE_LIST, stamp);
 		crumbs.scale.x = crumbs.scale.y = crumbs.scale.z = 0.012;
-		crumbs.color = line.color;
-		for (const Position& p : trail)
+		for (const Segment& m : moves)
 		{
-			line.points.push_back(ToPoint((Translation(p) * object_pose).translation()));
-			crumbs.points.push_back(line.points.back());
+			const std_msgs::msg::ColorRGBA c = m.move == Move::Kinematic ? Rgba(1.0f, 0.4f, 0.1f, 0.9f)
+				: m.move == Move::Jump									 ? Rgba(1.0f, 1.0f, 1.0f, 0.9f)
+																		 : Rgba(0.0f, 0.9f, 0.9f, 0.9f);
+			for (const Position& p : {m.from, m.to})
+			{
+				lines.points.push_back(ToPoint((Translation(p) * object_pose).translation()));
+				lines.colors.push_back(c);
+			}
+			crumbs.points.push_back(lines.points.back());
+			crumbs.colors.push_back(c);
 		}
-		markers.markers.push_back(line);
+		markers.markers.push_back(lines);
 		markers.markers.push_back(crumbs);
 	}
 
