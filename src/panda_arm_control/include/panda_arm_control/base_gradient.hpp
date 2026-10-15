@@ -105,6 +105,9 @@ struct BaseGradientParams
 	// Room-then-reach: one-sided walls learned from lost viewpoints; when stuck, aim at a missed viewpoint,
 	// and if a blocker is lost, first move to give it room, then aim again. Moves that lose nothing may raise the cost.
 	bool room_then_reach = false;
+	// Kinematic room-then-reach: pick each move from the reached viewpoints' joint-limit, stretch and collision
+	// margins (predicted through the arm Jacobian) instead of walls. Needs room_then_reach.
+	bool kinematic_room = false;
 	bool tracking = false;  // internal: set on the params copy used for tracked solves
 	bool trace_line_search = false;  // log every line-search probe and full solve against the current point
 	int refine_at_reach = 0;  // log N refine solves at the first all-reached placement (descent continues)

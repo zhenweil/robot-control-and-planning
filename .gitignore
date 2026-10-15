@@ -4,4 +4,4 @@ log
 __pycache__/
 *.pyc
 experiments/**/work/
-experiments/start_position_sweep/runs/abl_*/
+experiments/start_position_sweep/runs/*/

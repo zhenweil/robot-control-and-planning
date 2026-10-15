@@ -238,11 +238,14 @@ Eigen::VectorXd ManipulabilityJointGradient(
 	return g;
 }
 
-// Close point pairs: per pair, d(distance)/dq (a row over the group's joints) and its distance.
+// Close point pairs: per pair, d(distance)/dq (a row over the group's joints), its distance, d(distance)/d(object
+// position) (zero unless one side is the object) and "link - link" for logs.
 struct ClosePairs
 {
 	std::vector<Eigen::RowVectorXd> gradients;
 	std::vector<double> dists;
+	std::vector<Eigen::Vector3d> object_slopes;
+	std::vector<std::string> names;
 };
 
 // If two points are too close, use jacobian to push them apart
@@ -259,9 +262,12 @@ ClosePairs ClosePairSeparationGradients(
 			if (d.distance >= margin)
 				continue;
 			Eigen::RowVectorXd row = Eigen::RowVectorXd::Zero(jmg->getVariableCount());
+			Eigen::Vector3d object_slope = Eigen::Vector3d::Zero();
 			bool any_robot_side = false;
 			for (int side = 0; side < 2; ++side)
 			{
+				if (d.body_types[side] == collision_detection::BodyType::WORLD_OBJECT && d.link_names[side] == "object")
+					object_slope += (side == 0 ? -1.0 : 1.0) * d.normal;  // the object's points move with it
 				if (d.body_types[side] != collision_detection::BodyType::ROBOT_LINK &&
 					d.body_types[side] != collision_detection::BodyType::ROBOT_ATTACHED)
 					continue;
@@ -283,6 +289,8 @@ ClosePairs ClosePairSeparationGradients(
 			{
 				pairs.gradients.push_back(row);
 				pairs.dists.push_back(d.distance);
+				pairs.object_slopes.push_back(object_slope);
+				pairs.names.push_back(d.link_names[0] + " - " + d.link_names[1]);
 			}
 		}
 	return pairs;
@@ -321,6 +329,8 @@ ClosePairs FindClosePairs(
 	const ClosePairs world = ClosePairSeparationGradients(world_res, state, jmg, margin);
 	pairs.gradients.insert(pairs.gradients.end(), world.gradients.begin(), world.gradients.end());
 	pairs.dists.insert(pairs.dists.end(), world.dists.begin(), world.dists.end());
+	pairs.object_slopes.insert(pairs.object_slopes.end(), world.object_slopes.begin(), world.object_slopes.end());
+	pairs.names.insert(pairs.names.end(), world.names.begin(), world.names.end());
 	return pairs;
 }
 
@@ -1904,6 +1914,99 @@ ObjectPlacement Shifted(const ObjectPlacement& at, const Eigen::Vector3d& d, dou
 	return ProjectToBounds({at.x + size * d(0), at.y + size * d(1), at.z + size * d(2)}, b);
 }
 
+// Weighted closest-IK gap of viewpoint v in s: 0 if reached, infinite if missed with no gap.
+double MissGap(const InnerSolution& s, int v, double rot_scale)
+{
+	const auto it = std::find(s.missed_vp.begin(), s.missed_vp.end(), v);
+	if (it == s.missed_vp.end())
+		return 0.0;
+	const size_t m = static_cast<size_t>(it - s.missed_vp.begin());
+	return m < s.missed_gap.size() ? WeightedPoseGap(s.missed_gap[m], rot_scale)
+								   : std::numeric_limits<double>::infinity();
+}
+
+// J^T (J J^T + damping^2 I)^-1
+Eigen::MatrixXd DampedPinv(const Eigen::MatrixXd& J, double damping)
+{
+	Eigen::MatrixXd JJt = J * J.transpose();
+	JJt.diagonal().array() += damping * damping;
+	return J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(J.rows(), J.rows()));
+}
+
+// One safety margin of a reached viewpoint: joint-limit distance (rad), stretch = smallest singular value of the
+// tool Jacobian, or collision distance (m). slope: d(value)/d(object position) with the arm following the viewpoint;
+// joint_slope: d(value)/dq.
+struct Margin
+{
+	int vp = -1;
+	std::string what;
+	double value = 0.0;
+	double floor = 0.0;
+	Eigen::Vector3d slope = Eigen::Vector3d::Zero();
+	Eigen::VectorXd joint_slope;
+};
+
+// A move and the margin that limits it most (-1 if none).
+struct SafeMove
+{
+	Eigen::Vector3d d = Eigen::Vector3d::Zero();
+	int blocker = -1;
+};
+
+// The move nearest `want` with |d| <= radius that keeps every margin, to first order, above its floor and above
+// half its value: value + slope.d >= min(floor, value / 2), so a margin near its limit closes in but never crosses.
+// floor_scale[vp] (s) tightens a viewpoint after an unexpected loss: min(s floor, (1 - 1/(2s)) value).
+// Dykstra's alternating projections.
+SafeMove NearestSafeMove(
+	const Eigen::Vector3d& want, const std::vector<Margin>& margins, const std::vector<double>& floor_scale,
+	double radius)
+{
+	auto bound = [&](const Margin& m) {
+		const double s = floor_scale[static_cast<size_t>(m.vp)];
+		return std::min(0.0, std::min(s * m.floor, (1.0 - 0.5 / s) * m.value) - m.value);  // 0: staying put is safe
+	};
+	std::vector<size_t> near;  // margins that can reach their floor within the ball
+	for (size_t i = 0; i < margins.size(); ++i)
+		if (margins[i].slope.norm() > 1e-9 && -margins[i].slope.norm() * radius < bound(margins[i]))
+			near.push_back(i);
+	SafeMove out;
+	out.d = want;
+	std::vector<Eigen::Vector3d> correction(near.size() + 1, Eigen::Vector3d::Zero());
+	for (int it = 0; it < 1000; ++it)
+	{
+		const Eigen::Vector3d prev = out.d;
+		for (size_t j = 0; j < near.size(); ++j)
+		{
+			const Margin& m = margins[near[j]];
+			const Eigen::Vector3d y = out.d + correction[j];
+			const double ay = m.slope.dot(y), b = bound(m);
+			const Eigen::Vector3d p = ay >= b ? y : Eigen::Vector3d(y + (b - ay) / m.slope.squaredNorm() * m.slope);
+			correction[j] = y - p;
+			out.d = p;
+		}
+		const Eigen::Vector3d y = out.d + correction.back();
+		const Eigen::Vector3d p = y.norm() > radius ? Eigen::Vector3d(y * radius / y.norm()) : y;
+		correction.back() = y - p;
+		out.d = p;
+		if ((out.d - prev).norm() < 1e-8)
+			break;
+	}
+	// Blocker: of the margins at their limit, the one whose slope opposes `want` most.
+	const Eigen::Vector3d u = want.norm() > 1e-12 ? Eigen::Vector3d(want.normalized()) : Eigen::Vector3d::Zero();
+	double worst = 0.0;
+	for (size_t i : near)
+	{
+		const Margin& m = margins[i];
+		const double along = m.slope.normalized().dot(u);
+		if (m.slope.dot(out.d) - bound(m) < 1e-4 * m.slope.norm() && along < worst)
+		{
+			worst = along;
+			out.blocker = static_cast<int>(i);
+		}
+	}
+	return out;
+}
+
 class BaseGradientSolver
 {
 public:
@@ -1933,6 +2036,7 @@ private:
 	void PrepareProbes();
 	std::optional<Step> LineSearch(Eigen::Vector3d dir);
 	std::optional<Step> RoomThenReach();
+	std::optional<Step> KinematicRoomThenReach();
 	std::optional<InnerSolution> FullSolveAt(const Step& step);
 	bool TakeStep(Step step, InnerSolution committed, int outer, double gnorm, const Eigen::Vector3d& g);
 	void RefineResult();
@@ -1953,6 +2057,11 @@ private:
 
 	// --- Room-then-reach directions and walls ---
 	Eigen::Vector3d LockAxes(Eigen::Vector3d v) const;
+	Eigen::Vector3d AimAt(int target, const InnerSolution& here_at, bool first);
+	Eigen::MatrixXd ToolJacobian(const std::vector<double>& q);
+	double Stretch(const std::vector<double>& q);
+	std::vector<Margin> Margins(const ObjectPlacement& at, const InnerSolution& sol);
+	std::optional<InnerSolution> RePose(const Margin& m, const ObjectPlacement& at, const InnerSolution& here_at);
 	Eigen::Vector3d LossDirection(
 		int v, const InnerSolution& from_sol, const InnerSolution& probe, const Eigen::Vector3d& step_dir);
 	Eigen::Vector3d AimWithinWalls(const Eigen::Vector3d& a) const;
@@ -2072,6 +2181,7 @@ bool BaseGradientSolver::StartDescent(const ObjectPlacement& start, int restart_
 	last_closest.assign(static_cast<size_t>(n), {});
 	refined_at_reach = false;
 	params.softmin_manipulability_weight = params_in.softmin_manipulability_weight;
+	params.track_probes = params_in.track_probes;
 	rr = RestartResult{};
 	rr.placement = base;
 
@@ -2117,6 +2227,9 @@ int BaseGradientSolver::ReachAllViewpoints()
 void BaseGradientSolver::RefinePathAndPosition(int iter)
 {
 	LogRefineAtReach();
+	// Probes re-solve the tour (GTSP order, fresh IK) instead of dragging the current poses along: a dragged tour
+	// looks worse than the spot really is.
+	params.track_probes = false;
 	if (params.stop_when_all_reached)
 		RCLCPP_INFO(node->get_logger(), "  restart %d: all viewpoints reached -- stopping", restart_idx + 1);
 	else
@@ -2147,7 +2260,7 @@ bool BaseGradientSolver::ReachDescentStep(int iter)
 	PrepareProbes();
 	std::optional<Step> step = LineSearch(-g_u / gnorm);
 	if (!step && params.room_then_reach && !here_quick.missed_vp.empty())
-		step = RoomThenReach();
+		step = params.kinematic_room ? KinematicRoomThenReach() : RoomThenReach();
 	std::optional<InnerSolution> committed;
 	if (step)
 		committed = FullSolveAt(*step);
@@ -2476,6 +2589,152 @@ std::optional<Step> BaseGradientSolver::RoomThenReach()
 	return std::nullopt;
 }
 
+// Kinematic room then reach: stuck with misses, move toward each missed viewpoint (smallest gap first) by the
+// move nearest a full step at it that keeps every reached viewpoint's margins safe (NearestSafeMove). A move that
+// reaches it is accepted; one that loses nothing and shrinks its gap walks on. A viewpoint lost anyway gets higher
+// floors and the move is re-planned. Blocked: re-pose the blocking viewpoint along its self-motion, else move the
+// object to raise the blocking margin, then aim again.
+std::optional<Step> BaseGradientSolver::KinematicRoomThenReach()
+{
+	const int kMaxRounds = 6;  // moves per missed viewpoint
+	const int kMaxTries = 4;  // re-plans per move after a loss or no progress
+	const double kMinProgress = 0.005;	// m toward the target: less is no useful move
+	auto gained = [&](const InnerSolution& probe) {
+		return LostViewpoints(here_quick, probe).empty() && probe.num_reachable > here_quick.num_reachable;
+	};
+	auto trace = [&](const char* what, int target, const ObjectPlacement& cand, const InnerSolution& probe,
+					 const std::vector<int>& lost, const char* verdict) {
+		if (params.trace_line_search)
+			RCLCPP_INFO(
+				node->get_logger(),
+				"    %s for vp %d abs (%.4f, %.4f, %.4f): reached %d vs %d here, gap %.4f  lost:%s -> %s", what, target,
+				cand.x, cand.y, cand.z, probe.num_reachable, here_quick.num_reachable,
+				MissGap(probe, target, params.rot_metric_scale), ListText(lost).c_str(), verdict);
+	};
+	std::vector<size_t> order(here_quick.missed_vp.size());
+	std::iota(order.begin(), order.end(), 0);
+	std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+		return WeightedPoseGap(here_quick.missed_gap[a], params.rot_metric_scale) <
+			WeightedPoseGap(here_quick.missed_gap[b], params.rot_metric_scale);
+	});
+	for (size_t oi : order)
+	{
+		const int target = here_quick.missed_vp[oi];
+		ObjectPlacement at = base;
+		InnerSolution here_at = here_quick;
+		std::vector<double> floor_scale(static_cast<size_t>(n), 1.0);
+		std::vector<bool> reposed(static_cast<size_t>(n), false);
+		for (int round = 0; round < kMaxRounds; ++round)
+		{
+			const Eigen::Vector3d aim = AimAt(target, here_at, round == 0);
+			if (aim.norm() < 1e-9)
+				break;
+			const std::vector<Margin> margins = Margins(at, here_at);
+			const double gap_here = MissGap(here_at, target, params.rot_metric_scale);
+
+			// Move toward the target within every margin; re-plan on a surprise.
+			double radius = params.initial_step;
+			int blocker = -1;
+			bool walked = false;
+			for (int t = 0; t < kMaxTries && !walked; ++t)
+			{
+				const SafeMove move = NearestSafeMove(radius * aim, margins, floor_scale, radius);
+				blocker = move.blocker;
+				const std::string blocked_by = blocker < 0
+					? std::string("none")
+					: "vp " + std::to_string(margins[static_cast<size_t>(blocker)].vp) + " " +
+						margins[static_cast<size_t>(blocker)].what;
+				if (params.trace_line_search)
+					RCLCPP_INFO(
+						node->get_logger(),
+						"    aim vp %d (round %d, try %d): move (%+.4f, %+.4f, %+.4f) m, %.4f m toward it of %.4f, "
+						"%zu margins, blocked by %s",
+						target, round, t, move.d(0), move.d(1), move.d(2), move.d.dot(aim), radius, margins.size(),
+						blocked_by.c_str());
+				if (move.d.dot(aim) < kMinProgress)
+					break;	// no useful move
+				const ObjectPlacement cand = Shifted(at, move.d, 1.0, params.bounds);
+				InnerSolution probe = QuickSolve(cand);
+				result.num_inner_solves += 1;
+				const std::vector<int> lost = LostViewpoints(here_at, probe);
+				if (gained(probe))
+				{
+					trace("aim", target, cand, probe, lost, "accepted");
+					probe = WithPlannedTravel(cand, std::move(probe));
+					return Step{cand, std::move(probe), move.d.norm()};
+				}
+				if (!lost.empty())
+				{
+					trace("aim", target, cand, probe, lost, "lost: raise their floors, re-plan");
+					for (int v : lost)
+						floor_scale[static_cast<size_t>(v)] *= 2.0;
+					continue;
+				}
+				if (MissGap(probe, target, params.rot_metric_scale) < gap_here - 1e-4)
+				{
+					trace("aim", target, cand, probe, lost, "walk on");
+					at = cand;
+					here_at = std::move(probe);
+					walked = true;
+					continue;
+				}
+				trace("aim", target, cand, probe, lost, "gap didn't shrink: shorter move");
+				radius *= 0.5;
+			}
+			if (walked)
+				continue;
+			if (blocker < 0)
+				break;	// nothing in the way to fix
+
+			// Blocked: first re-pose the blocking viewpoint with the arm's spare joints, once per viewpoint.
+			const Margin& b = margins[static_cast<size_t>(blocker)];
+			if (!reposed[static_cast<size_t>(b.vp)])
+			{
+				reposed[static_cast<size_t>(b.vp)] = true;
+				std::optional<InnerSolution> re = RePose(b, at, here_at);
+				if (re)
+				{
+					if (gained(*re))
+						return Step{at, WithPlannedTravel(at, std::move(*re)), 0.0};
+					here_at = std::move(*re);
+					continue;
+				}
+			}
+			// Then make room: move the object to raise the blocking margin, keeping the rest safe.
+			const Eigen::Vector3d up = b.slope.normalized();
+			const SafeMove room = NearestSafeMove(params.initial_step * up, margins, floor_scale, params.initial_step);
+			if (room.d.dot(up) < kMinProgress)
+			{
+				if (params.trace_line_search)
+					RCLCPP_INFO(
+						node->get_logger(), "    room for vp %d %s: no safe move raises it (%.4f m) -- next viewpoint",
+						b.vp, b.what.c_str(), room.d.dot(up));
+				break;
+			}
+			const ObjectPlacement cand = Shifted(at, room.d, 1.0, params.bounds);
+			InnerSolution probe = QuickSolve(cand);
+			result.num_inner_solves += 1;
+			const std::vector<int> lost = LostViewpoints(here_at, probe);
+			const std::string what = "room for vp " + std::to_string(b.vp) + " " + b.what;
+			if (gained(probe))
+			{
+				trace(what.c_str(), target, cand, probe, lost, "gained, accepted");
+				probe = WithPlannedTravel(cand, std::move(probe));
+				return Step{cand, std::move(probe), room.d.norm()};
+			}
+			if (!lost.empty())
+			{
+				trace(what.c_str(), target, cand, probe, lost, "rejected");
+				break;
+			}
+			trace(what.c_str(), target, cand, probe, lost, "moved");
+			at = cand;
+			here_at = std::move(probe);
+		}
+	}
+	return std::nullopt;
+}
+
 // Best-of-N full solve at the accepted spot; the probe's own solve stands if it is better. Kept only if
 // it beats the current solution.
 std::optional<InnerSolution> BaseGradientSolver::FullSolveAt(const Step& step)
@@ -2794,6 +3053,137 @@ Eigen::Vector3d BaseGradientSolver::LockAxes(Eigen::Vector3d v) const
 	if (bb.z_min == bb.z_max)
 		v(2) = 0.0;
 	return v;
+}
+
+// Unit direction that shrinks the target's position gap at `here_at` (zero if none). first: use the full solve's
+// gap if nearer, as RoomThenReach does.
+Eigen::Vector3d BaseGradientSolver::AimAt(int target, const InnerSolution& here_at, bool first)
+{
+	const auto it = std::find(here_at.missed_vp.begin(), here_at.missed_vp.end(), target);
+	const size_t mi = static_cast<size_t>(it - here_at.missed_vp.begin());
+	if (it == here_at.missed_vp.end() || mi >= here_at.missed_gap.size())
+		return Eigen::Vector3d::Zero();
+	Eigen::Matrix<double, 6, 1> pose_error = here_at.missed_gap[mi];
+	const auto ci = std::find(cur.missed_vp.begin(), cur.missed_vp.end(), target);
+	const size_t c = static_cast<size_t>(ci - cur.missed_vp.begin());
+	if (first && ci != cur.missed_vp.end() && c < cur.missed_gap.size() &&
+		WeightedPoseGap(cur.missed_gap[c], params.rot_metric_scale) <
+			WeightedPoseGap(pose_error, params.rot_metric_scale))
+		pose_error = cur.missed_gap[c];
+	pose_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
+	const Eigen::Vector3d aim = -LockAxes(PlacementJacobian().transpose() * pose_error);
+	return aim.norm() < 1e-9 ? Eigen::Vector3d::Zero() : Eigen::Vector3d(aim.normalized());
+}
+
+Eigen::MatrixXd BaseGradientSolver::ToolJacobian(const std::vector<double>& q)
+{
+	state.setJointGroupPositions(jmg, q);
+	state.update();
+	Eigen::MatrixXd J;
+	state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
+	return J;
+}
+
+// Smallest singular value of the tool Jacobian: 0 at a singular (fully stretched or folded) pose.
+double BaseGradientSolver::Stretch(const std::vector<double>& q)
+{
+	return Eigen::JacobiSVD<Eigen::MatrixXd>(ToolJacobian(q)).singularValues().minCoeff();
+}
+
+// Every reached viewpoint's margins at `at` and how they change as the object moves (arm following each viewpoint
+// with dq = J^+ dp). Collision pairs farther than kCollisionWindow are left out.
+std::vector<Margin> BaseGradientSolver::Margins(const ObjectPlacement& at, const InnerSolution& sol)
+{
+	const double kJointFloor = 0.05;  // rad
+	const double kStretchFloor = 0.02;
+	const double kCollisionFloor = 0.01;	 // m
+	const double kCollisionWindow = 0.1;	 // m
+	const double h = 1e-5;  // rad, finite-difference step for the stretch slope
+	SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
+	collision_detection::DistanceRequest req = MakeClosePairRequest(state, jmg, kCollisionWindow);
+	std::vector<Margin> margins;
+	for (size_t k = 0; k < sol.tour.size(); ++k)
+	{
+		const std::vector<double>& q = sol.joints[k];
+		if (q.empty())
+			continue;
+		const int dof = static_cast<int>(q.size());
+		const Eigen::MatrixXd dq_db = DampedPinv(ToolJacobian(q), params.jacobian_damping) * PlacementJacobian();
+		auto add = [&](const std::string& what, double value, double floor, const Eigen::VectorXd& joint_slope,
+					   const Eigen::Vector3d& direct) {
+			margins.push_back(
+				{sol.tour[k], what, value, floor, LockAxes(dq_db.transpose() * joint_slope + direct), joint_slope});
+		};
+		for (int i = 0; i < dof; ++i)
+		{
+			const moveit::core::VariableBounds& b =
+				robot_model->getVariableBounds(jmg->getVariableNames()[static_cast<size_t>(i)]);
+			if (!b.position_bounded_)
+				continue;
+			const Eigen::VectorXd e = Eigen::VectorXd::Unit(dof, i);
+			const std::string joint = "joint " + std::to_string(i + 1);
+			add(joint + " low limit", q[static_cast<size_t>(i)] - b.min_position_, kJointFloor, e, Eigen::Vector3d::Zero());
+			add(joint + " high limit", b.max_position_ - q[static_cast<size_t>(i)], kJointFloor, -e,
+				Eigen::Vector3d::Zero());
+		}
+		const double stretch = Stretch(q);
+		Eigen::VectorXd stretch_slope(dof);
+		for (int i = 0; i < dof; ++i)
+		{
+			std::vector<double> qh = q;
+			qh[static_cast<size_t>(i)] += h;
+			stretch_slope(i) = (Stretch(qh) - stretch) / h;
+		}
+		add("stretch", stretch, kStretchFloor, stretch_slope, Eigen::Vector3d::Zero());
+		state.setJointGroupPositions(jmg, q);
+		state.update();
+		const ClosePairs pairs = FindClosePairs(planning_scene_monitor, state, jmg, req, kCollisionWindow);
+		for (size_t p = 0; p < pairs.dists.size(); ++p)
+			add("collision " + pairs.names[p], pairs.dists[p], kCollisionFloor, pairs.gradients[p].transpose(),
+				pairs.object_slopes[p]);
+	}
+	return margins;
+}
+
+// Moves margin m's viewpoint along its self-motion (camera fixed, the arm's spare joints) to raise m, then re-solves
+// at `at` from that pose. The re-solve, if it loses no viewpoint.
+std::optional<InnerSolution> BaseGradientSolver::RePose(
+	const Margin& m, const ObjectPlacement& at, const InnerSolution& here_at)
+{
+	const double kSelfMotionStep = 0.3;	// rad
+	const auto it = std::find(here_at.tour.begin(), here_at.tour.end(), m.vp);
+	if (it == here_at.tour.end())
+		return std::nullopt;
+	const std::vector<double>& q = here_at.joints[static_cast<size_t>(it - here_at.tour.begin())];
+	const Eigen::MatrixXd J = ToolJacobian(q);
+	const Eigen::MatrixXd null_space =
+		Eigen::MatrixXd::Identity(J.cols(), J.cols()) - DampedPinv(J, params.jacobian_damping) * J;
+	const Eigen::VectorXd dir = null_space * m.joint_slope;
+	if (dir.norm() < 1e-6)
+		return std::nullopt;  // no spare joint helps this margin
+	const Eigen::VectorXd dq = kSelfMotionStep * dir.normalized();
+	std::vector<double> q_new = q;
+	for (size_t i = 0; i < q_new.size(); ++i)
+		q_new[i] += dq(static_cast<Eigen::Index>(i));
+	state.setJointGroupPositions(jmg, q_new);
+	state.enforceBounds(jmg);
+	state.copyJointGroupPositions(jmg, q_new);
+
+	const std::vector<double> saved = seeds[static_cast<size_t>(m.vp)];
+	seeds[static_cast<size_t>(m.vp)] = q_new;
+	InnerSolution probe = QuickSolve(at);
+	result.num_inner_solves += 1;
+	const std::vector<int> lost = LostViewpoints(here_at, probe);
+	if (params.trace_line_search)
+		RCLCPP_INFO(
+			node->get_logger(), "    re-pose vp %d along self-motion for %s (%.4f): reached %d  lost:%s -> %s", m.vp,
+			m.what.c_str(), m.value, probe.num_reachable, ListText(lost).c_str(), lost.empty() ? "kept" : "rejected");
+	if (!lost.empty())
+	{
+		seeds[static_cast<size_t>(m.vp)] = saved;
+		return std::nullopt;
+	}
+	return probe;
 }
 
 // Viewpoint v is reached in `from_sol` but missed at `probe`: the direction whose opposite loses it -- its
