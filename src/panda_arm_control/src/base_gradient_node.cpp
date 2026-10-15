@@ -65,6 +65,14 @@ struct Params
 	int bg_gtsp_num_restart = 2;  // min-of-N inner solves wherever a committed cost matters
 
 	double bg_jump_softmin_weight = 100.0;
+	bool bg_reach_map_jump = false;
+	std::string bg_reach_map_file;
+	int bg_reach_map_samples = 1000000;
+	double bg_reach_map_voxel = 0.04;
+	int bg_reach_map_directions = 100;
+	double bg_reach_map_tau = 0.05;
+	double bg_reach_map_limit_sharpness = 20.0;
+	int bg_reach_map_seed = 42;
 	int bg_reach_patience = 3;
 	int bg_room_max_targets = 3;
 	int bg_descent_num_restart = 6;
@@ -307,6 +315,14 @@ private:
 		this->declareIfNeeded("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->declareIfNeeded("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
 		this->declareIfNeeded("bg_jump_softmin_weight", this->params.bg_jump_softmin_weight);
+		this->declareIfNeeded("bg_reach_map_jump", this->params.bg_reach_map_jump);
+		this->declareIfNeeded("bg_reach_map_file", this->params.bg_reach_map_file);
+		this->declareIfNeeded("bg_reach_map_samples", this->params.bg_reach_map_samples);
+		this->declareIfNeeded("bg_reach_map_voxel", this->params.bg_reach_map_voxel);
+		this->declareIfNeeded("bg_reach_map_directions", this->params.bg_reach_map_directions);
+		this->declareIfNeeded("bg_reach_map_tau", this->params.bg_reach_map_tau);
+		this->declareIfNeeded("bg_reach_map_limit_sharpness", this->params.bg_reach_map_limit_sharpness);
+		this->declareIfNeeded("bg_reach_map_seed", this->params.bg_reach_map_seed);
 		this->declareIfNeeded("bg_reach_patience", this->params.bg_reach_patience);
 		this->declareIfNeeded("bg_room_max_targets", this->params.bg_room_max_targets);
 		this->declareIfNeeded("bg_descent_num_restart", this->params.bg_descent_num_restart);
@@ -383,6 +399,14 @@ private:
 		this->get_parameter("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->get_parameter("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
 		this->get_parameter("bg_jump_softmin_weight", this->params.bg_jump_softmin_weight);
+		this->get_parameter("bg_reach_map_jump", this->params.bg_reach_map_jump);
+		this->get_parameter("bg_reach_map_file", this->params.bg_reach_map_file);
+		this->get_parameter("bg_reach_map_samples", this->params.bg_reach_map_samples);
+		this->get_parameter("bg_reach_map_voxel", this->params.bg_reach_map_voxel);
+		this->get_parameter("bg_reach_map_directions", this->params.bg_reach_map_directions);
+		this->get_parameter("bg_reach_map_tau", this->params.bg_reach_map_tau);
+		this->get_parameter("bg_reach_map_limit_sharpness", this->params.bg_reach_map_limit_sharpness);
+		this->get_parameter("bg_reach_map_seed", this->params.bg_reach_map_seed);
 		this->get_parameter("bg_reach_patience", this->params.bg_reach_patience);
 		this->get_parameter("bg_room_max_targets", this->params.bg_room_max_targets);
 		this->get_parameter("bg_descent_num_restart", this->params.bg_descent_num_restart);
@@ -483,6 +507,14 @@ private:
 		bg.gtsp_num_restart = this->params.bg_gtsp_num_restart;
 		bg.gtsp_two_opt_rounds = this->params.bg_gtsp_two_opt_rounds;
 		bg.jump_softmin_weight = this->params.bg_jump_softmin_weight;
+		bg.reach_map_jump = this->params.bg_reach_map_jump;
+		bg.reach_map_file = this->params.bg_reach_map_file;
+		bg.reach_map_samples = this->params.bg_reach_map_samples;
+		bg.reach_map_voxel = this->params.bg_reach_map_voxel;
+		bg.reach_map_directions = this->params.bg_reach_map_directions;
+		bg.reach_map_tau = this->params.bg_reach_map_tau;
+		bg.reach_map_limit_sharpness = this->params.bg_reach_map_limit_sharpness;
+		bg.reach_map_seed = this->params.bg_reach_map_seed;
 		bg.reach_patience = this->params.bg_reach_patience;
 		bg.room_max_targets = this->params.bg_room_max_targets;
 		bg.descent_num_restart = this->params.bg_descent_num_restart;

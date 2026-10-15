@@ -84,6 +84,7 @@ add_executable(bstar_placement
 
 add_executable(base_gradient
 	src/base_gradient.cpp
+	src/reachability_map.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
 	src/base_gradient_node.cpp
