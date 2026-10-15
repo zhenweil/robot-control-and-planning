@@ -2072,7 +2072,7 @@ private:
 	std::vector<Margin> ViewpointMargins(int v, const std::vector<double>& q);
 	std::vector<double> PredictedPose(const ArmModel& model, int v, const Eigen::Vector3d& d);
 	Shortage RanOut(int v, const ArmModel& model, const ObjectPlacement& at, const Eigen::Vector3d& d);
-	std::optional<std::vector<double>> RoomierPose(int v, const ObjectPlacement& at, const ArmModel& model);
+	std::optional<std::vector<double>> RoomierPose(int v, const ObjectPlacement& at, const ArmModel& model, int tries);
 	std::optional<std::vector<double>> ExactPose(int v, const ObjectPlacement& at, std::vector<double> q);
 	Eigen::Vector3d LossDirection(
 		int v, const InnerSolution& from_sol, const InnerSolution& probe, const Eigen::Vector3d& step_dir);
@@ -2643,7 +2643,10 @@ std::optional<Step> BaseGradientSolver::RoomThenReach()
 std::optional<Step> BaseGradientSolver::KinematicRoomThenReach()
 {
 	const int kMaxRounds = 6;
+	const int kLostTries = 10;	// other-IK candidates for a lost viewpoint
+	const int kSqueezedTries = 6;  // and for one the room move would squeeze
 	const double step = params.initial_step;
+	std::vector<std::optional<ObjectPlacement>> searched_at(static_cast<size_t>(n));  // where each was last searched
 	auto gained = [&](const InnerSolution& probe) {
 		return LostViewpoints(here_quick, probe).empty() && probe.num_reachable > here_quick.num_reachable;
 	};
@@ -2699,8 +2702,14 @@ std::optional<Step> BaseGradientSolver::KinematicRoomThenReach()
 			// other IK solution here. Other viewpoints whose margins the move would use up join in (after the same
 			// pose swap), and the direction is worked out again.
 			ArmModel model = ArmModelAt(at, here_at);
-			auto swap_pose = [&](int v) {
-				const std::optional<std::vector<double>> better = RoomierPose(v, at, model);
+			// tries: candidate poses (half resampled, half nudged). Once per viewpoint per spot: a repeat finds
+			// nothing new while the object stays put.
+			auto swap_pose = [&](int v, int tries) {
+				std::optional<ObjectPlacement>& last = searched_at[static_cast<size_t>(v)];
+				if (last && last->x == at.x && last->y == at.y && last->z == at.z)
+					return false;
+				last = at;
+				const std::optional<std::vector<double>> better = RoomierPose(v, at, model, tries);
 				if (!better)
 					return false;
 				const auto it = std::find(here_at.tour.begin(), here_at.tour.end(), v);
@@ -2709,7 +2718,7 @@ std::optional<Step> BaseGradientSolver::KinematicRoomThenReach()
 			};
 			bool swapped = false;
 			for (int v : lost)
-				swapped = swap_pose(v) || swapped;
+				swapped = swap_pose(v, kLostTries) || swapped;
 			if (swapped)
 				model = ArmModelAt(at, here_at);
 			std::vector<Margin> short_margins;
@@ -2736,7 +2745,7 @@ std::optional<Step> BaseGradientSolver::KinematicRoomThenReach()
 					break;
 				bool swapped_any = false;
 				for (int v : squeezed)
-					swapped_any = swap_pose(v) || swapped_any;
+					swapped_any = swap_pose(v, kSqueezedTries) || swapped_any;
 				if (swapped_any)
 					model = ArmModelAt(at, here_at);
 				for (int v : squeezed)
@@ -2784,7 +2793,7 @@ std::optional<Step> BaseGradientSolver::KinematicRoomThenReach()
 				std::string room_why;
 				for (int v : back_lost)
 				{
-					if (swap_pose(v))
+					if (swap_pose(v, kLostTries))
 						model = ArmModelAt(at, here_at);
 					const Shortage sh = RanOut(v, model, at, ToOffsetVec(back, at));
 					short_margins.insert(short_margins.end(), sh.margins.begin(), sh.margins.end());
@@ -2805,11 +2814,15 @@ std::optional<Step> BaseGradientSolver::KinematicRoomThenReach()
 // it beats the current solution.
 std::optional<InnerSolution> BaseGradientSolver::FullSolveAt(const Step& step)
 {
+	// While viewpoints are missed the order hardly matters: one solve instead of the best of gtsp_num_restart.
+	BaseGradientParams p = params;
+	if (!step.sol.all_reachable)
+		p.gtsp_num_restart = 1;
 	ReseedRng(params.random_seed);
 	InnerSolution committed = BestOfNInnerSolve(
 		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, home_joints, home_tcp_local,
-		step.at, params, &step.sol.tour, params.max_solutions_per_candidate, order_lock);
-	result.num_inner_solves += std::max(1, params.gtsp_num_restart);
+		step.at, p, &step.sol.tour, params.max_solutions_per_candidate, order_lock);
+	result.num_inner_solves += std::max(1, p.gtsp_num_restart);
 	committed = WithPlannedTravel(step.at, std::move(committed));
 	if (Better(step.sol, committed))
 		committed = step.sol;
@@ -3250,14 +3263,15 @@ std::vector<double> BaseGradientSolver::PredictedPose(const ArmModel& model, int
 	return q;
 }
 
-// Viewpoint v's other collision-free IK solutions at `at`, two ways: kResamples from random starts, and kNudges
+// Viewpoint v's other collision-free IK solutions at `at`, `tries` in all, two ways: half from random starts, half
 // sliding its current pose along its self-motion (camera fixed) the way that raises its tightest margin, by growing
 // amounts. The one whose smallest margin, in floors, beats the current pose's by at least one floor; none if v
 // already has room.
-std::optional<std::vector<double>> BaseGradientSolver::RoomierPose(int v, const ObjectPlacement& at, const ArmModel& model)
+std::optional<std::vector<double>> BaseGradientSolver::RoomierPose(
+	int v, const ObjectPlacement& at, const ArmModel& model, int tries)
 {
-	const int kResamples = 5;
-	const int kNudges = 5;
+	const int kResamples = tries / 2;
+	const int kNudges = tries - kResamples;
 	const double kNudgeStep = 0.1;	// rad: nudge i slides (i + 1) times this
 	auto smallest = [](const std::vector<Margin>& margins) {
 		double lo = std::numeric_limits<double>::infinity();
