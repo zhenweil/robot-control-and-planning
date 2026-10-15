@@ -95,7 +95,6 @@ struct Params
 	bool bg_planned_travel_in_cost = false;
 	bool bg_track_probes = false;
 	bool bg_room_then_reach = false;
-	bool bg_kinematic_room = false;
 	double bg_reach_time_limit = 0.0;
 	bool bg_trace_line_search = false;
 	int bg_refine_at_reach = 0;
@@ -342,7 +341,6 @@ private:
 		this->declareIfNeeded("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->declareIfNeeded("bg_track_probes", this->params.bg_track_probes);
 		this->declareIfNeeded("bg_room_then_reach", this->params.bg_room_then_reach);
-		this->declareIfNeeded("bg_kinematic_room", this->params.bg_kinematic_room);
 		this->declareIfNeeded("bg_reach_time_limit", this->params.bg_reach_time_limit);
 		this->declareIfNeeded("bg_trace_line_search", this->params.bg_trace_line_search);
 		this->declareIfNeeded("bg_refine_at_reach", this->params.bg_refine_at_reach);
@@ -424,7 +422,6 @@ private:
 		this->get_parameter("bg_planned_travel_in_cost", this->params.bg_planned_travel_in_cost);
 		this->get_parameter("bg_track_probes", this->params.bg_track_probes);
 		this->get_parameter("bg_room_then_reach", this->params.bg_room_then_reach);
-		this->get_parameter("bg_kinematic_room", this->params.bg_kinematic_room);
 		this->get_parameter("bg_reach_time_limit", this->params.bg_reach_time_limit);
 		this->get_parameter("bg_trace_line_search", this->params.bg_trace_line_search);
 		this->get_parameter("bg_refine_at_reach", this->params.bg_refine_at_reach);
@@ -530,7 +527,6 @@ private:
 		bg.planned_travel_in_cost = this->params.bg_planned_travel_in_cost;
 		bg.track_probes = this->params.bg_track_probes;
 		bg.room_then_reach = this->params.bg_room_then_reach;
-		bg.kinematic_room = this->params.bg_kinematic_room;
 		bg.reach_time_limit = this->params.bg_reach_time_limit;
 		bg.trace_line_search = this->params.bg_trace_line_search;
 		bg.refine_at_reach = this->params.bg_refine_at_reach;

@@ -23,8 +23,7 @@
     bg_reconfig_threshold: 1.0               # rad: a move turning any joint (joint 7 aside) more than this is a reconfiguration
     bg_reconfig_weight: 10.0                 # refine's GTSP penalty per rad^2 past the threshold
     bg_elbow_swing: false                    # after refine: swing each arm pose's elbow and nudge the object to shorten travel
-    bg_room_then_reach: true                 # when stuck: aim at a missed viewpoint; if a blocker is lost, give it room first
-    bg_kinematic_room: true                  # room-then-reach moves from predicted joint-limit/stretch/collision margins, not walls
+    bg_room_then_reach: true                 # when stuck: aim at a missed viewpoint; if reached ones are lost, back off for what ran out
     bg_track_probes: true                    # probes follow the current arm poses; new arm poses are searched only at accepted spots
     bg_trace_line_search: true
     bg_initial_step: 0.05                    # m: largest object move per iteration (first probe)

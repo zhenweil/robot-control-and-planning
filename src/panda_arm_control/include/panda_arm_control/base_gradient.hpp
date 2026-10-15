@@ -103,12 +103,9 @@ struct BaseGradientParams
 	bool planned_travel_in_cost = false;
 	// Probes track the current arm poses (one warm IK attempt per viewpoint, fixed order) instead of a fresh search.
 	bool track_probes = false;
-	// Room-then-reach: one-sided walls learned from lost viewpoints; when stuck, aim at a missed viewpoint,
-	// and if a blocker is lost, first move to give it room, then aim again. Moves that lose nothing may raise the cost.
+	// Room-then-reach: when stuck with misses, aim at a missed viewpoint; if that loses reached viewpoints, back off
+	// to raise the margins (joint limit, reach, stretch, collision) that ran out for them, then aim again.
 	bool room_then_reach = false;
-	// Kinematic room-then-reach: pick each move from the reached viewpoints' joint-limit, stretch and collision
-	// margins (predicted through the arm Jacobian) instead of walls. Needs room_then_reach.
-	bool kinematic_room = false;
 	bool tracking = false;  // internal: set on the params copy used for tracked solves
 	// internal: a solve reaching fewer viewpoints than this skips the missed ones' closest-IK gaps (a probe that is
 	// rejected on count anyway); 0 = never
