@@ -64,6 +64,8 @@ struct BaseGradientParams
 
 	// Base gradient parameters
 	int descent_num_restart = 3;
+	// Before each restart: climb the reached viewpoints' manipulability (sum + this x soft-min) from the stuck spot.
+	double jump_softmin_weight = 100.0;
 	int max_outer_iterations = 50;
 	double initial_step = 0.02;
 	double step_shrink = 0.25;
@@ -76,6 +78,7 @@ struct BaseGradientParams
 	int patience = 3; // stop optimization if no improvement after this many iterations
 	bool stop_when_all_reached = false;  // end each descent as soon as every viewpoint is reached
 	double reach_time_limit = 0.0;  // s per descent to reach every viewpoint; then it counts as stuck. 0 = none
+	int reach_patience = 3;  // reach-phase iterations without gaining a viewpoint before the descent counts as stuck
 	int refine_solves = 0;  // extra full solves at each descent's result, warm-started from the best so far
 	int refine_ik_solutions = 8;  // IK solutions per viewpoint in refine solves: more same-branch choices for GTSP
 	// Reconfiguration: a move turning any joint (joint 7 aside) more than reconfig_threshold. Refine's GTSP edges add
@@ -95,6 +98,7 @@ struct BaseGradientParams
 	// Room-then-reach: when stuck with misses, aim at a missed viewpoint; if that loses reached viewpoints, back off
 	// to raise the margins (joint limit, reach, stretch, collision) that ran out for them, then aim again.
 	bool room_then_reach = false;
+	int room_max_targets = 3;  // missed viewpoints room-then-reach tries per call, closest first; 0 = all
 	bool tracking = false;  // internal: set on the params copy used for tracked solves
 	// internal: a solve reaching fewer viewpoints than this skips the missed ones' closest-IK gaps (a probe that is
 	// rejected on count anyway); 0 = never

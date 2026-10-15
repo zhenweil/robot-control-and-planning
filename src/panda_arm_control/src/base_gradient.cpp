@@ -1019,6 +1019,8 @@ public:
 
 	// One descent from `start`. warm: IK seeds and viewpoint order from an earlier descent, or null for home.
 	DescentResult RunDescent(const Position& start, int restart, const TourSolution* warm);
+	// Before a restart: climb the reached viewpoints' manipulability from a stuck spot. Returns where it ends.
+	Position ManipulabilityJump(const Position& from, const TourSolution& warm, int restart);
 
 	BaseGradientResult result;  // history and solve count; SolveBaseGradient fills in the rest
 
@@ -1047,6 +1049,7 @@ private:
 		const Position& at, const BaseGradientParams& p, const std::vector<int>* warm_order,
 		const std::vector<int>* fixed_order);
 	TourSolution Probe(const Position& at, int gaps_min_reached = 0);
+	TourSolution Probe(const Position& at, BaseGradientParams p);
 	TourSolution Refine(const Position& at, TourSolution best, int num_solves);
 	double PlannedTravel(const Position& at, const TourSolution& sol);
 	TourSolution WithPlannedTravel(const Position& at, TourSolution sol);
@@ -1227,19 +1230,23 @@ bool Solver::StartDescent(const Position& start, int restart_in, const TourSolut
 // 1) Descend while any viewpoint is missed. Returns the iterations used.
 int Solver::ReachAllViewpoints()
 {
+	int no_gain = 0;  // iterations since a viewpoint was last gained
 	for (int iter = 0; iter < params.max_outer_iterations; ++iter)
 	{
 		if (current.all_reachable || !rclcpp::ok())
 			return iter;
-		if (std::chrono::steady_clock::now() > reach_deadline)
+		if (std::chrono::steady_clock::now() > reach_deadline || no_gain >= params.reach_patience)
 		{
 			RCLCPP_WARN(
-				node->get_logger(), "  restart %d: reach time limit %.0f s hit with %d/%d reachable -- stuck", restart + 1,
-				params.reach_time_limit, current.num_reachable, num_vp);
+				node->get_logger(), "  restart %d: %s with %d/%d reachable -- stuck", restart + 1,
+				no_gain >= params.reach_patience ? "no viewpoint gained for reach_patience iterations" : "reach time limit hit",
+				current.num_reachable, num_vp);
 			return iter;
 		}
+		const int reached = current.num_reachable;
 		if (!DescentStep(iter))
 			return iter + 1;
+		no_gain = current.num_reachable > reached ? 0 : no_gain + 1;
 	}
 	return params.max_outer_iterations;
 }
@@ -1407,6 +1414,8 @@ std::optional<Step> Solver::RoomThenReach()
 	std::sort(targets.begin(), targets.end(), [&](const Miss& a, const Miss& b) {
 		return PoseGap(a.gap, params.rot_metric_scale) < PoseGap(b.gap, params.rot_metric_scale);
 	});
+	if (params.room_max_targets > 0 && static_cast<int>(targets.size()) > params.room_max_targets)
+		targets.resize(static_cast<size_t>(params.room_max_targets));  // the far ones rarely succeed
 	for (const Miss& miss : targets)
 	{
 		const int target = miss.vp;
@@ -1593,6 +1602,81 @@ bool Solver::TakeStep(const Step& step, TourSolution committed, int iter, double
 		return true;
 	}
 	return false;
+}
+
+// Gradient ascent on the reached viewpoints' manipulability (sum + jump_softmin_weight x soft-min), whatever is
+// reachable at each spot; misses and travel ignored. Backtracking line search; a step is kept when its full solve
+// raises the score. Ends when no step does, or after `patience` steps of tiny gain.
+Position Solver::ManipulabilityJump(const Position& from, const TourSolution& warm, int restart_in)
+{
+	BaseGradientParams p = params;	// reached viewpoints' comfort only; misses need no closest pose
+	p.manipulability_weight = 1.0;
+	p.softmin_manipulability_weight = params.jump_softmin_weight;
+	p.manipulability_include_missed = false;
+	p.travel_gradient = false;
+	p.miss_gap_weight = 0.0;
+	p.gaps_min_reached = std::numeric_limits<int>::max();
+	auto score = [&](const TourSolution& s) { return s.sum_manipulability + p.softmin_manipulability_weight * s.softmin_manipulability; };
+	auto log_step = [&](int iter, double step) {
+		RCLCPP_INFO(
+			node->get_logger(),
+			"jump %d iter %d: abs (%.4f, %.4f, %.4f) m  reachable %d/%d  manipulability score %.4f (sum_w %.3f, soft-min "
+			"%.4f)  step %.4f m",
+			restart_in + 1, iter, position.x(), position.y(), position.z(), current.num_reachable, num_vp, score(current),
+			current.sum_manipulability, current.softmin_manipulability, step);
+	};
+	restart = restart_in;
+	seed = params.random_seed + restart;
+	position = from;
+	tracked_probes = true;
+	seeds = SeedsFrom(warm, home, num_vp);
+	ReseedRng(seed);
+	current = SolveBestOf(position, p, &warm.tour, nullptr);
+	log_step(0, 0.0);
+	stall_count = 0;
+	for (int iter = 0; iter < params.max_outer_iterations && rclcpp::ok(); ++iter)
+	{
+		const Eigen::Vector3d g = LockAxes(AnalyticGradient(current, p));
+		if (g.norm() < 1e-9)
+			break;
+		seeds = SeedsFrom(current, home, num_vp);
+		locked_order = current.tour;
+		here = Probe(position, p);
+		std::optional<Step> step;
+		double size = params.initial_step;
+		for (int ls = 0; ls < params.max_line_search_iters && !step; ++ls, size *= params.step_shrink)
+		{
+			const Position cand = Clamp(position - size * g.normalized(), params.bounds);
+			TourSolution probe = Probe(cand, p);
+			result.num_inner_solves += 1;
+			if (params.trace_line_search)
+				RCLCPP_INFO(
+					node->get_logger(), "    jump probe step=%.4f m: reached %d, score %.4f vs %.4f here", size,
+					probe.num_reachable, score(probe), score(here));
+			if (score(probe) > score(here))
+				step = Step{cand, std::move(probe), size};
+		}
+		if (!step)
+			break;
+		ReseedRng(seed);
+		TourSolution committed = SolveBestOf(step->at, p, &step->sol.tour, nullptr);
+		if (score(step->sol) > score(committed))
+			committed = step->sol;
+		if (score(committed) <= score(current))
+			break;
+		const double gain = (score(committed) - score(current)) / std::max(std::abs(score(current)), 1e-9);
+		position = step->at;
+		current = std::move(committed);
+		log_step(iter + 1, step->size);
+		if (gain >= params.convergence_tolerance_cost)
+			stall_count = 0;
+		else if (++stall_count >= std::max(1, params.patience))
+			break;
+	}
+	RCLCPP_INFO(
+		node->get_logger(), "jump %d: moved %.4f m from abs (%.4f, %.4f, %.4f) to (%.4f, %.4f, %.4f)", restart_in + 1,
+		(position - from).norm(), from.x(), from.y(), from.z(), position.x(), position.y(), position.z());
+	return position;
 }
 
 // Debug: log what refining right at the first all-reached spot would give.
@@ -1831,6 +1915,11 @@ TourSolution Solver::Probe(const Position& at, int gaps_min_reached)
 {
 	BaseGradientParams p = params;
 	p.gaps_min_reached = gaps_min_reached;
+	return Probe(at, p);
+}
+
+TourSolution Solver::Probe(const Position& at, BaseGradientParams p)
+{
 	ReseedRng(seed);
 	if (!tracked_probes)
 		return Solve(at, p, seeds, &current.tour, params.max_solutions_per_candidate, order_lock);
@@ -2516,12 +2605,14 @@ BaseGradientResult SolveBaseGradient(
 	const Position start(
 		start_or_nominal(params.initial_x, 0), start_or_nominal(params.initial_y, 1), start_or_nominal(params.initial_z, 2));
 
-	// Restarts begin at the best so far with a new IK seed; stop once every viewpoint is reached.
+	// Restarts: from the best so far, a manipulability jump, then a new descent with a new IK seed. Stop once every
+	// viewpoint is reached.
 	const int num_restarts = std::max(1, params.descent_num_restart);
 	DescentResult overall;
 	for (int r = 0; r < num_restarts && rclcpp::ok(); ++r)
 	{
-		const DescentResult d = solver.RunDescent(r == 0 ? start : overall.position, r, r == 0 ? nullptr : &overall.sol);
+		const Position from = r == 0 ? start : solver.ManipulabilityJump(overall.position, overall.sol, r);
+		const DescentResult d = solver.RunDescent(from, r, r == 0 ? nullptr : &overall.sol);
 		const bool improved = r == 0 || d.sol.num_reachable > overall.sol.num_reachable ||
 			(d.sol.num_reachable == overall.sol.num_reachable && d.cost < overall.cost);
 		RCLCPP_INFO(

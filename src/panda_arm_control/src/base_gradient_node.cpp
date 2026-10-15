@@ -64,6 +64,9 @@ struct Params
 	int bg_gtsp_two_opt_rounds = 5;
 	int bg_gtsp_num_restart = 2;  // min-of-N inner solves wherever a committed cost matters
 
+	double bg_jump_softmin_weight = 100.0;
+	int bg_reach_patience = 3;
+	int bg_room_max_targets = 3;
 	int bg_descent_num_restart = 6;
 	int bg_max_outer_iterations = 50;
 	double bg_initial_step = 0.02;
@@ -303,6 +306,9 @@ private:
 		this->declareIfNeeded("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
 		this->declareIfNeeded("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->declareIfNeeded("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
+		this->declareIfNeeded("bg_jump_softmin_weight", this->params.bg_jump_softmin_weight);
+		this->declareIfNeeded("bg_reach_patience", this->params.bg_reach_patience);
+		this->declareIfNeeded("bg_room_max_targets", this->params.bg_room_max_targets);
 		this->declareIfNeeded("bg_descent_num_restart", this->params.bg_descent_num_restart);
 		this->declareIfNeeded("bg_max_outer_iterations", this->params.bg_max_outer_iterations);
 		this->declareIfNeeded("bg_initial_step", this->params.bg_initial_step);
@@ -376,6 +382,9 @@ private:
 		this->get_parameter("bg_ik_retries_per_point", this->params.bg_ik_retries_per_point);
 		this->get_parameter("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->get_parameter("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
+		this->get_parameter("bg_jump_softmin_weight", this->params.bg_jump_softmin_weight);
+		this->get_parameter("bg_reach_patience", this->params.bg_reach_patience);
+		this->get_parameter("bg_room_max_targets", this->params.bg_room_max_targets);
 		this->get_parameter("bg_descent_num_restart", this->params.bg_descent_num_restart);
 		this->get_parameter("bg_max_outer_iterations", this->params.bg_max_outer_iterations);
 		this->get_parameter("bg_initial_step", this->params.bg_initial_step);
@@ -473,6 +482,9 @@ private:
 		bg.ik_retries_per_point = this->params.bg_ik_retries_per_point;
 		bg.gtsp_num_restart = this->params.bg_gtsp_num_restart;
 		bg.gtsp_two_opt_rounds = this->params.bg_gtsp_two_opt_rounds;
+		bg.jump_softmin_weight = this->params.bg_jump_softmin_weight;
+		bg.reach_patience = this->params.bg_reach_patience;
+		bg.room_max_targets = this->params.bg_room_max_targets;
 		bg.descent_num_restart = this->params.bg_descent_num_restart;
 		bg.max_outer_iterations = this->params.bg_max_outer_iterations;
 		bg.initial_step = this->params.bg_initial_step;
