@@ -22,9 +22,7 @@
     bg_refine_ik_solutions: 8                # IK solutions per viewpoint in those solves
     bg_reconfig_threshold: 1.0               # rad: a move turning any joint (joint 7 aside) more than this is a reconfiguration
     bg_reconfig_weight: 10.0                 # refine's GTSP penalty per rad^2 past the threshold
-    bg_elbow_swing: false                    # after refine: swing each arm pose's elbow and nudge the object to shorten travel
     bg_room_then_reach: true                 # when stuck: aim at a missed viewpoint; if reached ones are lost, back off for what ran out
-    bg_track_probes: true                    # probes follow the current arm poses; new arm poses are searched only at accepted spots
     bg_trace_line_search: true
     bg_initial_step: 0.05                    # m: largest object move per iteration (first probe)
     bg_step_shrink: 0.5                     # each failed probe tries step * this
@@ -35,13 +33,11 @@
 
     # Cost
     bg_travel_gradient: true
-    bg_travel_in_cost: false
     bg_planned_travel_in_cost: true
     bg_real_cost_planning_time: 0.5
     bg_manipulability_weight: 1.0            # lambda: cost -= lambda * sum of manipulability
     bg_softmin_manipulability_weight: 1000.0 # pull from the worst poses' manipulability; 0 = off
     bg_softmin_tau: 0.01                     # small = only the worst pose, large = closer to the average
-    bg_manipulability_after_reach: false      # comfort terms (manipulability, soft-min) off while any viewpoint is missed
     bg_manipulability_include_missed: true   # missed viewpoints count with their closest IK pose
     bg_manipulability_limit_sharpness: 20.0  # joints near a limit count less in manipulability; 0 = plain
     bg_miss_gap_weight: 200.0

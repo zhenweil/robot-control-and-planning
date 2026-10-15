@@ -118,11 +118,6 @@ def generate_launch_description():
         description="false: the descent direction ignores the manipulability terms (the cost still includes them).",
     )
     manipulability_gradient = ParameterValue(LaunchConfiguration("manipulability_gradient"), value_type=bool)
-    travel_in_cost_arg = DeclareLaunchArgument(
-        "travel_in_cost", default_value="true",
-        description="false: the placement cost leaves out travel (GTSP still orders viewpoints by travel).",
-    )
-    travel_in_cost = ParameterValue(LaunchConfiguration("travel_in_cost"), value_type=bool)
     miss_gap_weight_arg = DeclareLaunchArgument(
         "miss_gap_weight", default_value="5000.0", description="Weight on missed viewpoints' closest-IK gap (0 = no miss gradient)."
     )
@@ -137,11 +132,6 @@ def generate_launch_description():
         description="Visit viewpoints in the input order throughout (no GTSP reordering; arm poses still re-picked).",
     )
     lock_input_order = ParameterValue(LaunchConfiguration("lock_input_order"), value_type=bool)
-    manipulability_after_reach_arg = DeclareLaunchArgument(
-        "manipulability_after_reach", default_value="false",
-        description="Comfort terms (manipulability, soft-min) off until all viewpoints are reached.",
-    )
-    manipulability_after_reach = ParameterValue(LaunchConfiguration("manipulability_after_reach"), value_type=bool)
     real_cost_planning_time_arg = DeclareLaunchArgument(
         "real_cost_planning_time", default_value="0.0",
         description="> 0: refine picks tours by real cost (OMPL-planned joint travel); seconds per planning attempt.",
@@ -153,7 +143,7 @@ def generate_launch_description():
     real_cost_attempts = ParameterValue(LaunchConfiguration("real_cost_attempts"), value_type=int)
     planned_travel_in_cost_arg = DeclareLaunchArgument(
         "planned_travel_in_cost", default_value="false",
-        description="Travel in the cost = OMPL-planned joint travel; overrides travel_in_cost (needs real_cost_planning_time > 0).",
+        description="Travel in the cost = OMPL-planned joint travel once all viewpoints are reached (needs real_cost_planning_time > 0).",
     )
     planned_travel_in_cost = ParameterValue(LaunchConfiguration("planned_travel_in_cost"), value_type=bool)
     trace_line_search_arg = DeclareLaunchArgument(
@@ -230,7 +220,6 @@ def generate_launch_description():
         # Objective weights (see base_gradient.hpp). Cartesian term has no gradient; kept for
         # inner-GTSP ordering parity with the rest of the pipeline.
         "bg_joint_distance_weight": 1.0,
-        "bg_cartesian_distance_weight": 0.0,
         "bg_max_joint_deviation_weight": 1.0,
         # Objective = travel cost - this * sum of manipulability (sum is ~2.8 for 38 viewpoints).
         "bg_manipulability_weight": 0.0,
@@ -265,10 +254,8 @@ def generate_launch_description():
         "bg_refine_solves": refine_solves,
         "bg_travel_gradient": travel_gradient,
         "bg_manipulability_gradient": manipulability_gradient,
-        "bg_travel_in_cost": travel_in_cost,
         "bg_freeze_order": freeze_order,
         "bg_lock_input_order": lock_input_order,
-        "bg_manipulability_after_reach": manipulability_after_reach,
         "bg_real_cost_planning_time": real_cost_planning_time,
         "bg_real_cost_attempts": real_cost_attempts,
         "bg_planned_travel_in_cost": planned_travel_in_cost,
@@ -378,11 +365,9 @@ def generate_launch_description():
             refine_solves_arg,
             travel_gradient_arg,
             manipulability_gradient_arg,
-            travel_in_cost_arg,
             miss_gap_weight_arg,
             freeze_order_arg,
             lock_input_order_arg,
-            manipulability_after_reach_arg,
             real_cost_planning_time_arg,
             real_cost_attempts_arg,
             planned_travel_in_cost_arg,

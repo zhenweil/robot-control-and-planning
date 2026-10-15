@@ -25,12 +25,11 @@ struct BaseGradientParams
 	// Absolute start position (m, base frame), NaN = nominal.
 	double initial_x = NAN, initial_y = NAN, initial_z = NAN;
 
-	// Weights for GTSP
+	// Tour edge cost: joint distance and largest single-joint turn
 	double joint_distance_weight = 1.0;
-	double cartesian_distance_weight = 0.0;
 	double max_joint_deviation_weight = 1.0;
 
-	// Manupulability: sqrt(J*J^T)
+	// Comfort: cost -= weight * sum of manipulability sqrt(det(J J^T))
 	double manipulability_weight = 0.0;
 	// Missed viewpoints add their closest-IK pose's manipulability too (cost and gradient).
 	bool manipulability_include_missed = false;
@@ -79,30 +78,20 @@ struct BaseGradientParams
 	double reach_time_limit = 0.0;  // s per descent to reach every viewpoint; then it counts as stuck. 0 = none
 	int refine_solves = 0;  // extra full solves at each descent's result, warm-started from the best so far
 	int refine_ik_solutions = 8;  // IK solutions per viewpoint in refine solves: more same-branch choices for GTSP
-	// Reconfiguration: a move turning any joint (joint 7 aside) more than reconfig_threshold. Refine's GTSP edges
-	// and elbow swing add reconfig_weight per rad^2 of turn past it.
+	// Reconfiguration: a move turning any joint (joint 7 aside) more than reconfig_threshold. Refine's GTSP edges add
+	// reconfig_weight per rad^2 of turn past it.
 	double reconfig_threshold = 1.0;
 	double reconfig_weight = 10.0;
 	double edge_reconfig_weight = 0.0;  // internal: reconfig_weight while refining, 0 otherwise
-	// Elbow-swing smoothing, after refine: slide each arm pose along its self-motion and move the object with them
-	// to shorten the tour's joint travel; kept only if the planned travel drops.
-	bool elbow_swing = false;
-	int elbow_swing_iters = 50;
-	double elbow_swing_object_step = 0.01;  // m: first object step
-	double elbow_swing_joint_step = 0.1;  // first step along each pose's self-motion (times the travel slope)
-	bool travel_gradient = true;  // false: the descent direction ignores tour travel (cost still includes it)
-	bool manipulability_gradient = true;  // false: the descent direction ignores the manipulability terms
-	bool travel_in_cost = true;  // false: the placement cost leaves out travel (GTSP still orders by travel)
+	bool travel_gradient = true;  // false: the descent direction ignores tour travel
+	bool manipulability_gradient = true;  // false: the descent direction ignores the comfort terms
 	bool freeze_order = false;  // once all viewpoints are reached, keep the viewpoint order fixed
 	bool lock_input_order = false;  // visit viewpoints in the input order throughout (no GTSP reordering)
-	bool manipulability_after_reach = false;  // misses only until all are reached, then manipulability on
-	// > 0: refine picks tours by real cost (OMPL-planned joint travel); seconds per planning attempt.
+	// > 0: OMPL-planned joint travel can be computed; seconds per planning attempt.
 	double real_cost_planning_time = 0.0;
-	int real_cost_attempts = 3;  // planning attempts per leg; the shortest joint path is kept
-	// Travel in the cost = planned joint travel instead of the L2 estimate, whatever travel_in_cost says (needs real_cost_planning_time > 0).
+	int real_cost_attempts = 3;  // planning attempts per edge; the shortest joint path is kept
+	// Travel in the cost = planned joint travel, once every viewpoint is reached (needs real_cost_planning_time > 0).
 	bool planned_travel_in_cost = false;
-	// Probes track the current arm poses (one warm IK attempt per viewpoint, fixed order) instead of a fresh search.
-	bool track_probes = false;
 	// Room-then-reach: when stuck with misses, aim at a missed viewpoint; if that loses reached viewpoints, back off
 	// to raise the margins (joint limit, reach, stretch, collision) that ran out for them, then aim again.
 	bool room_then_reach = false;

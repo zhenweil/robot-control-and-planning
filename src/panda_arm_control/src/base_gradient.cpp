@@ -3,7 +3,6 @@
 #include <cstdio>
 #include <limits>
 #include <memory>
-#include <random>
 #include <thread>
 #include <numeric>
 #include <optional>
@@ -12,7 +11,6 @@
 #include <filesystem>
 #include <json/json.h>
 #include <Eigen/Dense>
-#include <Eigen/Sparse>
 #include <random_numbers/random_numbers.h>
 
 #include <geometric_shapes/shapes.h>
@@ -29,26 +27,27 @@
 namespace
 {
 
-// Object placement: absolute position (x, y, z, base frame); the orientation stays nominal.
-struct ObjectPlacement
-{
-	double x = 0.0;
-	double y = 0.0;
-	double z = 0.0;
-};
+using Joints = std::vector<double>;
+using Vector6d = Eigen::Matrix<double, 6, 1>;
+using Position = Eigen::Vector3d;  // object position, abs base frame; its orientation stays nominal
+using ScenePtr = planning_scene_monitor::PlanningSceneMonitorPtr;
 
-// Maps poses given relative to the object's position (base-frame axes, "_obj") to absolute poses.
-Eigen::Isometry3d MakePlacement(const ObjectPlacement& p)
+constexpr double kInf = std::numeric_limits<double>::infinity();
+
+// ---------------------------------------------------------------------------------------------
+// Geometry and scene helpers
+// ---------------------------------------------------------------------------------------------
+
+Eigen::Isometry3d Translation(const Position& p)
 {
 	Eigen::Isometry3d t = Eigen::Isometry3d::Identity();
-	t.translation() = Eigen::Vector3d(p.x, p.y, p.z);
+	t.translation() = p;
 	return t;
 }
 
 Eigen::Isometry3d MakeIsometry(const Eigen::Vector3d& translation, const Eigen::Matrix3d& rotation)
 {
-	Eigen::Isometry3d t = Eigen::Isometry3d::Identity();
-	t.translation() = translation;
+	Eigen::Isometry3d t = Translation(translation);
 	t.linear() = rotation;
 	return t;
 }
@@ -59,7 +58,7 @@ geometry_msgs::msg::Pose ToPoseMsg(const Eigen::Isometry3d& t)
 	p.position.x = t.translation().x();
 	p.position.y = t.translation().y();
 	p.position.z = t.translation().z();
-	Eigen::Quaterniond q(t.rotation());
+	const Eigen::Quaterniond q(t.rotation());
 	p.orientation.x = q.x();
 	p.orientation.y = q.y();
 	p.orientation.z = q.z();
@@ -67,63 +66,87 @@ geometry_msgs::msg::Pose ToPoseMsg(const Eigen::Isometry3d& t)
 	return p;
 }
 
-bool IsStateCollisionFree(
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, moveit::core::RobotState* state,
-	const moveit::core::JointModelGroup* group, const double* joint_positions)
+geometry_msgs::msg::Point ToPoint(const Eigen::Vector3d& v)
 {
-	state->setJointGroupPositions(group, joint_positions);
-	state->update();
-	planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
-	return locked_scene->isStateValid(*state, group->getName());
+	geometry_msgs::msg::Point p;
+	p.x = v.x();
+	p.y = v.y();
+	p.z = v.z();
+	return p;
 }
 
-// MOVE only updates the registered object's pose -- cheap, no mesh reload.
-void SetObjectPose(
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const Eigen::Isometry3d& pose)
+bool IsStateValid(
+	const ScenePtr& scene, moveit::core::RobotState* state, const moveit::core::JointModelGroup* group, const double* q)
+{
+	state->setJointGroupPositions(group, q);
+	state->update();
+	planning_scene_monitor::LockedPlanningSceneRO locked(scene);
+	return locked->isStateValid(*state, group->getName());
+}
+
+// MOVE only updates the registered object's pose: cheap, no mesh reload.
+void MoveObject(const ScenePtr& scene, const Eigen::Isometry3d& pose)
 {
 	moveit_msgs::msg::CollisionObject obj;
 	obj.header.frame_id = "panda_link0";
 	obj.id = "object";
 	obj.pose = ToPoseMsg(pose);
 	obj.operation = obj.MOVE;
-
-	planning_scene_monitor::LockedPlanningSceneRW locked_scene(planning_scene_monitor);
-	locked_scene->processCollisionObjectMsg(obj);
+	planning_scene_monitor::LockedPlanningSceneRW locked(scene);
+	locked->processCollisionObjectMsg(obj);
 }
 
-ObjectPlacement ProjectToBounds(ObjectPlacement p, const BaseGradientBounds& b)
+Position Clamp(Position p, const BaseGradientBounds& b)
 {
-	p.x = std::clamp(p.x, b.x_min, b.x_max);
-	p.y = std::clamp(p.y, b.y_min, b.y_max);
-	p.z = std::clamp(p.z, b.z_min, b.z_max);
+	p.x() = std::clamp(p.x(), b.x_min, b.x_max);
+	p.y() = std::clamp(p.y(), b.y_min, b.y_max);
+	p.z() = std::clamp(p.z(), b.z_min, b.z_max);
 	return p;
 }
 
-Eigen::Vector3d ToOffsetVec(const ObjectPlacement& a, const ObjectPlacement& b)  // a - b, component-wise
+// [position; axis * angle] error from `tool` to `target`.
+Vector6d PoseError(const Eigen::Isometry3d& target, const Eigen::Isometry3d& tool)
 {
-	return Eigen::Vector3d(a.x - b.x, a.y - b.y, a.z - b.z);
+	const Eigen::AngleAxisd rot(target.linear() * tool.linear().transpose());
+	Vector6d e;
+	e.head<3>() = target.translation() - tool.translation();
+	e.tail<3>() = rot.axis() * rot.angle();
+	return e;
 }
 
-// Joint travel leaves out the last joint (joint 7, the flange spin about the camera axis): that roll doesn't
-// matter for a viewpoint, so its motion isn't counted.
-size_t CountedJoints(const std::vector<double>& a, const std::vector<double>& b)
+// Pose gap in meters, rotation weighed by rot_scale (m per rad).
+double PoseGap(const Vector6d& e, double rot_scale)
+{
+	return std::sqrt(e.head<3>().squaredNorm() + rot_scale * rot_scale * e.tail<3>().squaredNorm());
+}
+
+// J^T (J J^T + damping^2 I)^-1
+Eigen::MatrixXd DampedPinv(const Eigen::MatrixXd& J, double damping)
+{
+	Eigen::MatrixXd JJt = J * J.transpose();
+	JJt.diagonal().array() += damping * damping;
+	return J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(J.rows(), J.rows()));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Joint travel. Joint 7 (the flange spin about the camera axis) doesn't matter for a viewpoint: not counted.
+// ---------------------------------------------------------------------------------------------
+
+size_t CountedJoints(const Joints& a, const Joints& b)
 {
 	const size_t n = std::min(a.size(), b.size());
 	return n > 0 ? n - 1 : 0;
 }
 
-double JointL2Distance(const std::vector<double>& a, const std::vector<double>& b)
+double JointDistance(const Joints& a, const Joints& b)
 {
 	double d = 0.0;
 	for (size_t k = 0; k < CountedJoints(a, b); ++k)
-	{
-		double e = a[k] - b[k];
-		d += e * e;
-	}
+		d += (a[k] - b[k]) * (a[k] - b[k]);
 	return std::sqrt(d);
 }
 
-double MaxJointDeviation(const std::vector<double>& a, const std::vector<double>& b)
+double MaxJointTurn(const Joints& a, const Joints& b)
 {
 	double m = 0.0;
 	for (size_t k = 0; k < CountedJoints(a, b); ++k)
@@ -131,31 +154,48 @@ double MaxJointDeviation(const std::vector<double>& a, const std::vector<double>
 	return m;
 }
 
-// Sum over joints of (turn past `thr`)^2: zero unless the move is a reconfiguration.
-double ReconfigPenalty(const std::vector<double>& a, const std::vector<double>& b, double thr)
+// Sum over joints of (turn past thr)^2: zero unless the move is a reconfiguration.
+double ReconfigPenalty(const Joints& a, const Joints& b, double thr)
 {
 	double p = 0.0;
 	for (size_t k = 0; k < CountedJoints(a, b); ++k)
 	{
-		const double ex = std::abs(a[k] - b[k]) - thr;
-		if (ex > 0.0)
-			p += ex * ex;
+		const double excess = std::abs(a[k] - b[k]) - thr;
+		if (excess > 0.0)
+			p += excess * excess;
 	}
 	return p;
 }
 
-// Moves (home edge included) where some joint turns more than `thr`.
-int CountReconfigs(const std::vector<double>& home, const std::vector<std::vector<double>>& joints, double thr)
+int CountReconfigs(const Joints& home, const std::vector<Joints>& tour, double thr)
 {
-	int c = 0;
-	for (size_t k = 0; k < joints.size(); ++k)
-		c += MaxJointDeviation(k == 0 ? home : joints[k - 1], joints[k]) > thr ? 1 : 0;
-	return c;
+	int count = 0;
+	for (size_t k = 0; k < tour.size(); ++k)
+		count += MaxJointTurn(k == 0 ? home : tour[k - 1], tour[k]) > thr ? 1 : 0;
+	return count;
 }
 
-// Yoshikawa manipulability w = sqrt(det(J J^T)) of tool0 at q.
-// Per-joint room score s = 1 - exp(-k (q - lo)(hi - q) / range^2): ~1 mid-range, 0 at a limit; slope = ds/dq.
-// k <= 0 or an unbounded joint: s = 1. Scales the joint's Jacobian column (penalized manipulability).
+// One tour edge's cost, shared by the GTSP and the descent.
+double EdgeCost(const Joints& a, const Joints& b, const BaseGradientParams& p)
+{
+	return p.joint_distance_weight * JointDistance(a, b) + p.max_joint_deviation_weight * MaxJointTurn(a, b) +
+		(p.edge_reconfig_weight > 0.0 ? p.edge_reconfig_weight * ReconfigPenalty(a, b, p.reconfig_threshold) : 0.0);
+}
+
+double TravelCost(const Joints& home, const std::vector<Joints>& tour, const BaseGradientParams& p)
+{
+	double total = 0.0;
+	for (size_t k = 0; k < tour.size(); ++k)
+		total += EdgeCost(k == 0 ? home : tour[k - 1], tour[k], p);
+	return total;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Manipulability
+// ---------------------------------------------------------------------------------------------
+
+// Per-joint room score s = 1 - exp(-k (q - lo)(hi - q) / range^2) (~1 mid-range, 0 at a limit) and ds/dq.
+// k <= 0 or an unbounded joint: s = 1.
 struct JointRoom
 {
 	Eigen::VectorXd score;
@@ -163,8 +203,7 @@ struct JointRoom
 };
 
 JointRoom JointRoomScore(
-	const moveit::core::JointModelGroup* jmg, const moveit::core::RobotModelConstPtr& model,
-	const std::vector<double>& q, double k)
+	const moveit::core::JointModelGroup* group, const moveit::core::RobotModelConstPtr& model, const Joints& q, double k)
 {
 	const int n = static_cast<int>(q.size());
 	JointRoom room{Eigen::VectorXd::Ones(n), Eigen::VectorXd::Zero(n)};
@@ -172,8 +211,7 @@ JointRoom JointRoomScore(
 		return room;
 	for (int i = 0; i < n; ++i)
 	{
-		const moveit::core::VariableBounds& b =
-			model->getVariableBounds(jmg->getVariableNames()[static_cast<size_t>(i)]);
+		const moveit::core::VariableBounds& b = model->getVariableBounds(group->getVariableNames()[static_cast<size_t>(i)]);
 		const double range = b.max_position_ - b.min_position_;
 		if (!b.position_bounded_ || range <= 0.0)
 			continue;
@@ -187,41 +225,43 @@ JointRoom JointRoomScore(
 	return room;
 }
 
+Eigen::MatrixXd ToolJacobian(
+	moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool,
+	const Joints& q)
+{
+	state.setJointGroupPositions(group, q);
+	state.update();
+	Eigen::MatrixXd J;  // 6 x dof, [linear; angular] in the base frame
+	state.getJacobian(group, tool, Eigen::Vector3d::Zero(), J);
+	return J;
+}
+
 // w = sqrt(det(Js Js^T)), Js = J with each joint's column scaled by its room score (limit_sharpness 0 = plain).
 double Manipulability(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const moveit::core::LinkModel* tool0_link, const std::vector<double>& q, double limit_sharpness)
+	moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool,
+	const Joints& q, double limit_sharpness)
 {
-	state.setJointGroupPositions(jmg, q);
-	state.update();
-	Eigen::MatrixXd J;
-	state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
-	const Eigen::VectorXd s = JointRoomScore(jmg, state.getRobotModel(), q, limit_sharpness).score;
-	const Eigen::MatrixXd Js = J * s.asDiagonal();
+	const Eigen::MatrixXd J = ToolJacobian(state, group, tool, q);
+	const Eigen::MatrixXd Js = J * JointRoomScore(group, state.getRobotModel(), q, limit_sharpness).score.asDiagonal();
 	return std::sqrt(std::max(0.0, (Js * Js.transpose()).determinant()));
 }
 
-// Analytic dw/dq: dw/dq_i = w * tr((Js Js^T)^-1 Js dJs_i^T), Js = J S. For revolute joints, column j of dJ/dq_i
-// is [z_min(i,j) x Jv_max(i,j); i < j ? z_i x z_j : 0], built from J itself; dJs_i = dJ_i S + J_i ds_i e_i^T.
-Eigen::VectorXd ManipulabilityJointGradient(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const moveit::core::LinkModel* tool0_link, const std::vector<double>& q, double limit_sharpness)
+// dw/dq_i = w tr((Js Js^T)^-1 Js dJs_i^T). For revolute joints column j of dJ/dq_i is
+// [z_min(i,j) x Jv_max(i,j); i < j ? z_i x z_j : 0], built from J itself.
+Eigen::VectorXd ManipulabilityGradient(
+	moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool,
+	const Joints& q, double limit_sharpness)
 {
-	state.setJointGroupPositions(jmg, q);
-	state.update();
-	Eigen::MatrixXd J;  // 6 x n, [linear; angular] in the base frame
-	state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
+	const Eigen::MatrixXd J = ToolJacobian(state, group, tool, q);
 	const int n = static_cast<int>(J.cols());
-	const JointRoom room = JointRoomScore(jmg, state.getRobotModel(), q, limit_sharpness);
-	const Eigen::VectorXd& s = room.score;
-	const Eigen::VectorXd& ds = room.slope;
-	const Eigen::MatrixXd Js = J * s.asDiagonal();
+	const JointRoom room = JointRoomScore(group, state.getRobotModel(), q, limit_sharpness);
+	const Eigen::MatrixXd Js = J * room.score.asDiagonal();
 	const Eigen::MatrixXd A = Js * Js.transpose();
 	const double w = std::sqrt(std::max(0.0, A.determinant()));
 	Eigen::VectorXd g = Eigen::VectorXd::Zero(n);
 	if (w < 1e-12)
 		return g;
-	const Eigen::MatrixXd M = A.ldlt().solve(Js);  // (Js Js^T)^-1 Js
+	const Eigen::MatrixXd M = A.ldlt().solve(Js);
 	Eigen::MatrixXd dJ(6, n);
 	for (int i = 0; i < n; ++i)
 	{
@@ -233,59 +273,84 @@ Eigen::VectorXd ManipulabilityJointGradient(
 			if (i < j)
 				dJ.col(j).tail<3>() = J.col(i).tail<3>().cross(J.col(j).tail<3>());
 		}
-		g(i) = w * (M.cwiseProduct(dJ * s.asDiagonal()).sum() + ds(i) * M.col(i).dot(J.col(i)));
+		g(i) = w * (M.cwiseProduct(dJ * room.score.asDiagonal()).sum() + room.slope(i) * M.col(i).dot(J.col(i)));
 	}
 	return g;
 }
 
-// Close point pairs: per pair, d(distance)/dq (a row over the group's joints), its distance, d(distance)/d(object
-// position) (zero unless one side is the object) and "link - link" for logs.
+// -tau log(sum exp(-w / tau)), ~ the smallest w; shares (optional) gets each w's slope, adding up to 1.
+double SoftMin(const std::vector<double>& w, double tau, std::vector<double>* shares = nullptr)
+{
+	if (w.empty())
+		return 0.0;
+	const double lo = *std::min_element(w.begin(), w.end());
+	double sum = 0.0;
+	for (double v : w)
+		sum += std::exp(-(v - lo) / tau);
+	if (shares)
+	{
+		shares->clear();
+		for (double v : w)
+			shares->push_back(std::exp(-(v - lo) / tau) / sum);
+	}
+	return lo - tau * std::log(sum);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Close point pairs and the collision-aware closest IK
+// ---------------------------------------------------------------------------------------------
+
+// Per pair: d(distance)/dq over the group's joints, the distance, d(distance)/d(object position) (zero unless one
+// side is the object) and "link - link".
 struct ClosePairs
 {
 	std::vector<Eigen::RowVectorXd> gradients;
 	std::vector<double> dists;
 	std::vector<Eigen::Vector3d> object_slopes;
 	std::vector<std::string> names;
+
+	void Append(const ClosePairs& o)
+	{
+		gradients.insert(gradients.end(), o.gradients.begin(), o.gradients.end());
+		dists.insert(dists.end(), o.dists.begin(), o.dists.end());
+		object_slopes.insert(object_slopes.end(), o.object_slopes.begin(), o.object_slopes.end());
+		names.insert(names.end(), o.names.begin(), o.names.end());
+	}
 };
 
-// If two points are too close, use jacobian to push them apart
-// Used to find closest IK solution
-ClosePairs ClosePairSeparationGradients(
+ClosePairs ClosePairGradients(
 	const collision_detection::DistanceResult& res, const moveit::core::RobotState& state,
-	const moveit::core::JointModelGroup* jmg, double margin)
+	const moveit::core::JointModelGroup* group, double margin)
 {
+	using collision_detection::BodyType;
 	ClosePairs pairs;
-	const auto& model = state.getRobotModel();
-	for (const auto& pair_entry : res.distances)
-		for (const auto& d : pair_entry.second)
+	for (const auto& entry : res.distances)
+		for (const auto& d : entry.second)
 		{
 			if (d.distance >= margin)
 				continue;
-			Eigen::RowVectorXd row = Eigen::RowVectorXd::Zero(jmg->getVariableCount());
+			Eigen::RowVectorXd row = Eigen::RowVectorXd::Zero(group->getVariableCount());
 			Eigen::Vector3d object_slope = Eigen::Vector3d::Zero();
-			bool any_robot_side = false;
+			bool robot_side = false;
 			for (int side = 0; side < 2; ++side)
 			{
-				if (d.body_types[side] == collision_detection::BodyType::WORLD_OBJECT && d.link_names[side] == "object")
-					object_slope += (side == 0 ? -1.0 : 1.0) * d.normal;  // the object's points move with it
-				if (d.body_types[side] != collision_detection::BodyType::ROBOT_LINK &&
-					d.body_types[side] != collision_detection::BodyType::ROBOT_ATTACHED)
+				// distance ~ distance0 + normal.(dp1 - dp0)
+				const double sign = side == 0 ? -1.0 : 1.0;
+				if (d.body_types[side] == BodyType::WORLD_OBJECT && d.link_names[side] == "object")
+					object_slope += sign * d.normal;
+				if (d.body_types[side] != BodyType::ROBOT_LINK && d.body_types[side] != BodyType::ROBOT_ATTACHED)
 					continue;
-				const moveit::core::LinkModel* link = model->getLinkModel(d.link_names[side]);
-				if (!link)
+				const moveit::core::LinkModel* link = state.getRobotModel()->getLinkModel(d.link_names[side]);
+				if (!link || !group->isLinkUpdated(link->getName()))
+					continue;  // the group's joints don't move it; asking for its Jacobian logs an error
+				const Eigen::Vector3d local = state.getGlobalLinkTransform(link).inverse() * d.nearest_points[side];
+				Eigen::MatrixXd J;
+				if (!state.getJacobian(group, link, local, J))
 					continue;
-				const Eigen::Vector3d local_point =
-					state.getGlobalLinkTransform(link).inverse() * d.nearest_points[side];
-				if (!jmg->isLinkUpdated(link->getName()))
-					continue;  // the group's joints don't move it (e.g. the base); asking for its Jacobian logs an error
-				Eigen::MatrixXd J_link;
-				if (!state.getJacobian(jmg, link, local_point, J_link))
-					continue;
-				// distance ~ distance0 + normal.(dp1 - dp0); side 0 moves -normal, side 1 moves +normal.
-				row += (side == 0 ? -1.0 : 1.0) * (d.normal.transpose() * J_link.topRows<3>());
-				any_robot_side = true;
+				row += sign * (d.normal.transpose() * J.topRows<3>());
+				robot_side = true;
 			}
-			if (any_robot_side && row.norm() > 1e-9)
+			if (robot_side && row.norm() > 1e-9)
 			{
 				pairs.gradients.push_back(row);
 				pairs.dists.push_back(d.distance);
@@ -296,63 +361,48 @@ ClosePairs ClosePairSeparationGradients(
 	return pairs;
 }
 
-// Distance request for arm-arm and arm-object pairs closer than `threshold`.
-collision_detection::DistanceRequest MakeClosePairRequest(
-	const moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg, double threshold)
+collision_detection::DistanceRequest CloseRequest(
+	const moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, double threshold)
 {
 	collision_detection::DistanceRequest req;
 	req.enable_nearest_points = true;
 	req.enable_signed_distance = true;
 	req.type = collision_detection::DistanceRequestType::ALL;
-	req.group_name = jmg->getName();
+	req.group_name = group->getName();
 	req.enableGroup(state.getRobotModel());
 	req.distance_threshold = threshold;
 	req.max_contacts_per_body = 2;
 	return req;
 }
 
-// Pairs within `margin` at the state's current pose, with d(distance)/dq rows.
-// Used for closest IK solver.
-ClosePairs FindClosePairs(
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const moveit::core::RobotState& state,
-	const moveit::core::JointModelGroup* jmg, collision_detection::DistanceRequest& req, double margin)
+// Self and world distances at the state's pose, skipping pairs the scene always allows (as the validity check does).
+std::pair<collision_detection::DistanceResult, collision_detection::DistanceResult> Distances(
+	const ScenePtr& scene, const moveit::core::RobotState& state, collision_detection::DistanceRequest& req)
 {
-	collision_detection::DistanceResult self_res, world_res;
-	planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
-	// Skip pairs the scene always allows (adjacent links, hand/fingers), as the validity check does.
-	req.acm = &locked_scene->getAllowedCollisionMatrix();
-	// Active links from the scene's own robot model: MoveIt matches them by pointer, not name.
-	req.enableGroup(locked_scene->getRobotModel());
-	locked_scene->getCollisionEnv()->distanceSelf(req, self_res, state);
-	locked_scene->getCollisionEnv()->distanceRobot(req, world_res, state);
-	ClosePairs pairs = ClosePairSeparationGradients(self_res, state, jmg, margin);
-	const ClosePairs world = ClosePairSeparationGradients(world_res, state, jmg, margin);
-	pairs.gradients.insert(pairs.gradients.end(), world.gradients.begin(), world.gradients.end());
-	pairs.dists.insert(pairs.dists.end(), world.dists.begin(), world.dists.end());
-	pairs.object_slopes.insert(pairs.object_slopes.end(), world.object_slopes.begin(), world.object_slopes.end());
-	pairs.names.insert(pairs.names.end(), world.names.begin(), world.names.end());
+	std::pair<collision_detection::DistanceResult, collision_detection::DistanceResult> res;
+	planning_scene_monitor::LockedPlanningSceneRO locked(scene);
+	req.acm = &locked->getAllowedCollisionMatrix();
+	req.enableGroup(locked->getRobotModel());  // MoveIt matches active links by pointer, not name
+	locked->getCollisionEnv()->distanceSelf(req, res.first, state);
+	locked->getCollisionEnv()->distanceRobot(req, res.second, state);
+	return res;
+}
+
+ClosePairs FindClosePairs(
+	const ScenePtr& scene, const moveit::core::RobotState& state, const moveit::core::JointModelGroup* group,
+	collision_detection::DistanceRequest& req, double margin)
+{
+	const auto [self_res, world_res] = Distances(scene, state, req);
+	ClosePairs pairs = ClosePairGradients(self_res, state, group, margin);
+	pairs.Append(ClosePairGradients(world_res, state, group, margin));
 	return pairs;
 }
 
-// Pose gap in meters: |position|^2 + (rot_scale * |rotation|)^2, square-rooted.
-double WeightedPoseGap(const Eigen::Matrix<double, 6, 1>& e, double rot_scale)
-{
-	return std::sqrt(e.head<3>().squaredNorm() + rot_scale * rot_scale * e.tail<3>().squaredNorm());
-}
-
-struct ClosestIkResult
-{
-	bool found = false;
-	Eigen::Matrix<double, 6, 1> pose_error = Eigen::Matrix<double, 6, 1>::Zero();  // [position; axis*angle] error
-	double gap = std::numeric_limits<double>::max();
-	std::vector<double> joints;  // the best collision-free pose; empty if none found
-};
-
-// Links that move rigidly with the tool, plus anything hanging off them (hand, fingers): the path check ignores them.
-std::set<std::string> ToolSideLinks(const moveit::core::LinkModel* tool0_link)
+// Links rigid with the tool, plus what hangs off them (hand, fingers).
+std::set<std::string> ToolSideLinks(const moveit::core::LinkModel* tool)
 {
 	std::set<std::string> links;
-	const moveit::core::LinkModel* wrist = moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(tool0_link);
+	const moveit::core::LinkModel* wrist = moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(tool);
 	links.insert(wrist->getName());
 	for (const moveit::core::JointModel* joint : wrist->getChildJointModels())
 		for (const moveit::core::LinkModel* link : joint->getDescendantLinkModels())
@@ -360,128 +410,117 @@ std::set<std::string> ToolSideLinks(const moveit::core::LinkModel* tool0_link)
 	return links;
 }
 
-// True if a thin rod (1 cm) from the tool to the target hits nothing (object or arm; the tool side excepted). A closest
-// pose with something in between can't slide onto the viewpoint, so its gap and slope would mislead.
+// True if a 1 cm rod from the tool to the target hits nothing (tool side excepted): a closest pose with something in
+// between can't slide onto the viewpoint, so its gap and slope would mislead.
 bool ClearPathToTarget(
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, moveit::core::RobotState& state,
-	const moveit::core::LinkModel* tool0_link, const Eigen::Vector3d& target, const std::set<std::string>& tool_side)
+	const ScenePtr& scene, moveit::core::RobotState& state, const moveit::core::LinkModel* tool,
+	const Eigen::Vector3d& target, const std::set<std::string>& tool_side)
 {
-	const Eigen::Vector3d local = state.getGlobalLinkTransform(tool0_link).inverse() * target;
+	const Eigen::Vector3d local = state.getGlobalLinkTransform(tool).inverse() * target;
 	const double length = local.norm();
 	if (length < 0.01)
-		return true;  // already at the viewpoint
-	Eigen::Isometry3d rod_pose = Eigen::Isometry3d::Identity();
-	rod_pose.translation() = 0.5 * local;  // cylinder axis is z, centered on the shape pose
-	rod_pose.linear() = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d::UnitZ(), local / length).toRotationMatrix();
+		return true;
+	Eigen::Isometry3d rod = Eigen::Isometry3d::Identity();
+	rod.translation() = 0.5 * local;  // cylinder axis is z, centered on its pose
+	rod.linear() = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d::UnitZ(), local / length).toRotationMatrix();
 	const std::string id = "path_to_target";
 	state.attachBody(
-		id, Eigen::Isometry3d::Identity(), {std::make_shared<shapes::Cylinder>(0.005, length)}, {rod_pose}, tool_side,
-		tool0_link->getName());
+		id, Eigen::Isometry3d::Identity(), {std::make_shared<shapes::Cylinder>(0.005, length)}, {rod}, tool_side,
+		tool->getName());
 	state.update();
 	collision_detection::CollisionRequest req;
 	collision_detection::CollisionResult res;
 	{
-		planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
-		locked_scene->checkCollision(req, res, state);
+		planning_scene_monitor::LockedPlanningSceneRO locked(scene);
+		locked->checkCollision(req, res, state);
 	}
 	state.clearAttachedBody(id);
 	return !res.collision;
 }
 
-ClosestIkResult CollisionAwareClosestIk(
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, moveit::core::RobotState& state,
-	const moveit::core::JointModelGroup* jmg, const moveit::core::LinkModel* tool0_link,
-	const Eigen::Isometry3d& target_pose, const std::vector<double>& initial_joints, int iters, double margin, double rot_scale,
-	double limit_sharpness)
+struct ClosestIk
 {
-	const double damping = 0.01; // for jacobian near singular positions
-	const double max_joint_step = 0.1;
-	const double manip_step = 0.02;  // rad: null-space step up the (range-aware) manipulability per iteration
-	// Stop once the smallest gap so far improves by less than 1 mm over 5 steps.
-	const int stall_window = 5;
-	const double stall_gain = 1e-3;
-	const int dof = static_cast<int>(jmg->getVariableCount());
-	collision_detection::DistanceRequest req = MakeClosePairRequest(state, jmg, margin);
+	bool found = false;
+	Vector6d pose_error = Vector6d::Zero();
+	double gap = std::numeric_limits<double>::max();
+	Joints q;  // the best collision-free pose; empty if none
+};
 
-	std::vector<double> lower(static_cast<size_t>(dof)), upper(static_cast<size_t>(dof));
-	for (int k = 0; k < dof; ++k)
+// Damped steps toward the target that keep close pairs out to `margin` (first priority) and climb manipulability in
+// the target's null space. Joints at a limit that the step pushes further are frozen and the step re-solved.
+ClosestIk ClosestIkPose(
+	const ScenePtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group,
+	const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const Joints& start, int iters, double margin,
+	double rot_scale, double limit_sharpness)
+{
+	const double damping = 0.01;
+	const double max_joint_step = 0.1;
+	const double manip_step = 0.02;  // rad per iteration up the manipulability
+	const int stall_window = 5;		 // stop once the best gap improves < 1 mm over this many steps
+	const double stall_gain = 1e-3;
+	const int dof = static_cast<int>(group->getVariableCount());
+	collision_detection::DistanceRequest req = CloseRequest(state, group, margin);
+
+	Joints lower(static_cast<size_t>(dof)), upper(static_cast<size_t>(dof));
+	for (size_t k = 0; k < lower.size(); ++k)
 	{
-		const moveit::core::VariableBounds& b =
-			state.getRobotModel()->getVariableBounds(jmg->getVariableNames()[static_cast<size_t>(k)]);
-		lower[static_cast<size_t>(k)] = b.position_bounded_ ? b.min_position_ : -std::numeric_limits<double>::max();
-		upper[static_cast<size_t>(k)] = b.position_bounded_ ? b.max_position_ : std::numeric_limits<double>::max();
+		const moveit::core::VariableBounds& b = state.getRobotModel()->getVariableBounds(group->getVariableNames()[k]);
+		lower[k] = b.position_bounded_ ? b.min_position_ : -std::numeric_limits<double>::max();
+		upper[k] = b.position_bounded_ ? b.max_position_ : std::numeric_limits<double>::max();
 	}
 
-	const std::set<std::string> tool_side = ToolSideLinks(tool0_link);
-	std::vector<double> q = initial_joints;
-	ClosestIkResult best;
-	std::vector<double> min_gap_history;  // smallest gap seen up to each step
+	const std::set<std::string> tool_side = ToolSideLinks(tool);
+	Joints q = start;
+	ClosestIk best;
+	std::vector<double> best_gap_history;
 	for (int it = 0; it <= iters; ++it)
 	{
-		state.setJointGroupPositions(jmg, q);
+		state.setJointGroupPositions(group, q);
 		state.update();
-		const Eigen::Isometry3d& fk = state.getGlobalLinkTransform(tool0_link);
-		Eigen::Matrix<double, 6, 1> pose_error;
-		pose_error.head<3>() = target_pose.translation() - fk.translation();
-		const Eigen::AngleAxisd aa(target_pose.linear() * fk.linear().transpose());
-		pose_error.tail<3>() = aa.axis() * aa.angle();
-		const double gap = WeightedPoseGap(pose_error, rot_scale);
-
-		// Arm-arm and arm-object pairs within the margin.
-		const ClosePairs pairs = FindClosePairs(planning_scene_monitor, state, jmg, req, margin);
-		// Full validity check (same as IK and the planner) before keeping a pose: the distance query alone
-		// let through self-collisions near the base (hand vs link0, link5 vs link7).
-		if (gap < best.gap && IsStateCollisionFree(planning_scene_monitor, &state, jmg, q.data()) &&
-			ClearPathToTarget(planning_scene_monitor, state, tool0_link, target_pose.translation(), tool_side))
+		const Vector6d pose_error = PoseError(target, state.getGlobalLinkTransform(tool));
+		const double gap = PoseGap(pose_error, rot_scale);
+		const ClosePairs pairs = FindClosePairs(scene, state, group, req, margin);
+		// The full validity check, not just the distance query, which lets self-collisions near the base through.
+		if (gap < best.gap && IsStateValid(scene, &state, group, q.data()) &&
+			ClearPathToTarget(scene, state, tool, target.translation(), tool_side))
 		{
-			best.found = true;
-			best.pose_error = pose_error;
-			best.gap = gap;
-			best.joints = q;
+			best = {true, pose_error, gap, q};
 			if (gap < 1e-6)
 				break;
 		}
 		if (it == iters)
 			break;
-		min_gap_history.push_back(std::min(gap, min_gap_history.empty() ? gap : min_gap_history.back()));
-		if (static_cast<int>(min_gap_history.size()) > stall_window &&
-			min_gap_history[min_gap_history.size() - 1 - stall_window] - min_gap_history.back() < stall_gain)
+		best_gap_history.push_back(std::min(gap, best_gap_history.empty() ? gap : best_gap_history.back()));
+		if (static_cast<int>(best_gap_history.size()) > stall_window &&
+			best_gap_history[best_gap_history.size() - 1 - stall_window] - best_gap_history.back() < stall_gain)
 			break;
 
-		Eigen::MatrixXd J;
-		state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
-		Eigen::MatrixXd Jc(static_cast<Eigen::Index>(pairs.gradients.size()), dof);
-		Eigen::VectorXd r(static_cast<Eigen::Index>(pairs.gradients.size()));
-		for (size_t k = 0; k < pairs.gradients.size(); ++k)
+		const Eigen::MatrixXd J = ToolJacobian(state, group, tool, q);
+		const auto num_pairs = static_cast<Eigen::Index>(pairs.gradients.size());
+		Eigen::MatrixXd Jc(num_pairs, dof);
+		Eigen::VectorXd push(num_pairs);
+		for (Eigen::Index k = 0; k < num_pairs; ++k)
 		{
-			Jc.row(static_cast<Eigen::Index>(k)) = pairs.gradients[k];
-			r(static_cast<Eigen::Index>(k)) = margin - pairs.dists[k];
+			Jc.row(k) = pairs.gradients[static_cast<size_t>(k)];
+			push(k) = margin - pairs.dists[static_cast<size_t>(k)];
 		}
-		const Eigen::VectorXd manip_grad = ManipulabilityJointGradient(state, jmg, tool0_link, q, limit_sharpness);
-		// Step using only the joints in `mask`. Priority: pairs out to the margin, then the target, then
-		// manipulability in the target's null space (doesn't change the gap to first order).
+		const Eigen::VectorXd manip_grad = ManipulabilityGradient(state, group, tool, q, limit_sharpness);
+		const Eigen::MatrixXd I = Eigen::MatrixXd::Identity(dof, dof);
 		auto masked_step = [&](const Eigen::VectorXd& mask) {
 			const Eigen::MatrixXd Jm = J * mask.asDiagonal();
-			Eigen::MatrixXd JJt = Jm * Jm.transpose();
-			JJt.diagonal().array() += damping * damping;
-			const Eigen::MatrixXd Jm_pinv = Jm.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6));
+			const Eigen::MatrixXd Jm_pinv = DampedPinv(Jm, damping);
 			Eigen::VectorXd step = Jm_pinv * pose_error;
-			const Eigen::VectorXd up = (Eigen::MatrixXd::Identity(dof, dof) - Jm_pinv * Jm) * mask.asDiagonal() * manip_grad;
+			const Eigen::VectorXd up = (I - Jm_pinv * Jm) * mask.asDiagonal() * manip_grad;
 			if (up.norm() > 1e-12)
 				step += manip_step * up / up.norm();
-			if (Jc.rows() > 0)
+			if (num_pairs > 0)
 			{
 				const Eigen::MatrixXd Jcm = Jc * mask.asDiagonal();
-				Eigen::MatrixXd JcJct = Jcm * Jcm.transpose();
-				JcJct.diagonal().array() += damping * damping;
-				const Eigen::MatrixXd Jc_pinv =
-					Jcm.transpose() * JcJct.ldlt().solve(Eigen::MatrixXd::Identity(Jc.rows(), Jc.rows()));
-				step = Jc_pinv * r + (Eigen::MatrixXd::Identity(dof, dof) - Jc_pinv * Jcm) * step;
+				const Eigen::MatrixXd Jc_pinv = DampedPinv(Jcm, damping);
+				step = Jc_pinv * push + (I - Jc_pinv * Jcm) * step;
 			}
 			return step;
 		};
-		// Joints at a limit that the step pushes further out are taken out and the step re-solved, so the
-		// other joints keep working (a folded arm near the robot sits on its elbow/wrist limits).
 		Eigen::VectorXd mask = Eigen::VectorXd::Ones(dof);
 		Eigen::VectorXd dq = masked_step(mask);
 		for (int pass = 0; pass < dof; ++pass)
@@ -506,60 +545,18 @@ ClosestIkResult CollisionAwareClosestIk(
 			dq *= max_joint_step / step_max;
 		for (int k = 0; k < dof; ++k)
 			q[static_cast<size_t>(k)] += dq(k);
-		state.setJointGroupPositions(jmg, q);
-		state.enforceBounds(jmg);
-		state.copyJointGroupPositions(jmg, q);
+		state.setJointGroupPositions(group, q);
+		state.enforceBounds(group);
+		state.copyJointGroupPositions(group, q);
 	}
 	return best;
 }
 
-// Floor on w, so a singular configuration doesn't divide by zero.
-constexpr double kMinManipulability = 1e-6;
+// ---------------------------------------------------------------------------------------------
+// IK. One RNG for all random starts, reseeded before each solve: the same spot gets the same luck, so runs repeat and
+// nearby spots compare fairly (MoveIt's own RNGs seed from the clock).
+// ---------------------------------------------------------------------------------------------
 
-double SumManipulability(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const moveit::core::LinkModel* tool0_link, const std::vector<std::vector<double>>& joints, double limit_sharpness)
-{
-	double total = 0.0;
-	for (const auto& q : joints)
-		if (!q.empty())
-			total += Manipulability(state, jmg, tool0_link, q, limit_sharpness);
-	return total;
-}
-
-// Soft-min of the w values: -tau * log(sum exp(-w / tau)), ~ the smallest w for small tau. shares (optional)
-// gets each value's share exp(-w / tau) / sum, the soft-min's slope w.r.t. that w; shares add up to 1.
-double SoftMin(const std::vector<double>& w, double tau, std::vector<double>* shares = nullptr)
-{
-	if (w.empty())
-		return 0.0;
-	const double lo = *std::min_element(w.begin(), w.end());
-	double sum = 0.0;
-	for (double v : w)
-		sum += std::exp(-(v - lo) / tau);
-	if (shares)
-	{
-		shares->clear();
-		for (double v : w)
-			shares->push_back(std::exp(-(v - lo) / tau) / sum);
-	}
-	return lo - tau * std::log(sum);
-}
-
-// One tour edge's weighted cost -- identical formula for the inner GTSP and the descent objective.
-double WeightedEdgeCost(
-	const std::vector<double>& qa, const std::vector<double>& qb, const Eigen::Vector3d& pa,
-	const Eigen::Vector3d& pb, const BaseGradientParams& params)
-{
-	return params.cartesian_distance_weight * (pa - pb).norm() +
-		params.joint_distance_weight * JointL2Distance(qa, qb) +
-		params.max_joint_deviation_weight * MaxJointDeviation(qa, qb) +
-		(params.edge_reconfig_weight > 0.0 ? params.edge_reconfig_weight * ReconfigPenalty(qa, qb, params.reconfig_threshold)
-										   : 0.0);
-}
-
-// One RNG for all random IK starts, seeded from random_seed in SolveBaseGradient: MoveIt's default RNGs
-// seed from the clock, so without this the same seed still gives a different run.
 std::unique_ptr<random_numbers::RandomNumberGenerator> seeded_rng;
 
 random_numbers::RandomNumberGenerator& SeededRng()
@@ -569,229 +566,123 @@ random_numbers::RandomNumberGenerator& SeededRng()
 	return *seeded_rng;
 }
 
-// Restart the IK random starts from `seed`. Done before every solve in the descent, so each placement is
-// scored with the same luck: the same spot gives the same answer, and nearby spots compare fairly.
 void ReseedRng(int seed)
 {
 	seeded_rng = std::make_unique<random_numbers::RandomNumberGenerator>(static_cast<boost::uint32_t>(std::max(1, seed)));
 }
 
-// IK with a fixed amount of work: attempts > 0 runs that many single KDL attempts (a tiny timeout gives one
-// each; the first from the current state, the rest from random states), so a seed gives the same answer
-// regardless of CPU speed. attempts <= 0: one time-limited call (timeout).
-bool CollisionFreeExactIk(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg, const geometry_msgs::msg::Pose& target,
-	int attempts, double timeout, const moveit::core::GroupStateValidityCallbackFn& validity,
-	random_numbers::RandomNumberGenerator* rng = nullptr)
+// attempts > 0: that many single KDL attempts (first from the current state, the rest random), a fixed amount of work
+// so a seed repeats regardless of CPU speed. attempts <= 0: one time-limited call.
+bool ExactIk(
+	moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const geometry_msgs::msg::Pose& target,
+	int attempts, double timeout, const moveit::core::GroupStateValidityCallbackFn& validity)
 {
 	if (attempts <= 0)
-		return state.setFromIK(jmg, target, "tool0", timeout, validity);
-	const double single_attempt = 1e-9;  // s: KDL stops after its first attempt (0 would mean the default timeout)
+		return state.setFromIK(group, target, "tool0", timeout, validity);
+	const double single_attempt = 1e-9;  // s: KDL stops after its first attempt (0 means the default timeout)
 	for (int a = 0; a < attempts; ++a)
 	{
 		if (a > 0)
-			state.setToRandomPositions(jmg, rng ? *rng : SeededRng());
-		if (state.setFromIK(jmg, target, "tool0", single_attempt, validity))
+			state.setToRandomPositions(group, SeededRng());
+		if (state.setFromIK(group, target, "tool0", single_attempt, validity))
 			return true;
 	}
 	return false;
 }
 
-// IK solutions per viewpoint: one started from the previous solution (stays near it), the rest from
-// random starts.
-std::vector<std::vector<std::vector<double>>> CollectIkSolutions(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
-	const std::vector<std::vector<double>>& seed_per_viewpoint, const ObjectPlacement& base, const BaseGradientParams& params,
-	int max_solutions, random_numbers::RandomNumberGenerator* rng = nullptr)
-{
-	Eigen::Isometry3d xform = MakePlacement(base);
-	SetObjectPose(planning_scene_monitor, xform * object_pose_obj);
-
-	auto validity_callback = [&planning_scene_monitor](
-								 moveit::core::RobotState* s, const moveit::core::JointModelGroup* g,
-								 const double* jp) { return IsStateCollisionFree(planning_scene_monitor, s, g, jp); };
-
-	std::vector<std::vector<std::vector<double>>> ik_solutions(tour_poses_obj.size());
-	const int max_sol = std::max(1, max_solutions);
-
-	for (size_t i = 0; i < tour_poses_obj.size(); ++i)
-	{
-		geometry_msgs::msg::Pose target_local = ToPoseMsg(xform * tour_poses_obj[i]);
-		std::vector<std::vector<double>>& sols = ik_solutions[i];
-
-		state.setJointGroupPositions(jmg, seed_per_viewpoint[i]);
-		// Tracking: one attempt from the current pose; the random search below runs only if the arm can't follow.
-		if (CollisionFreeExactIk(
-				state, jmg, target_local, params.tracking ? 1 : params.ik_attempts, params.ik_timeout, validity_callback,
-				rng))
-		{
-			std::vector<double> s;
-			state.copyJointGroupPositions(jmg, s);
-			sols.push_back(std::move(s));
-		}
-
-		for (int attempt = 0; (!params.tracking || sols.empty()) &&
-			 attempt < max_sol * 3 + params.ik_retries_per_point && static_cast<int>(sols.size()) < max_sol; ++attempt)
-		{
-			// Zero solutions after the warm start + 4 random restarts: treat as out of reach. Every
-			// miss costs a full ik_timeout, the dominant cost at offsets that drop viewpoints.
-			if (sols.empty() && attempt >= 4)
-				break;
-			state.setToRandomPositions(jmg, rng ? *rng : SeededRng());
-			if (!CollisionFreeExactIk(state, jmg, target_local, params.ik_attempts, params.ik_timeout, validity_callback, rng))
-				continue;
-			std::vector<double> s;
-			state.copyJointGroupPositions(jmg, s);
-			bool dup = false;
-			for (const auto& e : sols)
-				if (JointL2Distance(e, s) < 0.1)  // same IK solution: ~5.7 deg, matches real_cost_planning.cpp
-				{
-					dup = true;
-					break;
-				}
-			if (!dup)
-				sols.push_back(std::move(s));
-		}
-	}
-	return ik_solutions;
-}
-
 // ---------------------------------------------------------------------------------------------
-// Inner redundant-IK GTSP (compact reimplementation of the generalized NN + 2-opt / solution-swap
-// scheme in hierarchical_tour.cpp. One node per (tour pose, IK branch); visit exactly one node per pose.
+// Tour: a GTSP over (viewpoint, IK solution) nodes, visiting one IK solution per reachable viewpoint.
+// Nearest neighbour, then 2-opt segment reversals and per-position IK-solution swaps.
 // ---------------------------------------------------------------------------------------------
 
 struct GtspNode
 {
-	int group = -1;	  // index into the reachable-pose list
-	int branch = -1;  // index into that pose's branch list
+	int group = -1;	  // index into the reachable viewpoints
+	int branch = -1;  // index into that viewpoint's IK solutions
 };
 
-struct GtspContext
+struct Gtsp
 {
-	std::vector<int> group_pose_index;						 // group -> tour pose index
-	std::vector<std::vector<const std::vector<double>*>> joints_by_group;  // group -> branch -> joints
-	std::vector<Eigen::Vector3d> tcp_local_by_group;			 // group -> tcp position in base frame
-	const std::vector<double>* home_joints = nullptr;
-	Eigen::Vector3d home_tcp_local = Eigen::Vector3d::Zero();
+	std::vector<int> viewpoint;						   // group -> viewpoint
+	std::vector<std::vector<const Joints*>> branches;  // group -> IK solutions
+	std::vector<std::vector<double>> node_cost;		   // group -> per-solution cost; empty = none
+	const Joints* home = nullptr;
 	const BaseGradientParams* params = nullptr;
-	// group -> branch -> cost of visiting that branch (-weight * manipulability); empty = none.
-	std::vector<std::vector<double>> node_cost_by_group;
 
-	const std::vector<double>& NodeJoints(const GtspNode& n) const { return *joints_by_group[n.group][n.branch]; }
-	double NodeCost(const GtspNode& n) const
-	{
-		return node_cost_by_group.empty() ? 0.0 : node_cost_by_group[n.group][n.branch];
-	}
-	const Eigen::Vector3d& NodePos(const GtspNode& n) const { return tcp_local_by_group[n.group]; }
-
-	double EdgeFromHome(const GtspNode& b) const
-	{
-		return WeightedEdgeCost(*home_joints, NodeJoints(b), home_tcp_local, NodePos(b), *params);
-	}
-	double Edge(const GtspNode& a, const GtspNode& b) const
-	{
-		return WeightedEdgeCost(NodeJoints(a), NodeJoints(b), NodePos(a), NodePos(b), *params);
-	}
+	const Joints& Q(const GtspNode& n) const { return *branches[n.group][n.branch]; }
+	double NodeCost(const GtspNode& n) const { return node_cost.empty() ? 0.0 : node_cost[n.group][n.branch]; }
+	double Edge(const GtspNode* a, const GtspNode& b) const { return EdgeCost(a ? Q(*a) : *home, Q(b), *params); }
 };
 
-std::vector<GtspNode> GeneralizedNearestNeighbor(const GtspContext& ctx)
+std::vector<GtspNode> NearestNeighborTour(const Gtsp& g)
 {
-	const size_t num_groups = ctx.joints_by_group.size();
-	std::vector<bool> visited(num_groups, false);
+	std::vector<bool> visited(g.branches.size(), false);
 	std::vector<GtspNode> order;
-	order.reserve(num_groups);
-
-	bool have_current = false;
-	GtspNode current;
-	for (size_t step = 0; step < num_groups; ++step)
+	for (size_t step = 0; step < g.branches.size(); ++step)
 	{
 		double best = std::numeric_limits<double>::max();
-		GtspNode best_node;
+		GtspNode pick;
 		bool picked = false;
-		for (size_t g = 0; g < num_groups; ++g)
-		{
-			if (visited[g])
-				continue;
-			for (size_t b = 0; b < ctx.joints_by_group[g].size(); ++b)
-			{
-				GtspNode cand{static_cast<int>(g), static_cast<int>(b)};
-				double cost = (have_current ? ctx.Edge(current, cand) : ctx.EdgeFromHome(cand)) + ctx.NodeCost(cand);
-				if (!picked || cost < best)
+		for (size_t grp = 0; grp < g.branches.size(); ++grp)
+			if (!visited[grp])
+				for (size_t b = 0; b < g.branches[grp].size(); ++b)
 				{
-					best = cost;
-					best_node = cand;
-					picked = true;
+					const GtspNode cand{static_cast<int>(grp), static_cast<int>(b)};
+					const double cost = g.Edge(order.empty() ? nullptr : &order.back(), cand) + g.NodeCost(cand);
+					if (!picked || cost < best)
+					{
+						best = cost;
+						pick = cand;
+						picked = true;
+					}
 				}
-			}
-		}
-		visited[best_node.group] = true;
-		order.push_back(best_node);
-		current = best_node;
-		have_current = true;
+		visited[static_cast<size_t>(pick.group)] = true;
+		order.push_back(pick);
 	}
 	return order;
 }
 
-std::vector<GtspNode> GeneralizedTwoOpt(const GtspContext& ctx, std::vector<GtspNode> order, int max_rounds)
+std::vector<GtspNode> TwoOpt(const Gtsp& g, std::vector<GtspNode> order, int max_rounds)
 {
 	if (order.size() < 2)
 		return order;
-
-	auto edge_at = [&](int prev_pos, const GtspNode& node) {
-		return prev_pos < 0 ? ctx.EdgeFromHome(node) : ctx.Edge(order[prev_pos], node);
-	};
-
+	auto edge_after = [&](size_t pos, const GtspNode& node) { return g.Edge(pos == 0 ? nullptr : &order[pos - 1], node); };
 	for (int round = 0; round < max_rounds; ++round)
 	{
 		bool improved = false;
-
-		// Segment-reversal 2-opt.
-		if (order.size() >= 3)
+		for (bool reversed = order.size() >= 3; reversed;)
 		{
-			bool reversal_improved = true;
-			while (reversal_improved)
-			{
-				reversal_improved = false;
-				for (size_t i = 0; i + 1 < order.size(); ++i)
+			reversed = false;
+			for (size_t i = 0; i + 1 < order.size(); ++i)
+				for (size_t j = i + 1; j < order.size(); ++j)
 				{
-					for (size_t j = i + 1; j < order.size(); ++j)
+					double old_cost = edge_after(i, order[i]);
+					double new_cost = edge_after(i, order[j]);
+					if (j + 1 < order.size())
 					{
-						double old_cost = edge_at(static_cast<int>(i) - 1, order[i]);
-						double new_cost = edge_at(static_cast<int>(i) - 1, order[j]);
-						if (j + 1 < order.size())
-						{
-							old_cost += ctx.Edge(order[j], order[j + 1]);
-							new_cost += ctx.Edge(order[i], order[j + 1]);
-						}
-						if (new_cost < old_cost - 1e-9)
-						{
-							std::reverse(
-								order.begin() + static_cast<std::ptrdiff_t>(i),
-								order.begin() + static_cast<std::ptrdiff_t>(j) + 1);
-							reversal_improved = true;
-							improved = true;
-						}
+						old_cost += g.Edge(&order[j], order[j + 1]);
+						new_cost += g.Edge(&order[i], order[j + 1]);
+					}
+					if (new_cost < old_cost - 1e-9)
+					{
+						std::reverse(
+							order.begin() + static_cast<std::ptrdiff_t>(i), order.begin() + static_cast<std::ptrdiff_t>(j) + 1);
+						reversed = improved = true;
 					}
 				}
-			}
 		}
-
-		// Solution-swap: hold neighbors fixed, try every branch of this position's group.
+		// Hold the neighbours fixed and pick each position's best IK solution.
 		for (size_t pos = 0; pos < order.size(); ++pos)
 		{
-			int group = order[pos].group;
-			bool has_next = pos + 1 < order.size();
+			const int grp = order[pos].group;
 			double best_cost = std::numeric_limits<double>::max();
 			int best_branch = order[pos].branch;
-			for (size_t b = 0; b < ctx.joints_by_group[group].size(); ++b)
+			for (size_t b = 0; b < g.branches[static_cast<size_t>(grp)].size(); ++b)
 			{
-				GtspNode cand{group, static_cast<int>(b)};
-				double cost = edge_at(static_cast<int>(pos) - 1, cand) + ctx.NodeCost(cand);
-				if (has_next)
-					cost += ctx.Edge(cand, order[pos + 1]);
+				const GtspNode cand{grp, static_cast<int>(b)};
+				double cost = edge_after(pos, cand) + g.NodeCost(cand);
+				if (pos + 1 < order.size())
+					cost += g.Edge(&cand, order[pos + 1]);
 				if (cost < best_cost)
 				{
 					best_cost = cost;
@@ -804,159 +695,96 @@ std::vector<GtspNode> GeneralizedTwoOpt(const GtspContext& ctx, std::vector<Gtsp
 				improved = true;
 			}
 		}
-
 		if (!improved)
 			break;
 	}
 	return order;
 }
 
-double TourCost(const GtspContext& ctx, const std::vector<GtspNode>& order)
+double TourCost(const Gtsp& g, const std::vector<GtspNode>& order)
 {
-	if (order.empty())
-		return 0.0;
-	double total = ctx.EdgeFromHome(order[0]);
-	for (size_t i = 1; i < order.size(); ++i)
-		total += ctx.Edge(order[i - 1], order[i]);
-	for (const GtspNode& n : order)
-		total += ctx.NodeCost(n);
+	double total = 0.0;
+	for (size_t k = 0; k < order.size(); ++k)
+		total += g.Edge(k == 0 ? nullptr : &order[k - 1], order[k]);
+	for (const GtspNode& node : order)
+		total += g.NodeCost(node);
 	return total;
 }
 
-struct GtspSolution
+// Viewpoint order and chosen IK solution per visit. warm_order (a previous order) also seeds a 2-opt run when every
+// listed viewpoint is still reachable; the cheaper tour wins, so a step never loses to a re-ordering accident.
+std::pair<std::vector<int>, std::vector<Joints>> FindTour(
+	const std::vector<std::vector<Joints>>& ik, const Joints& home, const BaseGradientParams& params,
+	const std::vector<int>* warm_order, const std::vector<std::vector<double>>& node_cost)
 {
-	std::vector<int> tour_pose_indices;			   // tour pose index per visit position
-	std::vector<std::vector<double>> chosen_joints;  // parallel: the picked IK branch
-};
-
-// warm_order (optional): viewpoint indices from a previous solve. When every listed viewpoint is
-// still reachable, 2-opt is seeded from that order as well as from a fresh nearest-neighbour pass,
-// and the cheaper result is kept -- so a base step can never make the tour worse just because the
-// heuristic re-ordered it, which is what caused the cost to bounce between iterations.
-GtspSolution FindTourOrder(
-	const std::vector<std::vector<std::vector<double>>>& ik_solutions, const ObjectPlacement& base,
-	const std::vector<Eigen::Isometry3d>& tour_poses_obj, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BaseGradientParams& params,
-	const std::vector<int>* warm_order = nullptr, const std::vector<std::vector<double>>* node_cost = nullptr)
-{
-	Eigen::Isometry3d xform = MakePlacement(base);
-
-	GtspContext ctx;
-	ctx.home_joints = &home_joints;
-	ctx.home_tcp_local = home_tcp_local;
-	ctx.params = &params;
-	std::vector<int> group_of_viewpoint(ik_solutions.size(), -1);
-	for (size_t i = 0; i < ik_solutions.size(); ++i)
+	Gtsp g;
+	g.home = &home;
+	g.params = &params;
+	std::vector<int> group_of(ik.size(), -1);
+	for (size_t v = 0; v < ik.size(); ++v)
 	{
-		if (ik_solutions[i].empty())
+		if (ik[v].empty())
 			continue;
-		group_of_viewpoint[i] = static_cast<int>(ctx.group_pose_index.size());
-		ctx.group_pose_index.push_back(static_cast<int>(i));
-		std::vector<const std::vector<double>*> js;
-		for (const auto& b : ik_solutions[i])
-			js.push_back(&b);
-		ctx.joints_by_group.push_back(std::move(js));
-		ctx.tcp_local_by_group.push_back((xform * tour_poses_obj[i]).translation());
-		if (node_cost)
-			ctx.node_cost_by_group.push_back((*node_cost)[i]);
+		group_of[v] = static_cast<int>(g.viewpoint.size());
+		g.viewpoint.push_back(static_cast<int>(v));
+		std::vector<const Joints*> qs;
+		for (const Joints& q : ik[v])
+			qs.push_back(&q);
+		g.branches.push_back(std::move(qs));
+		g.node_cost.push_back(node_cost[v]);
 	}
-
-	GtspSolution sol;
-	if (ctx.joints_by_group.empty())
-		return sol;
-
+	std::pair<std::vector<int>, std::vector<Joints>> tour;
+	if (g.branches.empty())
+		return tour;
 	const int rounds = std::max(1, params.gtsp_two_opt_rounds);
-
-	std::vector<GtspNode> best = GeneralizedTwoOpt(ctx, GeneralizedNearestNeighbor(ctx), rounds);
-	double best_cost = TourCost(ctx, best);
-
-	if (warm_order && warm_order->size() == ctx.group_pose_index.size())
+	std::vector<GtspNode> best = TwoOpt(g, NearestNeighborTour(g), rounds);
+	if (warm_order && warm_order->size() == g.viewpoint.size())
 	{
 		std::vector<GtspNode> seeded;
-		seeded.reserve(warm_order->size());
-		bool usable = true;
-		for (int vp : *warm_order)
+		for (int v : *warm_order)
 		{
-			if (vp < 0 || vp >= static_cast<int>(group_of_viewpoint.size()) || group_of_viewpoint[vp] < 0)
-			{
-				usable = false;
+			if (v < 0 || v >= static_cast<int>(group_of.size()) || group_of[static_cast<size_t>(v)] < 0)
 				break;
-			}
-			seeded.push_back({group_of_viewpoint[vp], 0});
+			seeded.push_back({group_of[static_cast<size_t>(v)], 0});
 		}
-		if (usable)
+		if (seeded.size() == warm_order->size())
 		{
-			seeded = GeneralizedTwoOpt(ctx, std::move(seeded), rounds);
-			double seeded_cost = TourCost(ctx, seeded);
-			if (seeded_cost < best_cost)
-			{
+			seeded = TwoOpt(g, std::move(seeded), rounds);
+			if (TourCost(g, seeded) < TourCost(g, best))
 				best = std::move(seeded);
-				best_cost = seeded_cost;
-			}
 		}
 	}
-
-	for (const GtspNode& n : best)
+	for (const GtspNode& node : best)
 	{
-		sol.tour_pose_indices.push_back(ctx.group_pose_index[n.group]);
-		sol.chosen_joints.push_back(ctx.NodeJoints(n));
+		tour.first.push_back(g.viewpoint[static_cast<size_t>(node.group)]);
+		tour.second.push_back(g.Q(node));
 	}
-	return sol;
+	return tour;
 }
 
-// 1.0 × joint L2 distance  +  1.0 × largest single-joint move  +  0.0 × tool's straight-line distance
-// straight-line distance doesn't help with pose optimziation
-double TourWeightedCost(
-	const ObjectPlacement& base, const std::vector<int>& tour, const std::vector<std::vector<double>>& joints,
-	const std::vector<Eigen::Isometry3d>& tour_poses_obj, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BaseGradientParams& params)
+// Cheapest IK solution per viewpoint for a fixed order: dynamic programming over (edge + per-solution) costs.
+std::vector<Joints> BestPosesForOrder(
+	const std::vector<std::vector<Joints>>& ik, const std::vector<std::vector<double>>& pose_cost,
+	const std::vector<int>& order, const Joints& home, const BaseGradientParams& params)
 {
-	Eigen::Isometry3d xform = MakePlacement(base);
-	double total = 0.0;
-	const std::vector<double>* prev_j = &home_joints;
-	Eigen::Vector3d prev_p = home_tcp_local;
-	for (size_t k = 0; k < tour.size(); ++k)
-	{
-		Eigen::Vector3d p = (xform * tour_poses_obj[tour[k]]).translation();
-		total += WeightedEdgeCost(*prev_j, joints[k], prev_p, p, params);
-		prev_j = &joints[k];
-		prev_p = p;
-	}
-	return total;
-}
-
-// Best arm pose per viewpoint for a fixed visiting order: exact dynamic programming over each viewpoint's
-// IK solutions (edge cost + per-pose cost), starting from home. Returns the chosen joints, parallel to order.
-std::vector<std::vector<double>> BestPosesForOrder(
-	const std::vector<std::vector<std::vector<double>>>& ik_solutions,
-	const std::vector<std::vector<double>>& pose_cost, const std::vector<int>& order, const ObjectPlacement& placement,
-	const std::vector<Eigen::Isometry3d>& tour_poses_obj, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const BaseGradientParams& params)
-{
-	const Eigen::Isometry3d xform = MakePlacement(placement);
-	// best[k][j]: cheapest cost of visiting order[0..k] ending in IK solution j of order[k].
-	std::vector<std::vector<double>> best(order.size());
+	std::vector<std::vector<double>> best(order.size());  // best[k][j]: cheapest order[0..k] ending in solution j
 	std::vector<std::vector<int>> parent(order.size());
 	for (size_t k = 0; k < order.size(); ++k)
 	{
 		const size_t v = static_cast<size_t>(order[k]);
-		const Eigen::Vector3d p = (xform * tour_poses_obj[v]).translation();
-		best[k].assign(ik_solutions[v].size(), std::numeric_limits<double>::max());
-		parent[k].assign(ik_solutions[v].size(), -1);
-		for (size_t j = 0; j < ik_solutions[v].size(); ++j)
+		best[k].assign(ik[v].size(), std::numeric_limits<double>::max());
+		parent[k].assign(ik[v].size(), -1);
+		for (size_t j = 0; j < ik[v].size(); ++j)
 		{
 			if (k == 0)
 			{
-				best[k][j] = pose_cost[v][j] +
-					WeightedEdgeCost(home_joints, ik_solutions[v][j], home_tcp_local, p, params);
+				best[k][j] = pose_cost[v][j] + EdgeCost(home, ik[v][j], params);
 				continue;
 			}
 			const size_t u = static_cast<size_t>(order[k - 1]);
-			const Eigen::Vector3d prev_p = (xform * tour_poses_obj[u]).translation();
-			for (size_t i = 0; i < ik_solutions[u].size(); ++i)
+			for (size_t i = 0; i < ik[u].size(); ++i)
 			{
-				const double c = best[k - 1][i] + pose_cost[v][j] +
-					WeightedEdgeCost(ik_solutions[u][i], ik_solutions[v][j], prev_p, p, params);
+				const double c = best[k - 1][i] + pose_cost[v][j] + EdgeCost(ik[u][i], ik[v][j], params);
 				if (c < best[k][j])
 				{
 					best[k][j] = c;
@@ -965,920 +793,86 @@ std::vector<std::vector<double>> BestPosesForOrder(
 			}
 		}
 	}
-	std::vector<std::vector<double>> joints(order.size());
+	std::vector<Joints> joints(order.size());
 	if (order.empty())
 		return joints;
 	int j = static_cast<int>(std::min_element(best.back().begin(), best.back().end()) - best.back().begin());
 	for (size_t k = order.size(); k-- > 0;)
 	{
-		joints[k] = ik_solutions[static_cast<size_t>(order[k])][static_cast<size_t>(j)];
+		joints[k] = ik[static_cast<size_t>(order[k])][static_cast<size_t>(j)];
 		j = parent[k][static_cast<size_t>(j)];
 	}
 	return joints;
 }
 
-// The full inner problem evaluated at one base pose: collect IK branches, run the GTSP (warm-
-// started from `warm_order` if given), and score the resulting tour. This IS Phi(base) -- the
-// quantity the outer gradient descent minimizes and the line search must test against.
-struct InnerSolution
+// Inserts viewpoints missing from `order` where their joint detour is smallest.
+void InsertByDetour(std::vector<int>& order, const std::vector<std::vector<Joints>>& ik, const Joints& home)
 {
-	std::vector<int> tour;					 // viewpoint index per visit position
-	std::vector<std::vector<double>> joints;  // parallel: chosen IK branch
-	double weighted_cost = 0.0;
-	double travel_cost = 0.0;		   // edge part of weighted_cost (home edge included)
-	double sum_manipulability = 0.0;  // sum of w over visited viewpoints (+ missed closest poses if included)
-	// Missed viewpoints and their closest-IK pose gaps; miss_cost = weight * sum of capped gaps.
-	std::vector<int> missed_vp;
-	std::vector<Eigen::Matrix<double, 6, 1>> missed_gap;
-	std::vector<std::vector<double>> missed_q;  // parallel: closest collision-free pose, empty if none
-	double miss_cost = 0.0;  // miss_gap_weight * sum of capped gaps
-	double softmin_manipulability = 0.0;  // SoftMin of w over visited (and included missed) poses
-	double gap_sum = 0.0;		 // unweighted sum of capped miss gaps (m)
-	int num_rescued = 0;  // missed by IK, reached via a collision-free closest-IK hit
-	int num_no_free = 0;  // closest IK found no collision-free posture at all (gap taken as the cap)
-	double real_cost = -1.0;  // planned joint travel (sum of ||dq|| along OMPL paths); -1 = not computed
+	for (size_t v = 0; v < ik.size(); ++v)
+	{
+		if (ik[v].empty() || std::find(order.begin(), order.end(), static_cast<int>(v)) != order.end())
+			continue;
+		const Joints& qv = ik[v].front();
+		size_t best_pos = order.size();
+		double best_detour = std::numeric_limits<double>::max();
+		for (size_t pos = 0; pos <= order.size(); ++pos)
+		{
+			const Joints& qa = pos == 0 ? home : ik[static_cast<size_t>(order[pos - 1])].front();
+			double detour = JointDistance(qa, qv);
+			if (pos < order.size())
+			{
+				const Joints& qb = ik[static_cast<size_t>(order[pos])].front();
+				detour += JointDistance(qv, qb) - JointDistance(qa, qb);
+			}
+			if (detour < best_detour)
+			{
+				best_detour = detour;
+				best_pos = pos;
+			}
+		}
+		order.insert(order.begin() + static_cast<std::ptrdiff_t>(best_pos), static_cast<int>(v));
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Solutions
+// ---------------------------------------------------------------------------------------------
+
+// A missed viewpoint: its closest collision-free pose's error (capped if none) and that pose (empty if none).
+struct Miss
+{
+	int vp;
+	Vector6d gap;
+	Joints q;
+};
+
+// The tour at one object position: what the descent minimizes.
+struct TourSolution
+{
+	std::vector<int> tour;		 // viewpoint per visit
+	std::vector<Joints> joints;	 // parallel: chosen IK solution
+	std::vector<Miss> missed;
+	double cost = 0.0;
+	double travel = 0.0;			 // L2 edge cost, home edge included
+	double sum_manipulability = 0.0;
+	double softmin_manipulability = 0.0;
+	double gap_sum = 0.0;			 // sum of capped miss gaps (m)
+	double miss_cost = 0.0;			 // miss_gap_weight * gap_sum
+	double planned = -1.0;			 // OMPL-planned joint travel; -1 = not planned
 	int num_reachable = 0;
 	int num_total = 0;
 	bool all_reachable = false;
 };
 
-// max_solutions: IK solutions to collect per pose (params.max_solutions_per_candidate everywhere in the descent).
-InnerSolution InnerSolve(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
-	const std::vector<std::vector<double>>& seed_per_viewpoint, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params,
-	const std::vector<int>* warm_order, int max_solutions, const std::vector<int>* fixed_order = nullptr)
+Vector6d CappedGap(double cap)
 {
-	std::vector<std::vector<std::vector<double>>> ik_solutions = CollectIkSolutions(
-		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seed_per_viewpoint, base,
-		params, max_solutions);
-	const moveit::core::LinkModel* tool0_link = state.getRobotModel()->getLinkModel("tool0");
-
-	// Viewpoints IK missed: collision-aware closest IK from the warm seed; random starts only if that finds
-	// no collision-free pose under the cap, so the gap changes smoothly with the offset. A hit is added as
-	// a branch (IK just missed it); otherwise the collision-free gap is kept, giving the miss a slope.
-	const double exact_gap = 1e-4;	// 0.1 mm: tight enough to use the hit as a real IK solution
-	std::vector<int> missed_vp;
-	std::vector<Eigen::Matrix<double, 6, 1>> missed_gap;
-	std::vector<std::vector<double>> missed_q;
-	int num_rescued = 0, num_no_free = 0;
-	const Eigen::Isometry3d xform = MakePlacement(base);
-	const int num_found = static_cast<int>(
-		std::count_if(ik_solutions.begin(), ik_solutions.end(), [](const auto& s) { return !s.empty(); }));
-	const bool skip_gaps = num_found < params.gaps_min_reached;
-	for (size_t i = 0; i < ik_solutions.size(); ++i)
-	{
-		if (!ik_solutions[i].empty())
-			continue;
-		if (skip_gaps)
-		{
-			// Rejected on count anyway: a gap at the cap, no closest-IK search.
-			Eigen::Matrix<double, 6, 1> capped = Eigen::Matrix<double, 6, 1>::Zero();
-			capped(0) = params.miss_gap_cap;
-			missed_vp.push_back(static_cast<int>(i));
-			missed_q.push_back({});
-			missed_gap.push_back(capped);
-			++num_no_free;
-			continue;
-		}
-		const Eigen::Isometry3d target = xform * tour_poses_obj[i];
-		ClosestIkResult best;
-		// First start: the arm pose of the nearest reached viewpoint, often in the right posture family
-		// (e.g. folded) when the warm seed is stuck in the wrong one.
-		std::vector<double> neighbor_joints;
-		double neighbor_dist = std::numeric_limits<double>::max();
-		for (size_t j = 0; j < ik_solutions.size(); ++j)
-		{
-			if (j == i || ik_solutions[j].empty())
-				continue;
-			const Eigen::Isometry3d other = xform * tour_poses_obj[j];
-			const double d = (other.translation() - target.translation()).norm() +
-				params.rot_metric_scale * Eigen::AngleAxisd(other.linear() * target.linear().transpose()).angle();
-			if (d < neighbor_dist)
-			{
-				neighbor_dist = d;
-				neighbor_joints = ik_solutions[j].front();
-			}
-		}
-		if (params.tracking)
-			neighbor_joints.clear();  // follow its own previous closest pose first; random starts only if that fails
-		const int num_fixed_starts = neighbor_joints.empty() ? 1 : 2;
-		// Nearest reached viewpoint's pose first; the warm start (previous closest pose) and random starts only
-		// while no collision-free pose is under the cap (a capped gap has no slope).
-		for (int t = 0; t < std::max(num_fixed_starts, params.closest_ik_starts) &&
-			 (t == 0 || !best.found || best.gap >= params.miss_gap_cap);
-			 ++t)
-		{
-			std::vector<double> start_joints = seed_per_viewpoint[i];
-			if (t == 0 && num_fixed_starts == 2)
-				start_joints = neighbor_joints;
-			else if (t == 1 && num_fixed_starts == 2)
-				start_joints = seed_per_viewpoint[i];
-			else if (t > 0)
-			{
-				state.setToRandomPositions(jmg, SeededRng());
-				state.copyJointGroupPositions(jmg, start_joints);
-			}
-			const ClosestIkResult r = CollisionAwareClosestIk(
-				planning_scene_monitor, state, jmg, tool0_link, target, start_joints, params.closest_ik_iters,
-				params.closest_ik_margin, params.rot_metric_scale, params.manipulability_limit_sharpness);
-			if (r.found && r.gap < best.gap)
-			{
-				best = r;
-			}
-		}
-		if (best.found && best.gap < exact_gap)
-		{
-			ik_solutions[i].push_back(best.joints);
-			++num_rescued;
-			continue;
-		}
-		missed_vp.push_back(static_cast<int>(i));
-		missed_q.push_back(best.joints);
-		if (best.found)
-			missed_gap.push_back(best.pose_error);
-		else
-		{
-			++num_no_free;
-			// No collision-free posture: a gap at the cap -- flat cost, no slope.
-			Eigen::Matrix<double, 6, 1> capped = Eigen::Matrix<double, 6, 1>::Zero();
-			capped(0) = params.miss_gap_cap;
-			missed_gap.push_back(capped);
-		}
-	}
-
-	std::vector<std::vector<double>> node_cost(ik_solutions.size());
-	for (size_t i = 0; i < ik_solutions.size(); ++i)
-		for (const auto& q : ik_solutions[i])
-		{
-			const double w = Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness);
-			node_cost[i].push_back(-params.manipulability_weight * w);
-		}
-	InnerSolution out;
-	if (fixed_order)
-	{
-		// Keep the given order (reachable viewpoints only); pick only the arm poses.
-		for (int v : *fixed_order)
-			if (!ik_solutions[static_cast<size_t>(v)].empty())
-				out.tour.push_back(v);
-		// Reached viewpoints outside the given order (newly reached): insert where the joint detour is smallest.
-		for (size_t v = 0; v < ik_solutions.size(); ++v)
-		{
-			if (ik_solutions[v].empty() || std::find(out.tour.begin(), out.tour.end(), static_cast<int>(v)) != out.tour.end())
-				continue;
-			const std::vector<double>& qv = ik_solutions[v].front();
-			auto q_at = [&](size_t pos) -> const std::vector<double>& {
-				return pos == 0 ? home_joints : ik_solutions[static_cast<size_t>(out.tour[pos - 1])].front();
-			};
-			size_t best_pos = out.tour.size();
-			double best_detour = std::numeric_limits<double>::max();
-			for (size_t pos = 0; pos <= out.tour.size(); ++pos)
-			{
-				const std::vector<double>& qa = q_at(pos);
-				double detour = JointL2Distance(qa, qv);
-				if (pos < out.tour.size())
-				{
-					const std::vector<double>& qb = ik_solutions[static_cast<size_t>(out.tour[pos])].front();
-					detour += JointL2Distance(qv, qb) - JointL2Distance(qa, qb);
-				}
-				if (detour < best_detour)
-				{
-					best_detour = detour;
-					best_pos = pos;
-				}
-			}
-			out.tour.insert(out.tour.begin() + static_cast<std::ptrdiff_t>(best_pos), static_cast<int>(v));
-		}
-		out.joints = BestPosesForOrder(
-			ik_solutions, node_cost, out.tour, base, tour_poses_obj, home_joints, home_tcp_local, params);
-	}
-	else
-	{
-		GtspSolution gtsp = FindTourOrder(
-			ik_solutions, base, tour_poses_obj, home_joints, home_tcp_local, params, warm_order, &node_cost);
-		out.tour = std::move(gtsp.tour_pose_indices);
-		out.joints = std::move(gtsp.chosen_joints);
-	}
-	out.num_total = static_cast<int>(tour_poses_obj.size());
-	out.num_reachable = static_cast<int>(out.tour.size());
-	out.all_reachable = (out.num_reachable == out.num_total);
-	out.travel_cost =
-		TourWeightedCost(base, out.tour, out.joints, tour_poses_obj, home_joints, home_tcp_local, params);
-	out.sum_manipulability = SumManipulability(state, jmg, tool0_link, out.joints, params.manipulability_limit_sharpness);
-	if (params.manipulability_include_missed)
-	{
-		out.sum_manipulability += SumManipulability(state, jmg, tool0_link, missed_q, params.manipulability_limit_sharpness);
-	}
-	if (params.softmin_manipulability_weight > 0.0)
-	{
-		std::vector<double> ws;
-		for (const auto& q : out.joints)
-			ws.push_back(Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness));
-		if (params.manipulability_include_missed)
-			for (const auto& q : missed_q)
-				if (!q.empty())
-					ws.push_back(Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness));
-		out.softmin_manipulability = SoftMin(ws, params.softmin_tau);
-	}
-	out.num_rescued = num_rescued;
-	out.num_no_free = num_no_free;
-	out.missed_vp = std::move(missed_vp);
-	out.missed_gap = std::move(missed_gap);
-	out.missed_q = std::move(missed_q);
-	for (const auto& e : out.missed_gap)
-		out.gap_sum += std::min(params.miss_gap_cap, WeightedPoseGap(e, params.rot_metric_scale));
-	out.miss_cost = params.miss_gap_weight * out.gap_sum;
-
-	out.weighted_cost = (params.travel_in_cost ? out.travel_cost : 0.0) - params.manipulability_weight * out.sum_manipulability -
-		params.softmin_manipulability_weight * out.softmin_manipulability +
-		params.unreachable_penalty * (out.num_total - out.num_reachable) + out.miss_cost;
-	return out;
-}
-
-// InnerSolve run `params.gtsp_num_restart` times (>=1), keeping the lowest-weighted_cost result.
-// Consecutive runs in one process advance the shared RNG stream, so they explore different IK
-// branch sets -- min-of-N shrinks the seed-driven cost variance at a fixed offset. Use wherever a
-// committed cost matters; keep plain InnerSolve for cheap line-search probes.
-InnerSolution BestOfNInnerSolve(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
-	const std::vector<std::vector<double>>& seed_per_viewpoint, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params,
-	const std::vector<int>* warm_order, int max_solutions, const std::vector<int>* fixed_order = nullptr)
-{
-	const int n = std::max(1, params.gtsp_num_restart);
-	InnerSolution best = InnerSolve(
-		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seed_per_viewpoint,
-		home_joints, home_tcp_local, base, params, warm_order, max_solutions, fixed_order);
-	for (int i = 1; i < n; ++i)
-	{
-		InnerSolution cand = InnerSolve(
-			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seed_per_viewpoint,
-			home_joints, home_tcp_local, base, params, warm_order, max_solutions, fixed_order);
-		if (cand.weighted_cost < best.weighted_cost)
-			best = std::move(cand);
-	}
-	return best;
-}
-
-// seed_per_viewpoint for the next solve: each viewpoint warm-started from its own current joints,
-// falling back to `fallback` for any viewpoint not in the current tour.
-std::vector<std::vector<double>> SeedsFromSolution(
-	const InnerSolution& sol, const std::vector<double>& fallback, size_t num_viewpoints)
-{
-	std::vector<std::vector<double>> seeds(num_viewpoints, fallback);
-	for (size_t k = 0; k < sol.tour.size(); ++k)
-		if (!sol.joints[k].empty())
-			seeds[sol.tour[k]] = sol.joints[k];
-	return seeds;
-}
-
-struct TrackResult
-{
-	bool all_reachable = false;
-	int num_reachable = 0;
-	std::vector<std::vector<double>> joints;  // per visit position, empty where unreachable
-	double weighted_cost = 0.0;				 // over edges whose endpoints are both reachable
-	double joint_path_length = 0.0;			 // sum ||dq||_2 over those edges
-};
-
-// Re-solve IK for every pose in `tour` (fixed order) at `base`, warm-started from `seeds[k]`.
-TrackResult TrackTour(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
-	const std::vector<int>& tour, const std::vector<std::vector<double>>& seeds, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params)
-{
-	Eigen::Isometry3d xform = MakePlacement(base);
-	SetObjectPose(planning_scene_monitor, xform * object_pose_obj);
-
-	auto validity_callback = [&planning_scene_monitor](
-								 moveit::core::RobotState* s, const moveit::core::JointModelGroup* g,
-								 const double* jp) { return IsStateCollisionFree(planning_scene_monitor, s, g, jp); };
-
-	TrackResult r;
-	r.joints.resize(tour.size());
-
-	const moveit::core::LinkModel* tool0_link = state.getRobotModel()->getLinkModel("tool0");
-	const std::vector<double>* prev_j = &home_joints;
-	Eigen::Vector3d prev_p = home_tcp_local;
-	bool prev_reachable = true;
-
-	for (size_t k = 0; k < tour.size(); ++k)
-	{
-		geometry_msgs::msg::Pose target_local = ToPoseMsg(xform * tour_poses_obj[tour[k]]);
-		Eigen::Vector3d p = (xform * tour_poses_obj[tour[k]]).translation();
-
-		state.setJointGroupPositions(jmg, seeds[k]);
-		bool ok = CollisionFreeExactIk(state, jmg, target_local, params.ik_attempts, params.ik_timeout, validity_callback);
-		if (ok)
-		{
-			state.copyJointGroupPositions(jmg, r.joints[k]);
-			r.num_reachable++;
-			const double w = Manipulability(state, jmg, tool0_link, r.joints[k], params.manipulability_limit_sharpness);
-			r.weighted_cost -= params.manipulability_weight * w;
-			if (prev_reachable)
-			{
-				r.weighted_cost += WeightedEdgeCost(*prev_j, r.joints[k], prev_p, p, params);
-				r.joint_path_length += JointL2Distance(*prev_j, r.joints[k]);
-			}
-			prev_j = &r.joints[k];
-			prev_p = p;
-			prev_reachable = true;
-		}
-		else
-		{
-			prev_reachable = false;
-		}
-	}
-	r.all_reachable = (r.num_reachable == static_cast<int>(tour.size()));
-	return r;
-}
-
-// Jacobian of a viewpoint's pose w.r.t. the object position: 6x3, rows [position; rotation]. Moving the object
-// moves every viewpoint by the same amount and leaves its orientation alone.
-Eigen::Matrix<double, 6, 3> PlacementJacobian()
-{
-	Eigen::Matrix<double, 6, 3> jacobian = Eigen::Matrix<double, 6, 3>::Zero();
-	jacobian.topRows<3>().setIdentity();
-	return jacobian;
-}
-
-struct ElbowSwingResult
-{
-	double travel_before = 0.0;  // joint path length home -> tour (rad)
-	double travel_after = 0.0;
-	int big_moves_before = 0;  // moves where one joint turns more than reconfig_threshold
-	int big_moves_after = 0;
-	int iters = 0;
-	int fail_ik = 0, fail_limits = 0, fail_collision = 0, fail_longer = 0;  // rejected tries, by first failed check
-	ObjectPlacement placement;
-	std::vector<std::vector<double>> joints;  // parallel to the tour
-};
-
-// Elbow-swing smoothing: shortens the tour's joint path (home first) for a fixed viewpoint order. Each step moves
-// the object along the summed pull of all poses (each pose follows it through its Jacobian) and slides each pose
-// along its self-motion (Jacobian null space), so the tool stays on its viewpoint. Small IK corrections remove
-// drift; a step is kept only if all poses stay collision-free and within limits and the goal drops. Goal: path
-// length plus jump_weight * sum over moves and joints of (turn - threshold)^2 past the threshold, so big jumps
-// (reconfigurations) shrink first.
-ElbowSwingResult ElbowSwingSmooth(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const moveit::core::LinkModel* tool0_link, const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
-	const std::vector<int>& tour, const std::vector<std::vector<double>>& joints, const std::vector<double>& home_joints,
-	const ObjectPlacement& base, const BaseGradientParams& params)
-{
-	const size_t n = tour.size();
-	const int dof = static_cast<int>(jmg->getVariableCount());
-	auto to_vec = [](const std::vector<double>& q) { return Eigen::Map<const Eigen::VectorXd>(q.data(), q.size()); };
-	auto path_len = [&](const std::vector<std::vector<double>>& qs) {
-		double len = 0.0;
-		const std::vector<double>* prev = &home_joints;
-		for (const auto& q : qs)
-		{
-			len += JointL2Distance(*prev, q);
-			prev = &q;
-		}
-		return len;
-	};
-	const double thr = params.reconfig_threshold, w_jump = params.reconfig_weight;
-	auto goal = [&](const std::vector<std::vector<double>>& qs) {
-		double f = path_len(qs);
-		for (size_t k = 0; k < qs.size(); ++k)
-			f += w_jump * ReconfigPenalty(k == 0 ? home_joints : qs[k - 1], qs[k], thr);
-		return f;
-	};
-	auto big_moves = [&](const std::vector<std::vector<double>>& qs) { return CountReconfigs(home_joints, qs, thr); };
-	auto jacobian = [&](const std::vector<double>& q) {
-		state.setJointGroupPositions(jmg, q);
-		state.update();
-		Eigen::MatrixXd J;  // 6 x dof, [linear; angular] in the base frame
-		state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
-		return J;
-	};
-	auto pinv = [&](const Eigen::MatrixXd& J) {
-		Eigen::MatrixXd JJt = J * J.transpose();
-		JJt.diagonal().array() += params.jacobian_damping * params.jacobian_damping;
-		return Eigen::MatrixXd(J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6)));
-	};
-	// Pulls q onto `target` with a few damped Newton steps, clamped to the joint limits (a pose at a limit
-	// would otherwise fail every step); false if it doesn't get within tolerance.
-	auto correct = [&](std::vector<double>& q, const Eigen::Isometry3d& target) {
-		for (int it = 0; it < 10; ++it)
-		{
-			jmg->enforcePositionBounds(q.data());
-			state.setJointGroupPositions(jmg, q);
-			state.update();
-			const Eigen::Isometry3d& tcp = state.getGlobalLinkTransform(tool0_link);
-			Eigen::Matrix<double, 6, 1> e;
-			e.head<3>() = target.translation() - tcp.translation();
-			const Eigen::AngleAxisd aa(target.rotation() * tcp.rotation().transpose());
-			e.tail<3>() = aa.angle() * aa.axis();
-			if (e.head<3>().norm() < 1e-5 && e.tail<3>().norm() < 1e-4)
-				return true;
-			Eigen::MatrixXd J;
-			state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
-			const Eigen::VectorXd dq = pinv(J) * e;
-			for (int j = 0; j < dof; ++j)
-				q[static_cast<size_t>(j)] += dq(j);
-		}
-		return false;
-	};
-
-	ElbowSwingResult out;
-	out.placement = base;
-	out.joints = joints;
-	out.travel_before = out.travel_after = path_len(joints);
-	out.big_moves_before = out.big_moves_after = big_moves(joints);
-	double best_goal = goal(joints);
-	if (n == 0)
-		return out;
-	double object_step = params.elbow_swing_object_step;
-	double joint_step = params.elbow_swing_joint_step;
-	for (int iter = 0; iter < params.elbow_swing_iters && object_step > 1e-5; ++iter)
-	{
-		// Pull on each pose: the slope of the goal (home edge + both neighbours).
-		std::vector<Eigen::VectorXd> g(n, Eigen::VectorXd::Zero(dof));
-		for (size_t k = 0; k < n; ++k)
-		{
-			const Eigen::VectorXd d = to_vec(out.joints[k]) - to_vec(k == 0 ? home_joints : out.joints[k - 1]);
-			if (d.norm() < 1e-9)
-				continue;
-			Eigen::VectorXd gd = d.normalized();
-			for (int j = 0; j + 1 < dof; ++j)  // joint 7 isn't counted
-			{
-				const double ex = std::abs(d(j)) - thr;
-				if (ex > 0.0)
-					gd(j) += 2.0 * w_jump * ex * (d(j) > 0.0 ? 1.0 : -1.0);
-			}
-			g[k] += gd;
-			if (k > 0)
-				g[k - 1] -= gd;
-		}
-		std::vector<Eigen::MatrixXd> Jp(n), N(n);
-		Eigen::Vector3d g_obj = Eigen::Vector3d::Zero();
-		for (size_t k = 0; k < n; ++k)
-		{
-			const Eigen::MatrixXd J = jacobian(out.joints[k]);
-			Jp[k] = pinv(J);
-			N[k] = Eigen::MatrixXd::Identity(dof, dof) - Jp[k] * J;
-			g_obj += (Jp[k] * PlacementJacobian()).transpose() * g[k];  // path slope w.r.t. the object position
-		}
-
-		bool moved = false;
-		while (object_step > 1e-5 && !moved)
-		{
-			const Eigen::Vector3d dp = g_obj.norm() > 1e-9 ? Eigen::Vector3d(-object_step * g_obj.normalized())
-														  : Eigen::Vector3d::Zero();
-			const ObjectPlacement cand = ProjectToBounds(
-				{out.placement.x + dp(0), out.placement.y + dp(1), out.placement.z + dp(2)}, params.bounds);
-			const Eigen::Vector3d dp_real = ToOffsetVec(cand, out.placement);
-			const Eigen::Isometry3d xform = MakePlacement(cand);
-			SetObjectPose(planning_scene_monitor, xform * object_pose_obj);
-			std::vector<std::vector<double>> qs = out.joints;
-			bool ok = true;
-			for (size_t k = 0; k < n && ok; ++k)
-			{
-				const Eigen::VectorXd dq =
-					Jp[k] * PlacementJacobian() * dp_real - joint_step * N[k] * g[k];
-				for (int j = 0; j < dof; ++j)
-					qs[k][static_cast<size_t>(j)] += dq(j);
-				if (!correct(qs[k], xform * tour_poses_obj[static_cast<size_t>(tour[k])]))
-				{
-					++out.fail_ik;
-					ok = false;
-				}
-				else if (!jmg->satisfiesPositionBounds(qs[k].data()))
-				{
-					++out.fail_limits;
-					ok = false;
-				}
-				else if (!IsStateCollisionFree(planning_scene_monitor, &state, jmg, qs[k].data()))
-				{
-					++out.fail_collision;
-					ok = false;
-				}
-			}
-			const double f = ok ? goal(qs) : std::numeric_limits<double>::max();
-			if (ok && f >= best_goal - 1e-6)
-				++out.fail_longer;
-			if (f < best_goal - 1e-6)
-			{
-				best_goal = f;
-				out.placement = cand;
-				out.joints = std::move(qs);
-				out.travel_after = path_len(out.joints);
-				out.big_moves_after = big_moves(out.joints);
-				out.iters = iter + 1;
-				object_step = std::min(1.5 * object_step, params.elbow_swing_object_step);
-				joint_step = std::min(1.5 * joint_step, params.elbow_swing_joint_step);
-				moved = true;
-			}
-			else
-			{
-				object_step *= 0.5;
-				joint_step *= 0.5;
-			}
-		}
-		if (!moved)
-			break;
-	}
-	SetObjectPose(planning_scene_monitor, MakePlacement(out.placement) * object_pose_obj);
-	return out;
-}
-
-// ---------------------------------------------------------------------------------------------
-// Analytic gradient of the cost (travel, manipulability terms, missed-viewpoint gaps) w.r.t. the object
-// position (x, y, z). Joints follow a moved viewpoint as dq/db = J_pinv * placement_jacobian
-// (damped pseudo-inverse of the tool Jacobian); each edge, manipulability term and miss gap is chained
-// through that. The home pose doesn't move with the object.
-// ---------------------------------------------------------------------------------------------
-
-Eigen::Vector3d AnalyticGradient(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const moveit::core::LinkModel* tool0_link, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
-	const std::vector<int>& tour, const std::vector<std::vector<double>>& joints, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params,
-	const std::vector<int>& missed_vp, const std::vector<Eigen::Matrix<double, 6, 1>>& missed_gap,
-	const std::vector<std::vector<double>>& missed_q)
-{
-	const size_t n = tour.size();
-	Eigen::Isometry3d xform = MakePlacement(base);
-	const double lambda2 = params.jacobian_damping * params.jacobian_damping;
-
-	// Per visit position: dq/db (dof x 3) and dp/db (3 x 3).
-	std::vector<Eigen::MatrixXd> dq_db(n);
-	std::vector<Eigen::MatrixXd> dp_db(n);
-	const Eigen::Matrix<double, 6, 3> placement_jacobian = PlacementJacobian();
-
-	for (size_t k = 0; k < n; ++k)
-	{
-		state.setJointGroupPositions(jmg, joints[k]);
-		state.update();
-		Eigen::MatrixXd J;  // 6 x dof, [linear; angular] in the model (base) frame
-		state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
-
-		Eigen::MatrixXd JJt = J * J.transpose();
-		JJt.diagonal().array() += lambda2;
-		Eigen::MatrixXd J_pinv = J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6));
-
-		dq_db[k] = J_pinv * placement_jacobian;		   // dof x 3
-		dp_db[k] = placement_jacobian.topRows<3>();	   // 3 x 3
-	}
-
-	const size_t dof = home_joints.size();
-	Eigen::Vector3d g = Eigen::Vector3d::Zero();
-	// Soft-min term: per pose w and dw/db, combined once all poses are in.
-	std::vector<double> softmin_w;
-	std::vector<Eigen::Vector3d> softmin_dw_db;
-	for (size_t k = 0; k < n && params.manipulability_gradient; ++k)
-	{
-		// d(-lambda w)/db = -lambda (dq/db)^T dw/dq
-		const double w = std::max(kMinManipulability, Manipulability(state, jmg, tool0_link, joints[k], params.manipulability_limit_sharpness));
-		const Eigen::Vector3d dw_db = dq_db[k].transpose() *
-			ManipulabilityJointGradient(state, jmg, tool0_link, joints[k], params.manipulability_limit_sharpness);
-		g -= params.manipulability_weight * dw_db;
-		softmin_w.push_back(w);
-		softmin_dw_db.push_back(dw_db);
-	}
-	// Missed viewpoints: same chain at the closest pose, as if the arm followed the viewpoint.
-	for (size_t m = 0; m < missed_vp.size() && m < missed_q.size() && params.manipulability_include_missed; ++m)
-	{
-		const std::vector<double>& q = missed_q[m];
-		if (q.empty())
-			continue;
-		state.setJointGroupPositions(jmg, q);
-		state.update();
-		Eigen::MatrixXd J;
-		state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
-		Eigen::MatrixXd JJt = J * J.transpose();
-		JJt.diagonal().array() += lambda2;
-		const Eigen::MatrixXd J_pinv = J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(6, 6));
-		const Eigen::MatrixXd dq_db_missed = J_pinv * placement_jacobian;
-		const double w = std::max(kMinManipulability, Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness));
-		if (params.manipulability_gradient)
-		{
-			const Eigen::Vector3d dw_db = dq_db_missed.transpose() *
-				ManipulabilityJointGradient(state, jmg, tool0_link, q, params.manipulability_limit_sharpness);
-			g -= params.manipulability_weight * dw_db;
-			softmin_w.push_back(w);
-			softmin_dw_db.push_back(dw_db);
-		}
-	}
-	// d(-sigma softmin)/db = -sigma * sum_i share_i * dw_i/db
-	if (params.softmin_manipulability_weight > 0.0 && !softmin_w.empty())
-	{
-		std::vector<double> shares;
-		SoftMin(softmin_w, params.softmin_tau, &shares);
-		for (size_t i = 0; i < shares.size(); ++i)
-			g -= params.softmin_manipulability_weight * shares[i] * softmin_dw_db[i];
-	}
-
-	// Missed viewpoints: moving the object moves the viewpoint, which changes its pose error, so
-	// d(gap)/db = placement_jacobian^T * weighted_error / gap. No slope once the gap is past the cap.
-	for (size_t m = 0; m < missed_vp.size(); ++m)
-	{
-		const Eigen::Matrix<double, 6, 1>& pose_error = missed_gap[m];
-		const double gap = WeightedPoseGap(pose_error, params.rot_metric_scale);
-		if (gap < 1e-9 || gap >= params.miss_gap_cap)
-			continue;
-		Eigen::Matrix<double, 6, 1> weighted_error = pose_error;
-		weighted_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-		g += params.miss_gap_weight * placement_jacobian.transpose() * weighted_error / gap;
-	}
-
-	auto add_edge = [&](const std::vector<double>& qa, const std::vector<double>& qb, const Eigen::MatrixXd& dqa,
-					   const Eigen::MatrixXd& dqb, const Eigen::MatrixXd& dpa, const Eigen::MatrixXd& dpb,
-					   const Eigen::Vector3d& pa, const Eigen::Vector3d& pb) {
-		Eigen::VectorXd dq = Eigen::VectorXd::Zero(dof);
-		for (size_t i = 0; i < CountedJoints(qa, qb); ++i)
-			dq(i) = qa[i] - qb[i];
-		Eigen::MatrixXd ddiff = dqa - dqb;  // dof x 3
-
-		double nrm = dq.norm();
-		if (nrm > 1e-9)
-			g += params.joint_distance_weight * (ddiff.transpose() * (dq / nrm));
-
-		int kstar = 0;
-		for (size_t i = 1; i < dof; ++i)
-			if (std::abs(dq(i)) > std::abs(dq(kstar)))
-				kstar = static_cast<int>(i);
-		double s = dq(kstar) >= 0.0 ? 1.0 : -1.0;
-		g += params.max_joint_deviation_weight * s * ddiff.row(kstar).transpose();
-
-		Eigen::Vector3d du = pa - pb;
-		double dn = du.norm();
-		if (dn > 1e-9)
-			g += params.cartesian_distance_weight * ((dpa - dpb).transpose() * (du / dn));
-	};
-
-	Eigen::MatrixXd zero_dq = Eigen::MatrixXd::Zero(dof, 3);
-	Eigen::MatrixXd zero_dp = Eigen::MatrixXd::Zero(3, 3);
-
-	if (!params.travel_gradient)
-		return g;  // descend on manipulability and miss gaps only; travel still counts in the cost
-	if (n > 0)
-	{
-		Eigen::Vector3d p0 = (xform * tour_poses_obj[tour[0]]).translation();
-		add_edge(home_joints, joints[0], zero_dq, dq_db[0], zero_dp, dp_db[0], home_tcp_local, p0);
-	}
-	for (size_t k = 1; k < n; ++k)
-	{
-		Eigen::Vector3d pa = (xform * tour_poses_obj[tour[k - 1]]).translation();
-		Eigen::Vector3d pb = (xform * tour_poses_obj[tour[k]]).translation();
-		add_edge(joints[k - 1], joints[k], dq_db[k - 1], dq_db[k], dp_db[k - 1], dp_db[k], pa, pb);
-	}
-	return g;
-}
-
-// Central-difference gradient of the objective via re-tracked IK -- cross-check only.
-Eigen::Vector3d FiniteDifferenceGradient(
-	moveit::core::RobotState& state, const moveit::core::JointModelGroup* jmg,
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const Eigen::Isometry3d& object_pose_obj, const std::vector<Eigen::Isometry3d>& tour_poses_obj,
-	const std::vector<int>& tour, const std::vector<std::vector<double>>& seeds, const std::vector<double>& home_joints,
-	const Eigen::Vector3d& home_tcp_local, const ObjectPlacement& base, const BaseGradientParams& params)
-{
-	const double eps = params.fd_epsilon;
-	Eigen::Vector3d g = Eigen::Vector3d::Constant(std::nan(""));
-	for (int axis = 0; axis < 3; ++axis)
-	{
-		ObjectPlacement bp = base, bm = base;
-		auto component = [](ObjectPlacement& o, int a) -> double& {
-			return a == 0 ? o.x : a == 1 ? o.y : o.z;
-		};
-		double* pp = &component(bp, axis);
-		double* pm = &component(bm, axis);
-		*pp += eps;
-		*pm -= eps;
-		TrackResult rp = TrackTour(
-			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, tour, seeds, home_joints,
-			home_tcp_local, bp, params);
-		TrackResult rm = TrackTour(
-			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, tour, seeds, home_joints,
-			home_tcp_local, bm, params);
-		if (rp.all_reachable && rm.all_reachable)
-			g(axis) = (rp.weighted_cost - rm.weighted_cost) / (2.0 * eps);
-	}
-	return g;
-}
-
-// ---------------------------------------------------------------------------------------------
-// Live progress markers
-// ---------------------------------------------------------------------------------------------
-
-// Object during the descent, in actual (abs, base-frame) position: mesh, trail of past positions,
-// -grad(D) arrow, and viewpoints (green reached, red missed). Fixed id per namespace so each
-// publish overwrites the last instead of stacking.
-void PublishProgress(
-	const rclcpp::Node::SharedPtr& node, const BaseGradientParams& params, const Eigen::Isometry3d& object_pose_obj,
-	const std::vector<Eigen::Isometry3d>& tour_poses_obj, const std::vector<ObjectPlacement>& base_history,
-	const Eigen::Vector3d& neg_grad_translation, const ObjectPlacement& base, const moveit::core::RobotState& state,
-	const moveit::core::JointModelGroup* jmg, const InnerSolution& sol)
-{
-	const std::vector<int>& missed_vp = sol.missed_vp;
-	if (!params.progress_pub)
-		return;
-
-	const rclcpp::Time stamp = node->now();
-	visualization_msgs::msg::MarkerArray markers;
-	auto make = [&](const char* ns, int type) {
-		visualization_msgs::msg::Marker m;
-		m.header.frame_id = "world";
-		m.header.stamp = stamp;
-		m.ns = ns;
-		m.id = 0;
-		m.type = type;
-		m.action = visualization_msgs::msg::Marker::ADD;
-		m.pose.orientation.w = 1.0;
-		return m;
-	};
-	const Eigen::Isometry3d xform = MakePlacement(base);
-	const Eigen::Vector3d obj_pos = (xform * object_pose_obj).translation();
-
-	if (!params.progress_mesh_path.empty())
-	{
-		visualization_msgs::msg::Marker mesh = make("base_gradient_current", visualization_msgs::msg::Marker::MESH_RESOURCE);
-		mesh.mesh_resource = "file://" + params.progress_mesh_path;
-		mesh.mesh_use_embedded_materials = false;
-		mesh.pose = ToPoseMsg(xform * object_pose_obj);
-		mesh.scale.x = mesh.scale.y = mesh.scale.z = params.progress_mesh_scale;
-		mesh.color.r = 1.0f;
-		mesh.color.g = 0.85f;
-		mesh.color.a = 0.6f;
-		markers.markers.push_back(mesh);
-	}
-
-	// Viewpoints at this offset: green reached, red missed.
-	visualization_msgs::msg::Marker vps = make("base_gradient_viewpoints", visualization_msgs::msg::Marker::SPHERE_LIST);
-	vps.scale.x = vps.scale.y = vps.scale.z = 0.01;
-	for (size_t i = 0; i < tour_poses_obj.size(); ++i)
-	{
-		const Eigen::Vector3d p = (xform * tour_poses_obj[i]).translation();
-		geometry_msgs::msg::Point pt;
-		pt.x = p.x();
-		pt.y = p.y();
-		pt.z = p.z();
-		const bool missed = std::find(missed_vp.begin(), missed_vp.end(), static_cast<int>(i)) != missed_vp.end();
-		std_msgs::msg::ColorRGBA c;
-		c.r = missed ? 0.9f : 0.1f;
-		c.g = missed ? 0.1f : 0.9f;
-		c.b = 0.1f;
-		c.a = 1.0f;
-		vps.points.push_back(pt);
-		vps.colors.push_back(c);
-	}
-	markers.markers.push_back(vps);
-
-	// Trail of past object positions (abs). LINE_STRIP needs >= 2 points.
-	if (base_history.size() > 1)
-	{
-		visualization_msgs::msg::Marker trail = make("base_gradient_trail", visualization_msgs::msg::Marker::LINE_STRIP);
-		trail.scale.x = 0.004;
-		trail.color.r = 1.0f;
-		trail.color.g = 0.4f;
-		trail.color.b = 0.1f;
-		trail.color.a = 0.8f;
-		visualization_msgs::msg::Marker crumbs = make("base_gradient_history", visualization_msgs::msg::Marker::SPHERE_LIST);
-		crumbs.scale.x = crumbs.scale.y = crumbs.scale.z = 0.012;
-		crumbs.color = trail.color;
-		for (const ObjectPlacement& b : base_history)
-		{
-			const Eigen::Vector3d p = (MakePlacement(b) * object_pose_obj).translation();
-			geometry_msgs::msg::Point pt;
-			pt.x = p.x();
-			pt.y = p.y();
-			pt.z = p.z();
-			trail.points.push_back(pt);
-			crumbs.points.push_back(pt);
-		}
-		markers.markers.push_back(trail);
-		markers.markers.push_back(crumbs);
-	}
-
-	// -grad(D) translation from the object's position; a translation offset moves the object 1:1.
-	const double gnorm = neg_grad_translation.norm();
-	if (gnorm > 1e-9)
-	{
-		visualization_msgs::msg::Marker arrow = make("base_gradient_descent_dir", visualization_msgs::msg::Marker::ARROW);
-		arrow.scale.x = 0.006;
-		arrow.scale.y = 0.014;
-		arrow.color.r = 0.1f;
-		arrow.color.g = 0.5f;
-		arrow.color.b = 1.0f;
-		arrow.color.a = 0.95f;
-		const Eigen::Vector3d tip = obj_pos + neg_grad_translation * (0.15 / gnorm);  // fixed on-screen length
-		geometry_msgs::msg::Point a, b;
-		a.x = obj_pos.x();
-		a.y = obj_pos.y();
-		a.z = obj_pos.z();
-		b.x = tip.x();
-		b.y = tip.y();
-		b.z = tip.z();
-		arrow.points.push_back(a);
-		arrow.points.push_back(b);
-		markers.markers.push_back(arrow);
-	}
-
-	// Closest-IK arm pose for each missed viewpoint (translucent red), and a line from its tool0 to the target.
-	visualization_msgs::msg::Marker gaps = make("base_gradient_miss_gap", visualization_msgs::msg::Marker::LINE_LIST);
-	gaps.scale.x = 0.003;
-	gaps.color.r = 1.0f;
-	gaps.color.g = 0.2f;
-	gaps.color.b = 1.0f;
-	gaps.color.a = 1.0f;
-	visualization_msgs::msg::MarkerArray arms;
-	moveit::core::RobotState ghost(state);
-	std_msgs::msg::ColorRGBA arm_color;
-	arm_color.r = 0.9f;
-	arm_color.g = 0.2f;
-	arm_color.b = 0.2f;
-	arm_color.a = 0.35f;
-	for (size_t k = 0; k < sol.missed_vp.size(); ++k)
-	{
-		if (sol.missed_q[k].empty())
-			continue;
-		ghost.setJointGroupPositions(jmg, sol.missed_q[k]);
-		ghost.update();
-		ghost.getRobotMarkers(
-			arms, ghost.getRobotModel()->getLinkModelNamesWithCollisionGeometry(), arm_color,
-			"base_gradient_miss_ik", rclcpp::Duration(0, 0));
-		const Eigen::Vector3d a = ghost.getGlobalLinkTransform("tool0").translation();
-		const Eigen::Vector3d b = (xform * tour_poses_obj[static_cast<size_t>(sol.missed_vp[k])]).translation();
-		for (const Eigen::Vector3d& p : {a, b})
-		{
-			geometry_msgs::msg::Point pt;
-			pt.x = p.x();
-			pt.y = p.y();
-			pt.z = p.z();
-			gaps.points.push_back(pt);
-		}
-	}
-	if (!gaps.points.empty())
-		markers.markers.push_back(gaps);
-	for (auto& m : arms.markers)
-	{
-		m.header.frame_id = "world";
-		m.header.stamp = stamp;
-		markers.markers.push_back(m);
-	}
-
-	// Clear last publish first, so ghosts and lines of viewpoints now reached disappear.
-	visualization_msgs::msg::Marker clear;
-	clear.action = visualization_msgs::msg::Marker::DELETEALL;
-	markers.markers.insert(markers.markers.begin(), clear);
-
-	params.progress_pub->publish(markers);
-	if (params.visualize_progress_delay_sec > 0.0)
-		std::this_thread::sleep_for(std::chrono::duration<double>(params.visualize_progress_delay_sec));
-}
-
-}  // namespace
-
-// ---------------------------------------------------------------------------------------------
-// Solver: up to N descents (restarts). Each descent iteration takes the gradient, line-searches along it,
-// falls back to room-then-reach when stuck with misses, and re-solves fully at the accepted spot.
-// ---------------------------------------------------------------------------------------------
-
-namespace
-{
-
-// Best result of one descent.
-struct RestartResult
-{
-	ObjectPlacement placement;
-	InnerSolution sol;
-	double cost = std::numeric_limits<double>::max();
-	bool ok = false;  // fully reachable
-};
-
-// A move found by the line search or room-then-reach: where, its quick solve, and the step size.
-struct Step
-{
-	ObjectPlacement at;
-	InnerSolution sol;
-	double size = 0.0;
-};
-
-double JointPathLength(const std::vector<double>& home, const InnerSolution& s)
-{
-	double len = 0.0;
-	const std::vector<double>* prev = &home;
-	for (const auto& q : s.joints)
-	{
-		len += JointL2Distance(*prev, q);
-		prev = &q;
-	}
-	return len;
+	Vector6d e = Vector6d::Zero();
+	e(0) = cap;
+	return e;
 }
 
 // Viewpoints reached in `from` but not in `to`.
-std::vector<int> LostViewpoints(const InnerSolution& from, const InnerSolution& to)
+std::vector<int> Lost(const TourSolution& from, const TourSolution& to)
 {
 	std::vector<int> lost;
 	for (int v : from.tour)
@@ -1895,53 +889,50 @@ std::string ListText(const std::vector<int>& v)
 	return out.empty() ? std::string(" none") : out;
 }
 
-ObjectPlacement Shifted(const ObjectPlacement& at, const Eigen::Vector3d& d, double size, const BaseGradientBounds& b)
-{
-	return ProjectToBounds({at.x + size * d(0), at.y + size * d(1), at.z + size * d(2)}, b);
-}
+// ---------------------------------------------------------------------------------------------
+// Room-then-reach margins
+// ---------------------------------------------------------------------------------------------
 
-// J^T (J J^T + damping^2 I)^-1
-Eigen::MatrixXd DampedPinv(const Eigen::MatrixXd& J, double damping)
-{
-	Eigen::MatrixXd JJt = J * J.transpose();
-	JJt.diagonal().array() += damping * damping;
-	return J.transpose() * JJt.ldlt().solve(Eigen::MatrixXd::Identity(J.rows(), J.rows()));
-}
-
-// One safety margin of a reached viewpoint: joint-limit distance (rad), stretch = smallest singular value of the
-// tool Jacobian, or collision distance (m). slope: d(value)/d(object position) with the arm following the viewpoint;
-// joint_slope: d(value)/dq.
+// One safety margin of a reached viewpoint (joint-limit distance, stretch, reach or collision distance) and its
+// slope w.r.t. the object position (the arm following the viewpoint) and w.r.t. the joints.
 struct Margin
 {
 	int vp = -1;
-	std::string what;
+	std::string name;
 	double value = 0.0;
 	double floor = 0.0;
 	Eigen::Vector3d slope = Eigen::Vector3d::Zero();
 	Eigen::VectorXd joint_slope;
 };
 
-// Every reached viewpoint's margins at one spot, and per viewpoint (indexed by viewpoint, empty if missed) its joints
-// and dq/d(object position): the arm following the viewpoint, used to predict its pose after a move.
+// All reached viewpoints' margins at one spot, and per viewpoint (empty if missed) its joints and dq/d(position).
 struct ArmModel
 {
 	std::vector<Margin> margins;
-	std::vector<std::vector<double>> q;
-	std::vector<Eigen::MatrixXd> dq_db;
+	std::vector<Joints> q;
+	std::vector<Eigen::MatrixXd> dq_dp;
+
+	std::vector<Margin> Of(int v) const
+	{
+		std::vector<Margin> out;
+		for (const Margin& m : margins)
+			if (m.vp == v)
+				out.push_back(m);
+		return out;
+	}
 };
 
-// Margins of a lost viewpoint that ran out on a move, and a readable cause.
+// A lost viewpoint's margins that ran out on a move, and why.
 struct Shortage
 {
 	std::vector<Margin> margins;
 	std::string why;
 };
 
-// How far the object can move along unit `dir` before one of these margins, to first order, reaches
-// min(floor, value / 2). Infinite if none shrinks that way.
+// How far the object can move along unit `dir` before a margin, to first order, reaches min(floor, value / 2).
 double RoomAlong(const std::vector<Margin>& margins, const Eigen::Vector3d& dir)
 {
-	double room = std::numeric_limits<double>::infinity();
+	double room = kInf;
 	for (const Margin& m : margins)
 	{
 		const double rate = m.slope.dot(dir);
@@ -1951,14 +942,23 @@ double RoomAlong(const std::vector<Margin>& margins, const Eigen::Vector3d& dir)
 	return room;
 }
 
-// Unit direction that most raises the reached viewpoints' smallest margins, each in floors (value / floor): projected
-// gradient ascent of their soft-min, to first order, within |d| <= radius. Zero if no direction raises them.
+// Smallest margin, in floors.
+double Tightest(const std::vector<Margin>& margins)
+{
+	double lo = kInf;
+	for (const Margin& m : margins)
+		lo = std::min(lo, m.value / m.floor);
+	return lo;
+}
+
+// Unit direction that most raises these margins' soft-min (in floors), to first order: projected gradient ascent
+// within |d| <= radius. Zero if none raises them.
 Eigen::Vector3d MostRoomDirection(const std::vector<Margin>& margins, double radius)
 {
-	const double tau = 1.0;  // floors: margins within about one floor of the smallest share the push
+	const double tau = 1.0;  // floors
 	auto softmin_slope = [&](const Eigen::Vector3d& d) {
 		std::vector<double> u(margins.size());
-		double lo = std::numeric_limits<double>::infinity();
+		double lo = kInf;
 		for (size_t k = 0; k < margins.size(); ++k)
 		{
 			u[k] = (margins[k].value + margins[k].slope.dot(d)) / margins[k].floor;
@@ -1987,371 +987,327 @@ Eigen::Vector3d MostRoomDirection(const std::vector<Margin>& margins, double rad
 	return d.norm() < 1e-3 * radius ? Eigen::Vector3d::Zero() : Eigen::Vector3d(d.normalized());
 }
 
-class BaseGradientSolver
+// ---------------------------------------------------------------------------------------------
+// Solver: up to N descents (restarts). Each iteration takes the gradient, line-searches along it, falls back to
+// room-then-reach when stuck with misses, and re-solves fully at the accepted spot.
+// ---------------------------------------------------------------------------------------------
+
+struct DescentResult
+{
+	Position position = Position::Zero();
+	TourSolution sol;
+	double cost = std::numeric_limits<double>::max();
+	bool ok = false;  // every viewpoint reached
+};
+
+// A move found by the line search or room-then-reach: where, its quick solve, and the step length.
+struct Step
+{
+	Position at;
+	TourSolution sol;
+	double size = 0.0;
+};
+
+class Solver
 {
 public:
-	BaseGradientSolver(
-		const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
-		const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
-		const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
-		const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const std::vector<double>& home_joints,
-		const BaseGradientParams& params_in);
+	Solver(
+		const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model, const ScenePtr& scene,
+		const std::string& group_name, const Eigen::Vector3d& object_translation_nominal,
+		const Eigen::Matrix3d& object_rotation_nominal, const std::vector<Eigen::Isometry3d>& viewpoints_nominal,
+		const Joints& home, const BaseGradientParams& params);
 
-	// One full gradient descent from `start`. warm: IK seeds and viewpoint order from an earlier descent, or
-	// null to start from the home pose.
-	RestartResult RunDescent(const ObjectPlacement& start, int restart_idx, const InnerSolution* warm);
+	// One descent from `start`. warm: IK seeds and viewpoint order from an earlier descent, or null for home.
+	DescentResult RunDescent(const Position& start, int restart, const TourSolution* warm);
 
-	BaseGradientResult result;  // history and solve count; SolveBaseGradient fills in the final placement
+	BaseGradientResult result;  // history and solve count; SolveBaseGradient fills in the rest
 
 private:
-	// --- A descent: start, reach all viewpoints, then refine path and position ---
-	bool StartDescent(const ObjectPlacement& start, int restart_idx, const InnerSolution* warm);
+	// --- Descent ---
+	bool StartDescent(const Position& start, int restart, const TourSolution* warm);
 	int ReachAllViewpoints();
 	void RefinePathAndPosition(int iter);
-	bool ReachDescentStep(int iter);
-	// --- Parts of a step ---
-	void LogRefineAtReach();
-	void UpdateComfortWeights();
+	bool DescentStep(int iter);
 	Eigen::Vector3d Gradient();
 	void PrepareProbes();
-	std::optional<Step> LineSearch(Eigen::Vector3d dir);
+	std::optional<Step> LineSearch(const Eigen::Vector3d& dir);
 	std::optional<Step> RoomThenReach();
-	std::optional<InnerSolution> FullSolveAt(const Step& step);
-	bool TakeStep(Step step, InnerSolution committed, int outer, double gnorm, const Eigen::Vector3d& g);
+	std::optional<TourSolution> FullSolveAt(const Step& step);
+	bool TakeStep(const Step& step, TourSolution committed, int iter, double gnorm, const Eigen::Vector3d& g);
+	void LogRefineAtReach();
 	void RefineResult();
-	void ElbowSwingAtResult();
 
 	// --- Solving and scoring ---
-	InnerSolution QuickSolve(const ObjectPlacement& at, int gaps_min_reached = 0);
-	InnerSolution Refine(const ObjectPlacement& at, InnerSolution best_sol, int num_solves);
-	double RealCost(const ObjectPlacement& at, const InnerSolution& sol);
-	InnerSolution WithPlannedTravel(const ObjectPlacement& at, InnerSolution sol);
-	double TravelTerm(const InnerSolution& sol) const;
-	double CostAtFinalWeight(const InnerSolution& sol) const;
-	double CompareCost(const InnerSolution& s, bool reach_phase) const;
-	bool Better(const InnerSolution& a, const InnerSolution& b) const;
-	void Record(const ObjectPlacement& at, const InnerSolution& s);
-	void Remember(const InnerSolution& s);
+	std::vector<std::vector<Joints>> CollectIk(
+		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed, int max_solutions);
+	TourSolution Solve(
+		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed,
+		const std::vector<int>* warm_order, int max_solutions, const std::vector<int>* fixed_order);
+	TourSolution SolveBestOf(
+		const Position& at, const BaseGradientParams& p, const std::vector<int>* warm_order,
+		const std::vector<int>* fixed_order);
+	TourSolution Probe(const Position& at, int gaps_min_reached = 0);
+	TourSolution Refine(const Position& at, TourSolution best, int num_solves);
+	double PlannedTravel(const Position& at, const TourSolution& sol);
+	TourSolution WithPlannedTravel(const Position& at, TourSolution sol);
+	double TravelTerm(const TourSolution& sol) const;
+	double Cost(const TourSolution& sol) const;
+	bool Better(const TourSolution& a, const TourSolution& b) const;
+	void Record(const Position& at, const TourSolution& sol);
+	void Remember(const TourSolution& sol);
+	Eigen::Vector3d AnalyticGradient(const TourSolution& sol, const BaseGradientParams& p);
+	Eigen::Vector3d FiniteDifferenceGradient();
 
-	// --- Room-then-reach: margins, arm poses, back-off direction ---
+	// --- Room-then-reach ---
 	Eigen::Vector3d LockAxes(Eigen::Vector3d v) const;
-	Eigen::Vector3d AimAt(int target, const InnerSolution& here_at, bool first);
-	Eigen::MatrixXd ToolJacobian(const std::vector<double>& q);
-	double Stretch(const std::vector<double>& q);
-	double ShoulderToWrist(const std::vector<double>& q);
-	ArmModel ArmModelAt(const ObjectPlacement& at, const InnerSolution& sol);
-	std::vector<Margin> ViewpointMargins(int v, const std::vector<double>& q);
-	std::vector<double> PredictedPose(const ArmModel& model, int v, const Eigen::Vector3d& d);
-	Shortage RanOut(int v, const ArmModel& model, const ObjectPlacement& at, const Eigen::Vector3d& d);
-	std::optional<std::vector<double>> RoomierPose(int v, const ObjectPlacement& at, const ArmModel& model, int tries);
-	std::optional<std::vector<double>> ExactPose(int v, const ObjectPlacement& at, std::vector<double> q);
+	Eigen::Vector3d AimAt(int target, const TourSolution& here_at, bool first);
+	Eigen::MatrixXd Jacobian(const Joints& q) { return ToolJacobian(state, group, tool, q); }
+	double Stretch(const Joints& q);
+	double ShoulderToWrist(const Joints& q);
+	ArmModel ArmModelAt(const Position& at, const TourSolution& sol);
+	std::vector<Margin> ViewpointMargins(int v, const Joints& q);
+	Joints PredictedPose(const ArmModel& model, int v, const Eigen::Vector3d& d);
+	std::optional<Joints> ExactPose(int v, const Position& at, Joints q);
+	Shortage RanOut(int v, const ArmModel& model, const Position& at, const Eigen::Vector3d& d);
+	std::optional<Joints> RoomierPose(int v, const Position& at, const ArmModel& model, int tries);
 
 	// --- Logging ---
-	void LogCostTerms(const InnerSolution& sol);
-	void LogMissed(const ObjectPlacement& at, const InnerSolution& sol);
+	void LogCostTerms(const TourSolution& sol);
+	void LogMissed(const Position& at, const TourSolution& sol);
 	void Publish(const Eigen::Vector3d& neg_grad);
+	void PlaceObject(const Position& at) { MoveObject(scene, Translation(at) * object_pose); }
 
 	// --- Fixed for the whole solve ---
 	rclcpp::Node::SharedPtr node;
 	moveit::core::RobotModelConstPtr robot_model;
-	planning_scene_monitor::PlanningSceneMonitorPtr planning_scene_monitor;
+	ScenePtr scene;
 	std::string group_name;
-	Eigen::Vector3d object_translation_nominal;
-	Eigen::Matrix3d object_rotation_nominal;
-	const BaseGradientParams params_in;
-	BaseGradientParams params;  // per-descent seed and comfort weights change; the rest is params_in
-	double lambda_final;		// manipulability weight the results are compared at
-	Eigen::Isometry3d object_pose_obj;  // object relative to its own position
-	std::vector<Eigen::Isometry3d> tour_poses_obj;  // viewpoints relative to the object's position
-	int n;
-	std::vector<int> input_order;  // viewpoints in the order given (lock_input_order)
+	const BaseGradientParams params;
+	Eigen::Isometry3d object_pose;			  // object relative to its own position
+	std::vector<Eigen::Isometry3d> viewpoints;  // viewpoints relative to the object's position
+	int num_vp;
+	std::vector<int> input_order;
 	moveit::core::RobotState state;
-	const moveit::core::JointModelGroup* jmg;
-	const moveit::core::LinkModel* tool0_link;
-	std::vector<double> home_joints;
-	Eigen::Vector3d home_tcp_local;
-	bool use_real_cost;
-	bool planned_travel;  // planned joint travel replaces the L2 travel in the cost
-	// Reach margin: shoulder (child link of joint 2) to wrist (child link of joint 6) distance and its largest value
-	// over the joint ranges.
-	const moveit::core::LinkModel* shoulder_link = nullptr;
-	const moveit::core::LinkModel* wrist_link = nullptr;
+	const moveit::core::JointModelGroup* group;
+	const moveit::core::LinkModel* tool;
+	Joints home;
+	moveit::core::GroupStateValidityCallbackFn validity;
+	bool use_planning;	   // planned travel can be computed
+	bool planned_travel;  // and replaces the L2 travel in the cost
+	const moveit::core::LinkModel* shoulder = nullptr;	// reach margin: shoulder-wrist distance vs its max
+	const moveit::core::LinkModel* wrist = nullptr;
 	double max_reach = 0.0;
 
-	// --- Per descent (reset by RunDescent) ---
-	int restart_idx = 0;
-	ObjectPlacement base;  // current object position
-	InnerSolution cur;	   // full solve at `base`
-	RestartResult rr;	   // best seen in this descent
-	bool manipulability_on = true;
-	std::vector<ObjectPlacement> base_history;
-	std::vector<std::vector<double>> seeds;
+	// --- Per descent ---
+	int restart = 0;
+	int seed = 0;
+	Position position;	  // current object position
+	TourSolution current;  // full solve at `position`
+	DescentResult best;	  // best of this descent
+	std::vector<Position> trail;
+	std::vector<Joints> seeds;
 	int stall_count = 0;
-	// Each viewpoint's joints from the last time it was reached: seeds its closest-IK gap once missed.
-	std::vector<std::vector<double>> last_good;
-	// Each missed viewpoint's last closest-IK pose: seeds the next closest IK so the gap stays continuous.
-	std::vector<std::vector<double>> last_closest;
+	std::vector<Joints> last_reached;  // each viewpoint's joints when last reached
+	std::vector<Joints> last_closest;  // each missed viewpoint's last closest pose: keeps its gap continuous
+	bool tracked_probes = true;		   // probes follow the current poses (reach phase) or re-solve fresh (after)
 	bool refined_at_reach = false;
-	std::chrono::steady_clock::time_point reach_deadline;  // reach_time_limit from the descent's start
+	std::chrono::steady_clock::time_point reach_deadline;
 
-	// --- Per iteration (set by PrepareProbes) ---
+	// --- Per iteration ---
 	std::vector<int> locked_order;
 	const std::vector<int>* order_lock = nullptr;  // null = GTSP reorders
-	InnerSolution here_quick;  // quick solve at `base`: what probes are compared with
+	TourSolution here;							   // quick solve at `position`: what probes compare against
 };
 
-BaseGradientSolver::BaseGradientSolver(
-	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor, const std::string& group_name,
-	const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const std::vector<double>& home_joints,
-	const BaseGradientParams& params_in)
-	: node(node), robot_model(robot_model), planning_scene_monitor(planning_scene_monitor), group_name(group_name),
-	  object_translation_nominal(object_translation_nominal), object_rotation_nominal(object_rotation_nominal),
-	  params_in(params_in), params(params_in), lambda_final(params_in.manipulability_weight),
-	  object_pose_obj(MakeIsometry(Eigen::Vector3d::Zero(), object_rotation_nominal)),
-	  tour_poses_obj(tour_tcp_poses_nominal), n(static_cast<int>(tour_tcp_poses_nominal.size())),
-	  input_order(static_cast<size_t>(n)), state(robot_model), home_joints(home_joints)
+Solver::Solver(
+	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model, const ScenePtr& scene,
+	const std::string& group_name, const Eigen::Vector3d& object_translation_nominal,
+	const Eigen::Matrix3d& object_rotation_nominal, const std::vector<Eigen::Isometry3d>& viewpoints_nominal,
+	const Joints& home, const BaseGradientParams& params)
+	: node(node), robot_model(robot_model), scene(scene), group_name(group_name), params(params),
+	  object_pose(MakeIsometry(Eigen::Vector3d::Zero(), object_rotation_nominal)), viewpoints(viewpoints_nominal),
+	  num_vp(static_cast<int>(viewpoints_nominal.size())), input_order(static_cast<size_t>(num_vp)), state(robot_model),
+	  home(home)
 {
 	ReseedRng(params.random_seed);
-	for (Eigen::Isometry3d& t : tour_poses_obj)
+	for (Eigen::Isometry3d& t : viewpoints)
 		t.translation() -= object_translation_nominal;
 	std::iota(input_order.begin(), input_order.end(), 0);
-
 	state.setToDefaultValues();
-	jmg = state.getJointModelGroup(group_name);
-	tool0_link = robot_model->getLinkModel("tool0");
-	state.setJointGroupPositions(jmg, home_joints);
-	state.update();
-	home_tcp_local = state.getGlobalLinkTransform("tool0").translation();
+	group = state.getJointModelGroup(group_name);
+	tool = robot_model->getLinkModel("tool0");
+	validity = [this](moveit::core::RobotState* s, const moveit::core::JointModelGroup* g, const double* q) {
+		return IsStateValid(this->scene, s, g, q);
+	};
+	use_planning = params.real_cost_planning_time > 0.0;
+	planned_travel = params.planned_travel_in_cost && use_planning;
 
-	use_real_cost = params.real_cost_planning_time > 0.0;
-	planned_travel = params.planned_travel_in_cost && use_real_cost;
-
-	const auto& joints = jmg->getActiveJointModels();
+	const auto& joints = group->getActiveJointModels();
 	if (joints.size() >= 6)
 	{
-		shoulder_link = joints[1]->getChildLinkModel();
-		wrist_link = joints[5]->getChildLinkModel();
-		// Largest shoulder-wrist distance: set by the elbow (joint 4) alone, so sweep it over its range.
-		const moveit::core::VariableBounds& elbow = robot_model->getVariableBounds(jmg->getVariableNames()[3]);
-		std::vector<double> q = home_joints;
+		shoulder = joints[1]->getChildLinkModel();
+		wrist = joints[5]->getChildLinkModel();
+		// The elbow (joint 4) alone sets the shoulder-wrist distance: sweep it for the max.
+		const moveit::core::VariableBounds& elbow = robot_model->getVariableBounds(group->getVariableNames()[3]);
+		Joints q = home;
 		for (int i = 0; i <= 1000; ++i)
 		{
 			q[3] = elbow.min_position_ + (elbow.max_position_ - elbow.min_position_) * i / 1000.0;
 			max_reach = std::max(max_reach, ShoulderToWrist(q));
 		}
-		state.setJointGroupPositions(jmg, home_joints);
-		state.update();
 	}
-	result.num_total = n;
+	state.setJointGroupPositions(group, home);
+	state.update();
+	result.num_total = num_vp;
 }
 
-RestartResult BaseGradientSolver::RunDescent(const ObjectPlacement& start, int restart_idx_in, const InnerSolution* warm)
+// ---------------------------------------------------------------------------------------------
+// Descent
+// ---------------------------------------------------------------------------------------------
+
+DescentResult Solver::RunDescent(const Position& start, int restart_in, const TourSolution* warm)
 {
-	if (!StartDescent(start, restart_idx_in, warm))
-		return rr;
+	if (!StartDescent(start, restart_in, warm))
+		return best;
 	const int iters = ReachAllViewpoints();
-	if (cur.all_reachable)
+	if (current.all_reachable)
 		RefinePathAndPosition(iters);
-	return rr;  // Record() runs at least once, so rr holds this descent's best-cost solution
+	return best;
 }
 
-// Resets the descent state and solves at `start`. False if no viewpoint is reachable there.
-bool BaseGradientSolver::StartDescent(const ObjectPlacement& start, int restart_idx_in, const InnerSolution* warm)
+std::vector<Joints> SeedsFrom(const TourSolution& sol, const Joints& fallback, int num_vp)
 {
-	restart_idx = restart_idx_in;
-	base = ProjectToBounds(start, params.bounds);
-	params.random_seed = params_in.random_seed + restart_idx;  // each restart draws its own IK luck
-	params.manipulability_weight = lambda_final;
-	// manipulability_after_reach: comfort terms (lambda, soft-min) off while any viewpoint is missed, so the
-	// step follows the miss gaps instead of being outvoted; back on once everything is reached.
-	manipulability_on = !params.manipulability_after_reach;
-	if (!manipulability_on)
-	{
-		params.manipulability_weight = 0.0;
-		params.softmin_manipulability_weight = 0.0;
-	}
-	base_history = {base};
-	seeds = warm ? SeedsFromSolution(*warm, home_joints, static_cast<size_t>(n))
-				 : std::vector<std::vector<double>>(static_cast<size_t>(n), home_joints);
+	std::vector<Joints> seeds(static_cast<size_t>(num_vp), fallback);
+	for (size_t k = 0; k < sol.tour.size(); ++k)
+		if (!sol.joints[k].empty())
+			seeds[static_cast<size_t>(sol.tour[k])] = sol.joints[k];
+	return seeds;
+}
+
+// Resets the descent and solves at `start`. False if nothing is reachable there.
+bool Solver::StartDescent(const Position& start, int restart_in, const TourSolution* warm)
+{
+	restart = restart_in;
+	seed = params.random_seed + restart;  // each restart draws its own IK luck
+	position = Clamp(start, params.bounds);
+	trail = {position};
+	seeds = warm ? SeedsFrom(*warm, home, num_vp) : std::vector<Joints>(static_cast<size_t>(num_vp), home);
 	stall_count = 0;
-	last_good.assign(static_cast<size_t>(n), {});
-	last_closest.assign(static_cast<size_t>(n), {});
+	last_reached.assign(static_cast<size_t>(num_vp), {});
+	last_closest.assign(static_cast<size_t>(num_vp), {});
+	tracked_probes = true;
 	refined_at_reach = false;
 	reach_deadline = params.reach_time_limit > 0.0
 		? std::chrono::steady_clock::now() +
 			std::chrono::duration_cast<std::chrono::steady_clock::duration>(
 				std::chrono::duration<double>(params.reach_time_limit))
 		: std::chrono::steady_clock::time_point::max();
-	params.softmin_manipulability_weight = params_in.softmin_manipulability_weight;
-	params.track_probes = params_in.track_probes;
-	rr = RestartResult{};
-	rr.placement = base;
+	best = DescentResult{};
+	best.position = position;
 
-	ReseedRng(params.random_seed);
-	cur = BestOfNInnerSolve(
-		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, home_joints, home_tcp_local, base,
-		params, warm ? &warm->tour : nullptr, params.max_solutions_per_candidate,
-		params.lock_input_order ? &input_order : nullptr);
-	result.num_inner_solves += std::max(1, params.gtsp_num_restart);
-	cur = WithPlannedTravel(base, std::move(cur));
-	if (cur.tour.empty())
+	ReseedRng(seed);
+	current = SolveBestOf(position, params, warm ? &warm->tour : nullptr, params.lock_input_order ? &input_order : nullptr);
+	current = WithPlannedTravel(position, std::move(current));
+	if (current.tour.empty())
 	{
-		RCLCPP_WARN(node->get_logger(), "restart %d: no tour pose reachable at the start placement", restart_idx + 1);
+		RCLCPP_WARN(node->get_logger(), "restart %d: no tour pose reachable at the start placement", restart + 1);
 		return false;
 	}
-	Record(base, cur);
-	Remember(cur);
+	Record(position, current);
+	Remember(current);
 	Publish(Eigen::Vector3d::Zero());
 	RCLCPP_INFO(
-		node->get_logger(), "restart %d/%d iter 0: abs (%.4f, %.4f, %.4f) m  reachable %d/%d", restart_idx + 1,
-		std::max(1, params.descent_num_restart), base.x, base.y, base.z, cur.num_reachable, n);
-	LogCostTerms(cur);
-	LogMissed(base, cur);
+		node->get_logger(), "restart %d/%d iter 0: abs (%.4f, %.4f, %.4f) m  reachable %d/%d", restart + 1,
+		std::max(1, params.descent_num_restart), position.x(), position.y(), position.z(), current.num_reachable, num_vp);
+	LogCostTerms(current);
+	LogMissed(position, current);
 	return true;
 }
 
-// 1) Reach all viewpoints: descend while any is missed (room-then-reach when the gradient step fails).
-// Returns the iterations used.
-int BaseGradientSolver::ReachAllViewpoints()
+// 1) Descend while any viewpoint is missed. Returns the iterations used.
+int Solver::ReachAllViewpoints()
 {
 	for (int iter = 0; iter < params.max_outer_iterations; ++iter)
 	{
-		if (cur.all_reachable || !rclcpp::ok())
+		if (current.all_reachable || !rclcpp::ok())
 			return iter;
 		if (std::chrono::steady_clock::now() > reach_deadline)
 		{
 			RCLCPP_WARN(
-				node->get_logger(), "  restart %d: reach time limit %.0f s hit with %d/%d reachable -- stuck",
-				restart_idx + 1, params.reach_time_limit, cur.num_reachable, n);
+				node->get_logger(), "  restart %d: reach time limit %.0f s hit with %d/%d reachable -- stuck", restart + 1,
+				params.reach_time_limit, current.num_reachable, num_vp);
 			return iter;
 		}
-		if (!ReachDescentStep(iter))
-			return iter + 1;  // converged or stuck
+		if (!DescentStep(iter))
+			return iter + 1;
 	}
 	return params.max_outer_iterations;
 }
 
-// 2) Refine path and position once all are reached: keep descending on travel and comfort (unless
-// stop_when_all_reached), then refine solves and elbow-swing smoothing at the best spot.
-void BaseGradientSolver::RefinePathAndPosition(int iter)
+// 2) Once all are reached: keep descending on travel and comfort (unless stop_when_all_reached), then refine.
+void Solver::RefinePathAndPosition(int iter)
 {
 	LogRefineAtReach();
-	// Probes re-solve the tour (GTSP order, fresh IK) instead of dragging the current poses along: a dragged tour
-	// looks worse than the spot really is.
-	params.track_probes = false;
+	tracked_probes = false;  // a dragged-along tour looks worse than the spot really is
 	if (params.stop_when_all_reached)
-		RCLCPP_INFO(node->get_logger(), "  restart %d: all viewpoints reached -- stopping", restart_idx + 1);
+		RCLCPP_INFO(node->get_logger(), "  restart %d: all viewpoints reached -- stopping", restart + 1);
 	else
 		for (; iter < params.max_outer_iterations && rclcpp::ok(); ++iter)
-			if (!ReachDescentStep(iter))
+			if (!DescentStep(iter))
 				break;
 	RefineResult();
-	ElbowSwingAtResult();
 }
 
-// One iteration: gradient, line search, room-then-reach if that fails with misses, full solve at the new spot.
-// False when the descent ends here (converged or stuck).
-bool BaseGradientSolver::ReachDescentStep(int iter)
+// Gradient, line search, room-then-reach if that fails with misses, full solve at the new spot. False when the
+// descent ends (converged or stuck).
+bool Solver::DescentStep(int iter)
 {
-	if (iter > 0)
-		UpdateComfortWeights();
-
 	const Eigen::Vector3d g = Gradient();
-	const Eigen::Vector3d g_u = LockAxes(g);
-	const double gnorm = g_u.norm();
+	const Eigen::Vector3d g_free = LockAxes(g);
+	const double gnorm = g_free.norm();
 	if (gnorm < 1e-6)
 	{
-		RCLCPP_INFO(node->get_logger(), "  restart %d: gradient ~ 0 -- converged", restart_idx + 1);
+		RCLCPP_INFO(node->get_logger(), "  restart %d: gradient ~ 0 -- converged", restart + 1);
 		Publish(-g);
 		return false;
 	}
-
 	PrepareProbes();
-	std::optional<Step> step = LineSearch(-g_u / gnorm);
-	if (!step && params.room_then_reach && !here_quick.missed_vp.empty())
+	std::optional<Step> step = LineSearch(-g_free / gnorm);
+	if (!step && params.room_then_reach && !here.missed.empty())
 		step = RoomThenReach();
-	std::optional<InnerSolution> committed;
+	std::optional<TourSolution> committed;
 	if (step)
 		committed = FullSolveAt(*step);
 	if (!committed)
 	{
-		if (cur.all_reachable)
-			RCLCPP_INFO(node->get_logger(), "  restart %d: no step reduces the tour cost -- converged", restart_idx + 1);
+		if (current.all_reachable)
+			RCLCPP_INFO(node->get_logger(), "  restart %d: no step reduces the tour cost -- converged", restart + 1);
 		else
 			RCLCPP_WARN(
 				node->get_logger(), "  restart %d: no step reduces the tour cost with %d/%d reachable -- stuck",
-				restart_idx + 1, cur.num_reachable, n);
+				restart + 1, current.num_reachable, num_vp);
 		Publish(-g);
 		return false;
 	}
-	return !TakeStep(std::move(*step), std::move(*committed), iter, gnorm, g);
+	return !TakeStep(*step, std::move(*committed), iter, gnorm, g);
 }
 
-// Option "stay at A": the first time everything is reached, log what refining right here would give.
-void BaseGradientSolver::LogRefineAtReach()
+Eigen::Vector3d Solver::Gradient()
 {
-	if (params.refine_at_reach <= 0 || !cur.all_reachable || refined_at_reach)
-		return;
-	refined_at_reach = true;
-	InnerSolution start = cur;
-	if (use_real_cost && start.real_cost < 0.0)
-		start.real_cost = RealCost(base, start);
-	const InnerSolution at_reach = Refine(base, start, params.refine_at_reach);
-	RCLCPP_INFO(
-		node->get_logger(),
-		"  restart %d: refined %d solves at first all-reached abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  "
-		"real %.2f -> %.2f",
-		restart_idx + 1, params.refine_at_reach, base.x, base.y, base.z, start.travel_cost, at_reach.travel_cost,
-		start.real_cost, at_reach.real_cost);
-}
-
-// manipulability_after_reach: comfort off while any viewpoint is missed, back on once all are reached.
-void BaseGradientSolver::UpdateComfortWeights()
-{
-	if (params.manipulability_after_reach && manipulability_on && !cur.all_reachable)
-	{
-		manipulability_on = false;
-		params.manipulability_weight = 0.0;
-		params.softmin_manipulability_weight = 0.0;
-		RCLCPP_INFO(node->get_logger(), "  restart %d: viewpoint missed -- comfort terms off", restart_idx + 1);
-	}
-	else if (!manipulability_on && cur.all_reachable)
-	{
-		manipulability_on = true;
-		params.manipulability_weight = lambda_final;
-		params.softmin_manipulability_weight = params_in.softmin_manipulability_weight;
-		RCLCPP_INFO(node->get_logger(), "  restart %d: all reached -- comfort terms on", restart_idx + 1);
-	}
-	cur.weighted_cost = TravelTerm(cur) - params.manipulability_weight * cur.sum_manipulability -
-		params.softmin_manipulability_weight * cur.softmin_manipulability +
-		params.unreachable_penalty * (cur.num_total - cur.num_reachable) + cur.miss_cost;
-}
-
-// Cost gradient at `base`, with optional per-term and finite-difference logs.
-Eigen::Vector3d BaseGradientSolver::Gradient()
-{
-	const Eigen::Vector3d g = AnalyticGradient(
-		state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, home_joints, home_tcp_local, base, params,
-		cur.missed_vp, cur.missed_gap, cur.missed_q);
-
+	const Eigen::Vector3d g = AnalyticGradient(current, params);
 	if (params.trace_line_search)
 	{
-		// Each term's own descent direction (translation part of -gradient) and size.
+		// Each term's own descent direction.
 		auto part = [&](bool manip, double gap_weight) {
 			BaseGradientParams p = params;
 			p.travel_gradient = false;
 			p.manipulability_gradient = manip;
 			p.miss_gap_weight = gap_weight;
-			return AnalyticGradient(
-				state, jmg, tool0_link, tour_poses_obj, cur.tour, cur.joints, home_joints, home_tcp_local, base, p,
-				cur.missed_vp, cur.missed_gap, cur.missed_q);
+			return AnalyticGradient(current, p);
 		};
 		auto describe = [](const Eigen::Vector3d& gp) {
-			const Eigen::Vector3d d = -gp;
-			const double nrm = d.norm();
-			const Eigen::Vector3d u = nrm > 1e-9 ? Eigen::Vector3d(d / nrm) : Eigen::Vector3d::Zero();
+			const double nrm = gp.norm();
+			const Eigen::Vector3d u = nrm > 1e-9 ? Eigen::Vector3d(-gp / nrm) : Eigen::Vector3d::Zero();
 			char buf[96];
 			std::snprintf(buf, sizeof(buf), "|%.1f| dir (%+.2f, %+.2f, %+.2f)", nrm, u.x(), u.y(), u.z());
 			return std::string(buf);
@@ -2363,118 +1319,108 @@ Eigen::Vector3d BaseGradientSolver::Gradient()
 	}
 	if (params.fd_gradient_check)
 	{
-		const Eigen::Vector3d g_fd = FiniteDifferenceGradient(
-			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, cur.tour, cur.joints, home_joints,
-			home_tcp_local, base, params);
+		const Eigen::Vector3d g_fd = FiniteDifferenceGradient();
 		RCLCPP_INFO(
-			node->get_logger(),
-			"    grad check [x y z]  analytic (%+.4f %+.4f %+.4f)  central-diff (%+.4f %+.4f %+.4f)", g(0), g(1), g(2),
-			g_fd(0), g_fd(1), g_fd(2));
+			node->get_logger(), "    grad check [x y z]  analytic (%+.4f %+.4f %+.4f)  central-diff (%+.4f %+.4f %+.4f)",
+			g(0), g(1), g(2), g_fd(0), g_fd(1), g_fd(2));
 	}
 	return g;
 }
 
-// Seeds, viewpoint-order lock and the quick solve at `base` that this iteration's probes compare against.
-void BaseGradientSolver::PrepareProbes()
+// Seeds, order lock, and the quick solve here that this iteration's probes compare against.
+void Solver::PrepareProbes()
 {
-	seeds = SeedsFromSolution(cur, home_joints, static_cast<size_t>(n));
-	for (int v : cur.missed_vp)
+	seeds = SeedsFrom(current, home, num_vp);
+	for (const Miss& m : current.missed)
 	{
-		const size_t vi = static_cast<size_t>(v);
-		if (!last_closest[vi].empty())
-			seeds[vi] = last_closest[vi];
-		else if (!last_good[vi].empty())
-			seeds[vi] = last_good[vi];
+		const size_t v = static_cast<size_t>(m.vp);
+		if (!last_closest[v].empty())
+			seeds[v] = last_closest[v];
+		else if (!last_reached[v].empty())
+			seeds[v] = last_reached[v];
 	}
-	// Locked viewpoint order: the input order from the start (lock_input_order), or the current order
-	// once everything is reached (freeze_order). Only arm poses are re-picked; null = GTSP reorders.
-	locked_order = cur.tour;
-	order_lock = params.lock_input_order					? &input_order
-		: (params.freeze_order && cur.all_reachable) ? &locked_order
-													 : nullptr;
-	here_quick = WithPlannedTravel(base, QuickSolve(base));
+	locked_order = current.tour;
+	order_lock = params.lock_input_order ? &input_order
+		: (params.freeze_order && current.all_reachable) ? &locked_order
+														 : nullptr;
+	here = WithPlannedTravel(position, Probe(position));
 	result.num_inner_solves += 1;
 }
 
-// Backtracking line search along `dir` (unit): shrink the step until a probe beats the quick solve here. Never
-// trades away a reached viewpoint.
-std::optional<Step> BaseGradientSolver::LineSearch(Eigen::Vector3d dir)
+// Backtracking along `dir`: shrink the step until a probe beats the quick solve here (same IK effort, so a viewpoint
+// the quick solve merely failed to find doesn't block the step).
+std::optional<Step> Solver::LineSearch(const Eigen::Vector3d& dir)
 {
 	double step = params.initial_step;
 	for (int ls = 0; ls < params.max_line_search_iters; ++ls)
 	{
-		const ObjectPlacement cand = Shifted(base, dir, step, params.bounds);
-		// weighted_cost carries the unreachable penalty, so a probe that drops a viewpoint fails.
-		InnerSolution probe = QuickSolve(cand, here_quick.num_reachable);
+		const Position cand = Clamp(position + step * dir, params.bounds);
+		TourSolution probe = Probe(cand, here.num_reachable);
 		result.num_inner_solves += 1;
-		if (probe.num_reachable >= here_quick.num_reachable)
-			probe = WithPlannedTravel(cand, std::move(probe));  // plan only probes that could be accepted
+		if (probe.num_reachable >= here.num_reachable)
+			probe = WithPlannedTravel(cand, std::move(probe));	// plan only probes that could be accepted
 		if (params.trace_line_search)
 			RCLCPP_INFO(
 				node->get_logger(),
 				"    probe step=%.4f m abs (%.4f, %.4f, %.4f): reached %d vs %d here, cost %.2f vs %.2f here "
 				"(sum_w %.3f vs %.3f, planned %.2f vs %.2f)  lost:%s",
-				step, cand.x, cand.y, cand.z, probe.num_reachable, here_quick.num_reachable, probe.weighted_cost,
-				here_quick.weighted_cost, probe.sum_manipulability, here_quick.sum_manipulability, probe.real_cost,
-				here_quick.real_cost, ListText(LostViewpoints(here_quick, probe)).c_str());
-		// Compared with the quick solve here (same IK effort), so a viewpoint the quick solve merely failed to
-		// find doesn't block the step.
-		if (Better(probe, here_quick))
+				step, cand.x(), cand.y(), cand.z(), probe.num_reachable, here.num_reachable, probe.cost, here.cost,
+				probe.sum_manipulability, here.sum_manipulability, probe.planned, here.planned,
+				ListText(Lost(here, probe)).c_str());
+		if (Better(probe, here))
 			return Step{cand, std::move(probe), step};
 		step *= params.step_shrink;
 	}
 	return std::nullopt;
 }
 
-// Room then reach: stuck with misses, for each missed viewpoint (smallest gap first) aim a full step at
-// it. Reached with nothing lost: accepted. Nothing lost: walk on. Reached viewpoints lost: back up instead -- the
-// object move that most raises the margins that ran out for them (RanOut, MostRoomDirection), kept off the other
-// viewpoints' limits -- then aim again. Up to kMaxRounds aims per missed viewpoint.
-std::optional<Step> BaseGradientSolver::RoomThenReach()
+// Room then reach. For each missed viewpoint (smallest gap first), aim a full step at it: reached with nothing lost is
+// accepted, nothing lost walks on. If reached viewpoints are lost, back up instead along the move that most raises the
+// margins that ran out for them (kept off the other viewpoints' limits), then aim again.
+std::optional<Step> Solver::RoomThenReach()
 {
 	const int kMaxRounds = 6;
-	const int kLostTries = 10;	// other-IK candidates for a lost viewpoint
+	const int kMaxReplans = 3;
+	const int kLostTries = 10;	   // other-IK candidates for a lost viewpoint
 	const int kSqueezedTries = 6;  // and for one the room move would squeeze
 	const double step = params.initial_step;
-	std::vector<std::optional<ObjectPlacement>> searched_at(static_cast<size_t>(n));  // where each was last searched
-	auto gained = [&](const InnerSolution& probe) {
-		return LostViewpoints(here_quick, probe).empty() && probe.num_reachable > here_quick.num_reachable;
+	std::vector<std::optional<Position>> searched_at(static_cast<size_t>(num_vp));
+	auto gained = [&](const TourSolution& probe) {
+		return Lost(here, probe).empty() && probe.num_reachable > here.num_reachable;
 	};
-	auto trace = [&](const std::string& what, int target, const ObjectPlacement& cand, const InnerSolution& probe,
+	auto trace = [&](const std::string& what, int target, const Position& cand, const TourSolution& probe,
 					 const std::vector<int>& lost, const std::string& verdict) {
 		if (params.trace_line_search)
 			RCLCPP_INFO(
 				node->get_logger(), "    %s for vp %d abs (%.4f, %.4f, %.4f): reached %d vs %d here  lost:%s -> %s",
-				what.c_str(), target, cand.x, cand.y, cand.z, probe.num_reachable, here_quick.num_reachable,
+				what.c_str(), target, cand.x(), cand.y(), cand.z(), probe.num_reachable, here.num_reachable,
 				ListText(lost).c_str(), verdict.c_str());
 	};
 	// Probes start each reached viewpoint's IK from its pose at the spot they move from.
-	auto probe_from = [&](const InnerSolution& here_at, const ObjectPlacement& cand) {
+	auto probe_from = [&](const TourSolution& here_at, const Position& cand) {
 		for (size_t k = 0; k < here_at.tour.size(); ++k)
 			seeds[static_cast<size_t>(here_at.tour[k])] = here_at.joints[k];
 		result.num_inner_solves += 1;
-		return QuickSolve(cand, here_at.num_reachable);
+		return Probe(cand, here_at.num_reachable);
 	};
-	std::vector<size_t> order(here_quick.missed_vp.size());
-	std::iota(order.begin(), order.end(), 0);
-	std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-		return WeightedPoseGap(here_quick.missed_gap[a], params.rot_metric_scale) <
-			WeightedPoseGap(here_quick.missed_gap[b], params.rot_metric_scale);
+	std::vector<Miss> targets = here.missed;
+	std::sort(targets.begin(), targets.end(), [&](const Miss& a, const Miss& b) {
+		return PoseGap(a.gap, params.rot_metric_scale) < PoseGap(b.gap, params.rot_metric_scale);
 	});
-	for (size_t oi : order)
+	for (const Miss& miss : targets)
 	{
-		const int target = here_quick.missed_vp[oi];
-		ObjectPlacement at = base;
-		InnerSolution here_at = here_quick;
+		const int target = miss.vp;
+		Position at = position;
+		TourSolution here_at = here;
 		for (int round = 0; round < kMaxRounds && std::chrono::steady_clock::now() < reach_deadline; ++round)
 		{
 			// Aim: a full step at the target.
 			const Eigen::Vector3d aim = AimAt(target, here_at, round == 0);
 			if (aim.norm() < 1e-9)
 				break;
-			const ObjectPlacement cand = Shifted(at, aim, step, params.bounds);
-			InnerSolution probe = probe_from(here_at, cand);
-			const std::vector<int> lost = LostViewpoints(here_at, probe);
+			const Position cand = Clamp(at + step * aim, params.bounds);
+			TourSolution probe = probe_from(here_at, cand);
+			const std::vector<int> lost = Lost(here_at, probe);
 			if (gained(probe))
 			{
 				trace("aim", target, cand, probe, lost, "accepted");
@@ -2488,45 +1434,43 @@ std::optional<Step> BaseGradientSolver::RoomThenReach()
 				continue;
 			}
 
-			// Back up: raise what ran out for the lost viewpoints. Each one near a limit first takes its roomiest
-			// other IK solution here. Other viewpoints whose margins the move would use up join in (after the same
-			// pose swap), and the direction is worked out again.
+			// Back up. A viewpoint near a limit first takes its roomiest other IK solution here (once per spot).
 			ArmModel model = ArmModelAt(at, here_at);
-			// tries: candidate poses (half resampled, half nudged). Once per viewpoint per spot: a repeat finds
-			// nothing new while the object stays put.
 			auto swap_pose = [&](int v, int tries) {
-				std::optional<ObjectPlacement>& last = searched_at[static_cast<size_t>(v)];
-				if (last && last->x == at.x && last->y == at.y && last->z == at.z)
+				std::optional<Position>& last = searched_at[static_cast<size_t>(v)];
+				if (last && *last == at)
 					return false;
 				last = at;
-				const std::optional<std::vector<double>> better = RoomierPose(v, at, model, tries);
-				if (!better)
+				const std::optional<Joints> roomier = RoomierPose(v, at, model, tries);
+				if (!roomier)
 					return false;
 				const auto it = std::find(here_at.tour.begin(), here_at.tour.end(), v);
-				here_at.joints[static_cast<size_t>(it - here_at.tour.begin())] = *better;
+				here_at.joints[static_cast<size_t>(it - here_at.tour.begin())] = *roomier;
 				return true;
+			};
+			std::vector<Margin> short_margins;
+			std::vector<bool> joined(static_cast<size_t>(num_vp), false);
+			// Adds what ran out for viewpoint v on the move to `to`.
+			auto add_shortage = [&](int v, const Position& to) {
+				const Shortage sh = RanOut(v, model, at, to - at);
+				short_margins.insert(short_margins.end(), sh.margins.begin(), sh.margins.end());
+				joined[static_cast<size_t>(v)] = true;
+				return " vp " + std::to_string(v) + ": " + sh.why + ";";
 			};
 			bool swapped = false;
 			for (int v : lost)
 				swapped = swap_pose(v, kLostTries) || swapped;
 			if (swapped)
 				model = ArmModelAt(at, here_at);
-			std::vector<Margin> short_margins;
 			std::string why;
 			for (int v : lost)
-			{
-				const Shortage sh = RanOut(v, model, at, ToOffsetVec(cand, at));
-				short_margins.insert(short_margins.end(), sh.margins.begin(), sh.margins.end());
-				why += " vp " + std::to_string(v) + ": " + sh.why + ";";
-			}
+				why += add_shortage(v, cand);
 			trace("aim", target, cand, probe, lost, "back up (" + why + " )");
 			Eigen::Vector3d room = MostRoomDirection(short_margins, step);
-			std::vector<bool> joined(static_cast<size_t>(n), false);
-			for (int v : lost)
-				joined[static_cast<size_t>(v)] = true;
+			// Viewpoints the move would run out join in, after the same pose swap.
 			for (int pass = 0; pass < 3 && room.norm() > 1e-9; ++pass)
 			{
-				std::vector<int> squeezed;	// viewpoints the move would run out
+				std::vector<int> squeezed;
 				for (const Margin& m : model.margins)
 					if (!joined[static_cast<size_t>(m.vp)] && RoomAlong({m}, room) < step &&
 						std::find(squeezed.begin(), squeezed.end(), m.vp) == squeezed.end())
@@ -2540,10 +1484,7 @@ std::optional<Step> BaseGradientSolver::RoomThenReach()
 					model = ArmModelAt(at, here_at);
 				for (int v : squeezed)
 				{
-					std::vector<Margin> mine;
-					for (const Margin& m : model.margins)
-						if (m.vp == v)
-							mine.push_back(m);
+					const std::vector<Margin> mine = model.Of(v);
 					if (RoomAlong(mine, room) >= step)
 						continue;  // its new pose has room for the move
 					for (const Margin& m : mine)
@@ -2554,17 +1495,17 @@ std::optional<Step> BaseGradientSolver::RoomThenReach()
 				room = MostRoomDirection(short_margins, step);
 			}
 			if (room.norm() < 1e-9)
-				break;	// nothing raises them: next missed viewpoint
-			// Room move: a full step. One that loses a viewpoint adds what ran out for it and is worked out again
-			// (kMaxReplans times); last, half the step of the final direction.
-			const int kMaxReplans = 3;
+				break;
+
+			// Room move: a full step; one that loses a viewpoint adds what ran out for it and is re-planned, last
+			// half a step.
 			bool moved = false;
 			for (int plan = 0; plan <= kMaxReplans && !moved && room.norm() > 1e-9; ++plan)
 			{
 				const double size = plan < kMaxReplans ? step : 0.5 * step;
-				const ObjectPlacement back = Shifted(at, room, size, params.bounds);
-				InnerSolution rp = probe_from(here_at, back);
-				const std::vector<int> back_lost = LostViewpoints(here_at, rp);
+				const Position back = Clamp(at + size * room, params.bounds);
+				TourSolution rp = probe_from(here_at, back);
+				const std::vector<int> back_lost = Lost(here_at, rp);
 				char what[64];
 				std::snprintf(what, sizeof(what), "room (%+.2f, %+.2f, %+.2f) x %.3f m", room(0), room(1), room(2), size);
 				if (gained(rp))
@@ -2585,10 +1526,7 @@ std::optional<Step> BaseGradientSolver::RoomThenReach()
 				{
 					if (swap_pose(v, kLostTries))
 						model = ArmModelAt(at, here_at);
-					const Shortage sh = RanOut(v, model, at, ToOffsetVec(back, at));
-					short_margins.insert(short_margins.end(), sh.margins.begin(), sh.margins.end());
-					joined[static_cast<size_t>(v)] = true;
-					room_why += " vp " + std::to_string(v) + ": " + sh.why + ";";
+					room_why += add_shortage(v, back);
 				}
 				trace(what, target, back, rp, back_lost, "lost, add what ran out (" + room_why + " ) and replan");
 				room = MostRoomDirection(short_margins, step);
@@ -2600,96 +1538,99 @@ std::optional<Step> BaseGradientSolver::RoomThenReach()
 	return std::nullopt;
 }
 
-// Best-of-N full solve at the accepted spot; the probe's own solve stands if it is better. Kept only if
-// it beats the current solution.
-std::optional<InnerSolution> BaseGradientSolver::FullSolveAt(const Step& step)
+// Full solve at the accepted spot (the probe's own solve stands if better); kept only if it beats the current one.
+std::optional<TourSolution> Solver::FullSolveAt(const Step& step)
 {
-	// While viewpoints are missed the order hardly matters: one solve instead of the best of gtsp_num_restart.
 	BaseGradientParams p = params;
 	if (!step.sol.all_reachable)
-		p.gtsp_num_restart = 1;
-	ReseedRng(params.random_seed);
-	InnerSolution committed = BestOfNInnerSolve(
-		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, home_joints, home_tcp_local,
-		step.at, p, &step.sol.tour, params.max_solutions_per_candidate, order_lock);
-	result.num_inner_solves += std::max(1, p.gtsp_num_restart);
-	committed = WithPlannedTravel(step.at, std::move(committed));
+		p.gtsp_num_restart = 1;  // the order hardly matters while viewpoints are missed
+	ReseedRng(seed);
+	TourSolution committed = WithPlannedTravel(step.at, SolveBestOf(step.at, p, &step.sol.tour, order_lock));
 	if (Better(step.sol, committed))
 		committed = step.sol;
-	const bool keep = Better(committed, cur);
+	const bool keep = Better(committed, current);
 	if (params.trace_line_search)
 		RCLCPP_INFO(
 			node->get_logger(), "    full solve: reached %d vs %d current, cost %.2f vs %.2f current -> %s",
-			committed.num_reachable, cur.num_reachable, committed.weighted_cost, cur.weighted_cost,
-			keep ? "accepted" : "rejected");
+			committed.num_reachable, current.num_reachable, committed.cost, current.cost, keep ? "accepted" : "rejected");
 	if (!keep)
-		return std::nullopt;  // quick probe looked better but the full solve isn't
+		return std::nullopt;
 	return committed;
 }
 
-// Move to the accepted spot and log it. True when the descent has converged.
-bool BaseGradientSolver::TakeStep(Step step, InnerSolution committed, int outer, double gnorm, const Eigen::Vector3d& g)
+// Moves to the accepted spot and logs it. True when the descent has converged.
+bool Solver::TakeStep(const Step& step, TourSolution committed, int iter, double gnorm, const Eigen::Vector3d& g)
 {
-	const double base_move = ToOffsetVec(step.at, base).norm();
-	const double rel_impr =
-		(cur.weighted_cost - committed.weighted_cost) / std::max(std::abs(cur.weighted_cost), 1e-9);
-	// Progress even if the cost rose: a viewpoint gained.
-	const bool gained = committed.num_reachable > cur.num_reachable;
+	const double moved = (step.at - position).norm();
+	const double rel_gain = (current.cost - committed.cost) / std::max(std::abs(current.cost), 1e-9);
+	const bool gained = committed.num_reachable > current.num_reachable;  // progress even if the cost rose
 
-	base = step.at;
-	cur = std::move(committed);
-	Remember(cur);
-	base_history.push_back(base);
-	Record(base, cur);
-
+	position = step.at;
+	current = std::move(committed);
+	Remember(current);
+	trail.push_back(position);
+	Record(position, current);
 	RCLCPP_INFO(
-		node->get_logger(),
-		"restart %d/%d iter %d/%d: abs (%.4f, %.4f, %.4f) m  reachable %d/%d  |grad|=%.4f  step=%.4f m",
-		restart_idx + 1, std::max(1, params.descent_num_restart), outer + 1, params.max_outer_iterations, base.x,
-		base.y, base.z, cur.num_reachable, n, gnorm, step.size);
-	LogCostTerms(cur);
-	LogMissed(base, cur);
+		node->get_logger(), "restart %d/%d iter %d/%d: abs (%.4f, %.4f, %.4f) m  reachable %d/%d  |grad|=%.4f  step=%.4f m",
+		restart + 1, std::max(1, params.descent_num_restart), iter + 1, params.max_outer_iterations, position.x(),
+		position.y(), position.z(), current.num_reachable, num_vp, gnorm, step.size);
+	LogCostTerms(current);
+	LogMissed(position, current);
 	Publish(-g);
 
-	if (!gained && rel_impr < params.convergence_tolerance_cost)
-	{
-		if (++stall_count >= std::max(1, params.patience))
-		{
-			RCLCPP_INFO(
-				node->get_logger(), "  restart %d: %d iterations with <%.1e relative gain -- stopping early",
-				restart_idx + 1, stall_count, params.convergence_tolerance_cost);
-			return true;
-		}
-	}
-	else
+	if (gained || rel_gain >= params.convergence_tolerance_cost)
 		stall_count = 0;
-
-	if (!gained && base_move < params.convergence_tolerance_offset && rel_impr < params.convergence_tolerance_cost)
+	else if (++stall_count >= std::max(1, params.patience))
 	{
-		RCLCPP_INFO(node->get_logger(), "  restart %d: placement settled -- converged", restart_idx + 1);
+		RCLCPP_INFO(
+			node->get_logger(), "  restart %d: %d iterations with <%.1e relative gain -- stopping early", restart + 1,
+			stall_count, params.convergence_tolerance_cost);
+		return true;
+	}
+	if (!gained && moved < params.convergence_tolerance_offset && rel_gain < params.convergence_tolerance_cost)
+	{
+		RCLCPP_INFO(node->get_logger(), "  restart %d: placement settled -- converged", restart + 1);
 		return true;
 	}
 	return false;
 }
 
-// Option "keep descending": refine wherever the descent ended.
-void BaseGradientSolver::RefineResult()
+// Debug: log what refining right at the first all-reached spot would give.
+void Solver::LogRefineAtReach()
 {
-	if (params.refine_solves <= 0 || rr.sol.tour.empty())
+	if (params.refine_at_reach <= 0 || !current.all_reachable || refined_at_reach)
 		return;
-	InnerSolution start = rr.sol;
-	if (use_real_cost && start.real_cost < 0.0)
-		start.real_cost = RealCost(rr.placement, start);
-	rr.sol = Refine(rr.placement, start, params.refine_solves);	 // best of start and the refine solves
-	rr.cost = CostAtFinalWeight(rr.sol);
-	rr.ok = rr.sol.all_reachable;
-	// Where the remaining reconfigurations are: viewpoints, the joint that turns most, and by how much.
+	refined_at_reach = true;
+	TourSolution start = current;
+	if (use_planning && start.planned < 0.0)
+		start.planned = PlannedTravel(position, start);
+	const TourSolution refined = Refine(position, start, params.refine_at_reach);
+	RCLCPP_INFO(
+		node->get_logger(),
+		"  restart %d: refined %d solves at first all-reached abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  "
+		"real %.2f -> %.2f",
+		restart + 1, params.refine_at_reach, position.x(), position.y(), position.z(), start.travel, refined.travel,
+		start.planned, refined.planned);
+}
+
+// Refine solves at the descent's result, and where the remaining reconfigurations are.
+void Solver::RefineResult()
+{
+	if (params.refine_solves <= 0 || best.sol.tour.empty())
+		return;
+	TourSolution start = best.sol;
+	if (use_planning && start.planned < 0.0)
+		start.planned = PlannedTravel(best.position, start);
+	best.sol = Refine(best.position, start, params.refine_solves);
+	best.cost = Cost(best.sol);
+	best.ok = best.sol.all_reachable;
+	const TourSolution& s = best.sol;
 	std::string where;
-	for (size_t k = 0; k < rr.sol.joints.size(); ++k)
+	for (size_t k = 0; k < s.joints.size(); ++k)
 	{
-		const std::vector<double>& a = k == 0 ? home_joints : rr.sol.joints[k - 1];
-		const std::vector<double>& b = rr.sol.joints[k];
-		if (MaxJointDeviation(a, b) <= params.reconfig_threshold)
+		const Joints& a = k == 0 ? home : s.joints[k - 1];
+		const Joints& b = s.joints[k];
+		if (MaxJointTurn(a, b) <= params.reconfig_threshold)
 			continue;
 		size_t jmax = 0;
 		for (size_t j = 0; j < CountedJoints(a, b); ++j)
@@ -2697,309 +1638,511 @@ void BaseGradientSolver::RefineResult()
 				jmax = j;
 		char buf[64];
 		std::snprintf(
-			buf, sizeof(buf), " %s->%d j%zu %+.2f", k == 0 ? "home" : std::to_string(rr.sol.tour[k - 1]).c_str(),
-			rr.sol.tour[k], jmax + 1, b[jmax] - a[jmax]);
+			buf, sizeof(buf), " %s->%d j%zu %+.2f", k == 0 ? "home" : std::to_string(s.tour[k - 1]).c_str(), s.tour[k],
+			jmax + 1, b[jmax] - a[jmax]);
 		where += buf;
 	}
-	int moved = 0;  // viewpoint-order positions that changed
-	for (size_t k = 0; k < rr.sol.tour.size(); ++k)
-		moved += (k >= start.tour.size() || start.tour[k] != rr.sol.tour[k]) ? 1 : 0;
+	int reordered = 0;
+	for (size_t k = 0; k < s.tour.size(); ++k)
+		reordered += (k >= start.tour.size() || start.tour[k] != s.tour[k]) ? 1 : 0;
 	RCLCPP_INFO(
 		node->get_logger(),
 		"  restart %d: refined %d solves at final abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  real %.2f -> %.2f  "
 		"order changed at %d/%zu positions  reconfigurations %d -> %d:%s",
-		restart_idx + 1, params.refine_solves, rr.placement.x, rr.placement.y, rr.placement.z, start.travel_cost,
-		rr.sol.travel_cost, start.real_cost, rr.sol.real_cost, moved, rr.sol.tour.size(),
-		CountReconfigs(home_joints, start.joints, params.reconfig_threshold),
-		CountReconfigs(home_joints, rr.sol.joints, params.reconfig_threshold), where.empty() ? " none" : where.c_str());
+		restart + 1, params.refine_solves, best.position.x(), best.position.y(), best.position.z(), start.travel,
+		s.travel, start.planned, s.planned, reordered, s.tour.size(),
+		CountReconfigs(home, start.joints, params.reconfig_threshold),
+		CountReconfigs(home, s.joints, params.reconfig_threshold), where.empty() ? " none" : where.c_str());
 }
 
-// Elbow-swing smoothing at the result (all reached only): same order, smoothed poses, object nudged with them.
-// Kept only if the planned travel (else the L2 travel) drops, like refine.
-void BaseGradientSolver::ElbowSwingAtResult()
+// ---------------------------------------------------------------------------------------------
+// Solving and scoring
+// ---------------------------------------------------------------------------------------------
+
+// IK solutions per viewpoint: one from its seed (stays near it), the rest from random starts. Tracking: one attempt
+// from the seed; random ones only if it fails.
+std::vector<std::vector<Joints>> Solver::CollectIk(
+	const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed_q, int max_solutions)
 {
-	if (!params.elbow_swing || !rr.ok || rr.sol.tour.empty())
-		return;
-	InnerSolution before = rr.sol;
-	if (use_real_cost && before.real_cost < 0.0)
-		before.real_cost = RealCost(rr.placement, before);
-	const ElbowSwingResult es = ElbowSwingSmooth(
-		state, jmg, tool0_link, planning_scene_monitor, object_pose_obj, tour_poses_obj, before.tour, before.joints,
-		home_joints, rr.placement, params);
-	// Rescore the smoothed tour; every viewpoint is still reached, so there are no missed-pose terms.
-	InnerSolution s = before;
-	s.joints = es.joints;
-	s.travel_cost =
-		TourWeightedCost(es.placement, s.tour, s.joints, tour_poses_obj, home_joints, home_tcp_local, params);
-	s.sum_manipulability = SumManipulability(state, jmg, tool0_link, s.joints, params.manipulability_limit_sharpness);
-	if (params_in.softmin_manipulability_weight > 0.0)
+	const Eigen::Isometry3d xform = Translation(at);
+	MoveObject(scene, xform * object_pose);
+	std::vector<std::vector<Joints>> ik(viewpoints.size());
+	const int max_sol = std::max(1, max_solutions);
+	for (size_t v = 0; v < viewpoints.size(); ++v)
 	{
-		std::vector<double> ws;
-		for (const auto& q : s.joints)
-			ws.push_back(Manipulability(state, jmg, tool0_link, q, params.manipulability_limit_sharpness));
-		s.softmin_manipulability = SoftMin(ws, params.softmin_tau);
+		const geometry_msgs::msg::Pose target = ToPoseMsg(xform * viewpoints[v]);
+		std::vector<Joints>& sols = ik[v];
+		Joints q;
+		state.setJointGroupPositions(group, seed_q[v]);
+		if (ExactIk(state, group, target, p.tracking ? 1 : p.ik_attempts, p.ik_timeout, validity))
+		{
+			state.copyJointGroupPositions(group, q);
+			sols.push_back(q);
+		}
+		for (int attempt = 0; (!p.tracking || sols.empty()) && attempt < max_sol * 3 + p.ik_retries_per_point &&
+			 static_cast<int>(sols.size()) < max_sol;
+			 ++attempt)
+		{
+			if (sols.empty() && attempt >= 4)
+				break;	// out of reach: every miss costs a full IK call
+			state.setToRandomPositions(group, SeededRng());
+			if (!ExactIk(state, group, target, p.ik_attempts, p.ik_timeout, validity))
+				continue;
+			state.copyJointGroupPositions(group, q);
+			const bool dup = std::any_of(sols.begin(), sols.end(), [&](const Joints& s) { return JointDistance(s, q) < 0.1; });
+			if (!dup)
+				sols.push_back(q);
+		}
 	}
-	s.real_cost = use_real_cost ? RealCost(es.placement, s) : -1.0;
-	s.weighted_cost = (params.travel_in_cost ? s.travel_cost : 0.0) -
-		params.manipulability_weight * s.sum_manipulability -
-		params.softmin_manipulability_weight * s.softmin_manipulability;
-	if (planned_travel)
-		s.weighted_cost += s.real_cost - (params.travel_in_cost ? s.travel_cost : 0.0);
-	const bool keep = use_real_cost ? s.real_cost < before.real_cost : s.travel_cost < before.travel_cost;
-	RCLCPP_INFO(
-		node->get_logger(),
-		"  restart %d: elbow swing %d iters: joint path %.2f -> %.2f rad, big moves %d -> %d, object moved %.4f m to abs (%.4f, %.4f, "
-		"%.4f) m, real %.2f -> %.2f%s  (rejected tries: ik %d, limits %d, collision %d, longer %d)",
-		restart_idx + 1, es.iters, es.travel_before, es.travel_after, es.big_moves_before, es.big_moves_after,
-		ToOffsetVec(es.placement, rr.placement).norm(), es.placement.x, es.placement.y, es.placement.z,
-		before.real_cost, s.real_cost, keep ? "  <-- kept" : "", es.fail_ik, es.fail_limits, es.fail_collision,
-		es.fail_longer);
-	if (keep)
+	return ik;
+}
+
+// The tour at `at`: IK solutions, closest poses for the misses, then the GTSP (or the fixed order), scored.
+TourSolution Solver::Solve(
+	const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed_q,
+	const std::vector<int>* warm_order, int max_solutions, const std::vector<int>* fixed_order)
+{
+	std::vector<std::vector<Joints>> ik = CollectIk(at, p, seed_q, max_solutions);
+	const double exact_gap = 1e-4;	// 0.1 mm: a closest pose this near counts as an IK solution
+	const Eigen::Isometry3d xform = Translation(at);
+	const int num_found = static_cast<int>(std::count_if(ik.begin(), ik.end(), [](const auto& s) { return !s.empty(); }));
+	const bool skip_gaps = num_found < p.gaps_min_reached;	// rejected on count anyway
+	std::vector<Miss> missed;
+	for (size_t v = 0; v < ik.size(); ++v)
 	{
-		rr.placement = es.placement;
-		rr.sol = std::move(s);
+		if (!ik[v].empty())
+			continue;
+		if (skip_gaps)
+		{
+			missed.push_back({static_cast<int>(v), CappedGap(p.miss_gap_cap), {}});
+			continue;
+		}
+		const Eigen::Isometry3d target = xform * viewpoints[v];
+		// Starts: the nearest reached viewpoint's pose (often the right posture family), then its own seed; random
+		// starts only while no collision-free pose is under the cap (a capped gap has no slope).
+		Joints neighbor;
+		double neighbor_dist = std::numeric_limits<double>::max();
+		for (size_t u = 0; u < ik.size() && !p.tracking; ++u)
+		{
+			if (u == v || ik[u].empty())
+				continue;
+			const Eigen::Isometry3d other = xform * viewpoints[u];
+			const double d = (other.translation() - target.translation()).norm() +
+				p.rot_metric_scale * Eigen::AngleAxisd(other.linear() * target.linear().transpose()).angle();
+			if (d < neighbor_dist)
+			{
+				neighbor_dist = d;
+				neighbor = ik[u].front();
+			}
+		}
+		const int fixed_starts = neighbor.empty() ? 1 : 2;
+		ClosestIk closest;
+		for (int t = 0; t < std::max(fixed_starts, p.closest_ik_starts) &&
+			 (t == 0 || !closest.found || closest.gap >= p.miss_gap_cap);
+			 ++t)
+		{
+			Joints start = seed_q[v];
+			if (t == 0 && fixed_starts == 2)
+				start = neighbor;
+			else if (t > 0 && !(t == 1 && fixed_starts == 2))
+			{
+				state.setToRandomPositions(group, SeededRng());
+				state.copyJointGroupPositions(group, start);
+			}
+			const ClosestIk r = ClosestIkPose(
+				scene, state, group, tool, target, start, p.closest_ik_iters, p.closest_ik_margin, p.rot_metric_scale,
+				p.manipulability_limit_sharpness);
+			if (r.found && r.gap < closest.gap)
+				closest = r;
+		}
+		if (closest.found && closest.gap < exact_gap)
+			ik[v].push_back(closest.q);  // IK just missed it
+		else
+			missed.push_back({static_cast<int>(v), closest.found ? closest.pose_error : CappedGap(p.miss_gap_cap), closest.q});
+	}
+
+	const double k = p.manipulability_limit_sharpness;
+	std::vector<std::vector<double>> node_cost(ik.size());
+	for (size_t v = 0; v < ik.size(); ++v)
+		for (const Joints& q : ik[v])
+			node_cost[v].push_back(-p.manipulability_weight * Manipulability(state, group, tool, q, k));
+	TourSolution out;
+	if (fixed_order)
+	{
+		for (int v : *fixed_order)
+			if (!ik[static_cast<size_t>(v)].empty())
+				out.tour.push_back(v);
+		InsertByDetour(out.tour, ik, home);
+		out.joints = BestPosesForOrder(ik, node_cost, out.tour, home, p);
 	}
 	else
-		rr.sol = std::move(before);
-	rr.cost = CostAtFinalWeight(rr.sol);
-}
+		std::tie(out.tour, out.joints) = FindTour(ik, home, p, warm_order, node_cost);
+	out.num_total = num_vp;
+	out.num_reachable = static_cast<int>(out.tour.size());
+	out.all_reachable = out.num_reachable == out.num_total;
+	out.travel = TravelCost(home, out.joints, p);
 
-// Tracked probes: every viewpoint follows its current arm pose (one warm IK attempt, fixed order), so
-// nearby placements compare the same arm poses; the full solve at an accepted spot searches anew.
-// gaps_min_reached: a probe reaching fewer viewpoints than this is rejected anyway, so it skips the miss gaps.
-InnerSolution BaseGradientSolver::QuickSolve(const ObjectPlacement& at, int gaps_min_reached)
-{
-	BaseGradientParams track_params = params;
-	track_params.gaps_min_reached = gaps_min_reached;
-	if (!params.track_probes)
+	// Comfort: manipulability over the tour poses (and the misses' closest poses, if included).
+	std::vector<double> ws;
+	double sum_tour = 0.0, sum_missed = 0.0;
+	for (const Joints& q : out.joints)
 	{
-		ReseedRng(params.random_seed);
-		return InnerSolve(
-			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, home_joints, home_tcp_local,
-			at, track_params, &cur.tour, params.max_solutions_per_candidate, order_lock);
+		ws.push_back(Manipulability(state, group, tool, q, k));
+		sum_tour += ws.back();
 	}
-	track_params.tracking = true;
-	ReseedRng(params.random_seed);
-	return InnerSolve(
-		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, home_joints, home_tcp_local, at,
-		track_params, &cur.tour, 1, &locked_order);
+	for (const Miss& m : missed)
+		if (p.manipulability_include_missed && !m.q.empty())
+		{
+			ws.push_back(Manipulability(state, group, tool, m.q, k));
+			sum_missed += ws.back();
+		}
+	out.sum_manipulability = p.manipulability_include_missed ? sum_tour + sum_missed : sum_tour;
+	if (p.softmin_manipulability_weight > 0.0)
+		out.softmin_manipulability = SoftMin(ws, p.softmin_tau);
+
+	out.missed = std::move(missed);
+	for (const Miss& m : out.missed)
+		out.gap_sum += std::min(p.miss_gap_cap, PoseGap(m.gap, p.rot_metric_scale));
+	out.miss_cost = p.miss_gap_weight * out.gap_sum;
+	out.cost = -p.manipulability_weight * out.sum_manipulability - p.softmin_manipulability_weight * out.softmin_manipulability +
+		p.unreachable_penalty * (out.num_total - out.num_reachable) + out.miss_cost;
+	return out;
 }
 
-// Refine at a fixed placement: more full solves, each warm-started from the best so far, with more IK choices
-// and GTSP edges that penalize reconfigurations. With freeze_order the viewpoint order is kept and only the arm
-// poses are re-picked. Keeps the lowest cost (planned travel and comfort); never fewer viewpoints reached.
-InnerSolution BaseGradientSolver::Refine(const ObjectPlacement& at, InnerSolution best_sol, int num_solves)
+// The best of gtsp_num_restart solves (each draws new random IK starts).
+TourSolution Solver::SolveBestOf(
+	const Position& at, const BaseGradientParams& p, const std::vector<int>* warm_order, const std::vector<int>* fixed_order)
 {
-	if (use_real_cost && best_sol.real_cost < 0.0)
-		best_sol.real_cost = RealCost(at, best_sol);
-	best_sol.weighted_cost = CostAtFinalWeight(best_sol);
-	for (int i = 0; i < num_solves && rclcpp::ok(); ++i)
+	const int n = std::max(1, p.gtsp_num_restart);
+	result.num_inner_solves += n;
+	TourSolution best_sol = Solve(at, p, seeds, warm_order, p.max_solutions_per_candidate, fixed_order);
+	for (int i = 1; i < n; ++i)
 	{
-		const std::vector<std::vector<double>> refine_seeds =
-			SeedsFromSolution(best_sol, home_joints, static_cast<size_t>(n));
-		const std::vector<int>* refine_lock = params.lock_input_order ? &input_order
-			: params.freeze_order									  ? &best_sol.tour
-																	  : nullptr;
-		params.edge_reconfig_weight = params.reconfig_weight;
-		InnerSolution s = InnerSolve(
-			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, refine_seeds, home_joints,
-			home_tcp_local, at, params, &best_sol.tour, params.refine_ik_solutions, refine_lock);
-		params.edge_reconfig_weight = 0.0;
-		result.num_inner_solves += 1;
-		if (s.num_reachable < best_sol.num_reachable)
-			continue;
-		// Travel without the penalty, so it compares with the descent's.
-		s.travel_cost = TourWeightedCost(at, s.tour, s.joints, tour_poses_obj, home_joints, home_tcp_local, params);
-		if (use_real_cost)
-			s.real_cost = RealCost(at, s);
-		s.weighted_cost = CostAtFinalWeight(s);
-		if (s.weighted_cost < best_sol.weighted_cost)
+		TourSolution s = Solve(at, p, seeds, warm_order, p.max_solutions_per_candidate, fixed_order);
+		if (s.cost < best_sol.cost)
 			best_sol = std::move(s);
 	}
 	return best_sol;
 }
 
-// Real cost: plan every edge with OMPL and sum the joint motion along the planned paths. A failed edge
-// counts as its straight-line joint distance plus unreachable_penalty, so the cost stays finite.
-double BaseGradientSolver::RealCost(const ObjectPlacement& at, const InnerSolution& sol)
+// Quick solve for comparing nearby spots. Tracked (reach phase): each viewpoint follows its current pose with one IK
+// attempt in a fixed order. A probe reaching fewer than gaps_min_reached is rejected anyway, so it skips miss gaps.
+TourSolution Solver::Probe(const Position& at, int gaps_min_reached)
 {
-	SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
+	BaseGradientParams p = params;
+	p.gaps_min_reached = gaps_min_reached;
+	ReseedRng(seed);
+	if (!tracked_probes)
+		return Solve(at, p, seeds, &current.tour, params.max_solutions_per_candidate, order_lock);
+	p.tracking = true;
+	return Solve(at, p, seeds, &current.tour, 1, &locked_order);
+}
+
+// More full solves at a fixed spot, each warm-started from the best so far, with more IK choices and GTSP edges that
+// penalize reconfigurations. Keeps the lowest cost; never fewer viewpoints reached.
+TourSolution Solver::Refine(const Position& at, TourSolution best_sol, int num_solves)
+{
+	if (use_planning && best_sol.planned < 0.0)
+		best_sol.planned = PlannedTravel(at, best_sol);
+	best_sol.cost = Cost(best_sol);
+	BaseGradientParams p = params;
+	p.edge_reconfig_weight = params.reconfig_weight;
+	for (int i = 0; i < num_solves && rclcpp::ok(); ++i)
+	{
+		const std::vector<int>* lock = params.lock_input_order ? &input_order
+			: params.freeze_order								 ? &best_sol.tour
+																 : nullptr;
+		TourSolution s =
+			Solve(at, p, SeedsFrom(best_sol, home, num_vp), &best_sol.tour, params.refine_ik_solutions, lock);
+		result.num_inner_solves += 1;
+		if (s.num_reachable < best_sol.num_reachable)
+			continue;
+		s.travel = TravelCost(home, s.joints, params);	// without the penalty, comparable with the descent's
+		if (use_planning)
+			s.planned = PlannedTravel(at, s);
+		s.cost = Cost(s);
+		if (s.cost < best_sol.cost)
+			best_sol = std::move(s);
+	}
+	return best_sol;
+}
+
+// Planned joint travel: every edge planned with OMPL. A failed edge counts its straight-line distance plus
+// unreachable_penalty.
+double Solver::PlannedTravel(const Position& at, const TourSolution& sol)
+{
+	PlaceObject(at);
 	const std::vector<double> edges = PlanTourJointPathLengths(
-		node, robot_model, planning_scene_monitor, sol.joints, home_joints, group_name, params.real_cost_planning_time,
-		params.real_cost_attempts, /*count_last_joint=*/false);
+		node, robot_model, scene, sol.joints, home, group_name, params.real_cost_planning_time, params.real_cost_attempts,
+		/*count_last_joint=*/false);
 	double total = 0.0;
 	for (size_t k = 0; k < sol.joints.size(); ++k)
-	{
-		if (k < edges.size() && edges[k] >= 0.0)
-			total += edges[k];
-		else
-			total += JointL2Distance(k == 0 ? home_joints : sol.joints[k - 1], sol.joints[k]) + params.unreachable_penalty;
-	}
+		total += (k < edges.size() && edges[k] >= 0.0)
+			? edges[k]
+			: JointDistance(k == 0 ? home : sol.joints[k - 1], sol.joints[k]) + params.unreachable_penalty;
 	return total;
 }
 
-// Plans the tour once and swaps the L2 travel in weighted_cost for the planned one. Only once every viewpoint
-// is reached: before that, comparisons go by reached count and miss gap, so planning would be wasted.
-InnerSolution BaseGradientSolver::WithPlannedTravel(const ObjectPlacement& at, InnerSolution sol)
+// Adds planned travel to the cost, only once every viewpoint is reached (before that comparisons go by count and gap).
+TourSolution Solver::WithPlannedTravel(const Position& at, TourSolution sol)
 {
-	if (!planned_travel || !sol.all_reachable || sol.real_cost >= 0.0)
+	if (!planned_travel || !sol.all_reachable || sol.planned >= 0.0)
 		return sol;
-	sol.real_cost = RealCost(at, sol);
-	sol.weighted_cost += sol.real_cost - (params.travel_in_cost ? sol.travel_cost : 0.0);
+	sol.planned = PlannedTravel(at, sol);
+	sol.cost += sol.planned;
 	return sol;
 }
 
-double BaseGradientSolver::TravelTerm(const InnerSolution& sol) const
+double Solver::TravelTerm(const TourSolution& sol) const
 {
-	if (planned_travel && sol.real_cost >= 0.0)
-		return sol.real_cost;
-	return params.travel_in_cost ? sol.travel_cost : 0.0;  // not planned yet: what weighted_cost holds
+	return planned_travel && sol.planned >= 0.0 ? sol.planned : 0.0;
 }
 
-// Cost at the final weight, so solutions found at different weights compare fairly.
-double BaseGradientSolver::CostAtFinalWeight(const InnerSolution& sol) const
+double Solver::Cost(const TourSolution& sol) const
 {
-	return TravelTerm(sol) - lambda_final * sol.sum_manipulability -
-		params_in.softmin_manipulability_weight * sol.softmin_manipulability +
+	return TravelTerm(sol) - params.manipulability_weight * sol.sum_manipulability -
+		params.softmin_manipulability_weight * sol.softmin_manipulability +
 		params.unreachable_penalty * (sol.num_total - sol.num_reachable) + sol.miss_cost;
 }
 
-// Cost for comparisons: while either side misses a viewpoint, without planned travel -- it jumps when an
-// arm pose switches family and the gradient doesn't see it, so it mustn't veto reaching.
-double BaseGradientSolver::CompareCost(const InnerSolution& s, bool reach_phase) const
-{
-	if (!reach_phase || s.real_cost < 0.0)
-		return s.weighted_cost;
-	return s.weighted_cost - (s.real_cost - (params.travel_in_cost ? s.travel_cost : 0.0));
-}
-
-// More viewpoints reached wins; cost only breaks ties. Used for comparing and for accepting moves.
-bool BaseGradientSolver::Better(const InnerSolution& a, const InnerSolution& b) const
+// More viewpoints reached wins; cost breaks ties. While either side misses one, planned travel is left out: it jumps
+// when an arm pose switches family, and the gradient doesn't see it.
+bool Solver::Better(const TourSolution& a, const TourSolution& b) const
 {
 	const bool reach_phase = !a.all_reachable || !b.all_reachable;
-	return a.num_reachable > b.num_reachable ||
-		(a.num_reachable == b.num_reachable && CompareCost(a, reach_phase) < CompareCost(b, reach_phase));
+	auto cost = [&](const TourSolution& s) { return reach_phase && s.planned >= 0.0 ? s.cost - s.planned : s.cost; };
+	return a.num_reachable > b.num_reachable || (a.num_reachable == b.num_reachable && cost(a) < cost(b));
 }
 
-// History entry, and the descent's best so far (most viewpoints reached, then cost at the final weight).
-void BaseGradientSolver::Record(const ObjectPlacement& at, const InnerSolution& s)
+// History entry, and the descent's best (most viewpoints reached, then cost).
+void Solver::Record(const Position& at, const TourSolution& sol)
 {
-	InnerSolution sf = s;
-	sf.weighted_cost = CostAtFinalWeight(s);
-	result.history.push_back({static_cast<double>(restart_idx), at.x, at.y, at.z, sf.weighted_cost});
-	if (sf.num_reachable > rr.sol.num_reachable ||
-		(sf.num_reachable == rr.sol.num_reachable && sf.weighted_cost < rr.cost))
+	TourSolution s = sol;
+	s.cost = Cost(sol);
+	result.history.push_back({static_cast<double>(restart), at.x(), at.y(), at.z(), s.cost});
+	if (s.num_reachable > best.sol.num_reachable || (s.num_reachable == best.sol.num_reachable && s.cost < best.cost))
 	{
-		rr.placement = at;
-		rr.sol = sf;
-		rr.cost = sf.weighted_cost;
-		rr.ok = sf.all_reachable;
+		best.position = at;
+		best.cost = s.cost;
+		best.ok = s.all_reachable;
+		best.sol = std::move(s);
 	}
 }
 
-void BaseGradientSolver::Remember(const InnerSolution& s)
+void Solver::Remember(const TourSolution& sol)
 {
-	for (size_t k = 0; k < s.tour.size(); ++k)
+	for (size_t k = 0; k < sol.tour.size(); ++k)
 	{
-		last_good[static_cast<size_t>(s.tour[k])] = s.joints[k];
-		last_closest[static_cast<size_t>(s.tour[k])].clear();
+		last_reached[static_cast<size_t>(sol.tour[k])] = sol.joints[k];
+		last_closest[static_cast<size_t>(sol.tour[k])].clear();
 	}
-	for (size_t m = 0; m < s.missed_vp.size(); ++m)
-		if (!s.missed_q[m].empty())
-			last_closest[static_cast<size_t>(s.missed_vp[m])] = s.missed_q[m];
+	for (const Miss& m : sol.missed)
+		if (!m.q.empty())
+			last_closest[static_cast<size_t>(m.vp)] = m.q;
 }
+
+// Cost gradient w.r.t. the object position. Each pose follows its viewpoint as dq/dp = J^+ (the home pose doesn't
+// move); travel edges, comfort terms and miss gaps chain through that.
+Eigen::Vector3d Solver::AnalyticGradient(const TourSolution& sol, const BaseGradientParams& p)
+{
+	const double k = p.manipulability_limit_sharpness;
+	const size_t n = sol.tour.size();
+	auto dq_dp = [&](const Joints& q) { return Eigen::MatrixXd(DampedPinv(Jacobian(q), p.jacobian_damping).leftCols<3>()); };
+	std::vector<Eigen::MatrixXd> dq(n);
+	for (size_t i = 0; i < n; ++i)
+		dq[i] = dq_dp(sol.joints[i]);
+
+	Eigen::Vector3d g = Eigen::Vector3d::Zero();
+	std::vector<double> ws;
+	std::vector<Eigen::Vector3d> dw;
+	auto add_comfort = [&](const Joints& q, const Eigen::MatrixXd& dq_q) {
+		const double w = std::max(1e-6, Manipulability(state, group, tool, q, k));
+		const Eigen::Vector3d dw_dp = dq_q.transpose() * ManipulabilityGradient(state, group, tool, q, k);
+		g -= p.manipulability_weight * dw_dp;
+		ws.push_back(w);
+		dw.push_back(dw_dp);
+	};
+	for (size_t i = 0; i < n && p.manipulability_gradient; ++i)
+		add_comfort(sol.joints[i], dq[i]);
+	for (const Miss& m : sol.missed)  // the misses' closest poses, as if the arm followed the viewpoint
+		if (p.manipulability_include_missed && !m.q.empty())
+		{
+			const Eigen::MatrixXd dq_m = dq_dp(m.q);
+			if (p.manipulability_gradient)
+				add_comfort(m.q, dq_m);
+		}
+	if (p.softmin_manipulability_weight > 0.0 && !ws.empty())
+	{
+		std::vector<double> shares;
+		SoftMin(ws, p.softmin_tau, &shares);
+		for (size_t i = 0; i < shares.size(); ++i)
+			g -= p.softmin_manipulability_weight * shares[i] * dw[i];
+	}
+	// Miss gaps: the viewpoint moves with the object; no slope past the cap.
+	for (const Miss& m : sol.missed)
+	{
+		const double gap = PoseGap(m.gap, p.rot_metric_scale);
+		if (gap >= 1e-9 && gap < p.miss_gap_cap)
+			g += p.miss_gap_weight * Eigen::Vector3d(m.gap.head<3>()) / gap;
+	}
+	if (!p.travel_gradient)
+		return g;
+	const size_t dof = home.size();
+	const Eigen::MatrixXd fixed = Eigen::MatrixXd::Zero(static_cast<Eigen::Index>(dof), 3);
+	for (size_t i = 0; i < n; ++i)
+	{
+		const Joints& qa = i == 0 ? home : sol.joints[i - 1];
+		const Joints& qb = sol.joints[i];
+		Eigen::VectorXd diff = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(dof));
+		for (size_t j = 0; j < CountedJoints(qa, qb); ++j)
+			diff(static_cast<Eigen::Index>(j)) = qa[j] - qb[j];
+		const Eigen::MatrixXd d_diff = (i == 0 ? fixed : dq[i - 1]) - dq[i];
+		const double nrm = diff.norm();
+		if (nrm > 1e-9)
+			g += p.joint_distance_weight * (d_diff.transpose() * (diff / nrm));
+		Eigen::Index jmax = 0;
+		for (Eigen::Index j = 1; j < diff.size(); ++j)
+			if (std::abs(diff(j)) > std::abs(diff(jmax)))
+				jmax = j;
+		g += p.max_joint_deviation_weight * (diff(jmax) >= 0.0 ? 1.0 : -1.0) * d_diff.row(jmax).transpose();
+	}
+	return g;
+}
+
+// Debug: central-difference gradient by re-tracking the tour's poses (one IK per viewpoint) at +-epsilon.
+Eigen::Vector3d Solver::FiniteDifferenceGradient()
+{
+	const double k = params.manipulability_limit_sharpness;
+	auto tracked_cost = [&](const Position& at, bool* all) {
+		const Eigen::Isometry3d xform = Translation(at);
+		MoveObject(scene, xform * object_pose);
+		double cost = 0.0;
+		const Joints* prev = &home;
+		bool prev_ok = true;
+		std::vector<Joints> qs(current.tour.size());
+		*all = true;
+		for (size_t i = 0; i < current.tour.size(); ++i)
+		{
+			state.setJointGroupPositions(group, current.joints[i]);
+			if (!ExactIk(
+					state, group, ToPoseMsg(xform * viewpoints[static_cast<size_t>(current.tour[i])]), params.ik_attempts,
+					params.ik_timeout, validity))
+			{
+				prev_ok = *all = false;
+				continue;
+			}
+			state.copyJointGroupPositions(group, qs[i]);
+			cost -= params.manipulability_weight * Manipulability(state, group, tool, qs[i], k);
+			if (prev_ok)
+				cost += EdgeCost(*prev, qs[i], params);
+			prev = &qs[i];
+			prev_ok = true;
+		}
+		return cost;
+	};
+	Eigen::Vector3d g = Eigen::Vector3d::Constant(std::nan(""));
+	for (int axis = 0; axis < 3; ++axis)
+	{
+		const Eigen::Vector3d e = params.fd_epsilon * Eigen::Vector3d::Unit(axis);
+		bool all_plus, all_minus;
+		const double plus = tracked_cost(position + e, &all_plus);
+		const double minus = tracked_cost(position - e, &all_minus);
+		if (all_plus && all_minus)
+			g(axis) = (plus - minus) / (2.0 * params.fd_epsilon);
+	}
+	return g;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Room-then-reach
+// ---------------------------------------------------------------------------------------------
 
 // Locked axes (min == max) get no share of a step.
-Eigen::Vector3d BaseGradientSolver::LockAxes(Eigen::Vector3d v) const
+Eigen::Vector3d Solver::LockAxes(Eigen::Vector3d v) const
 {
-	const BaseGradientBounds& bb = params.bounds;
-	if (bb.x_min == bb.x_max)
+	const BaseGradientBounds& b = params.bounds;
+	if (b.x_min == b.x_max)
 		v(0) = 0.0;
-	if (bb.y_min == bb.y_max)
+	if (b.y_min == b.y_max)
 		v(1) = 0.0;
-	if (bb.z_min == bb.z_max)
+	if (b.z_min == b.z_max)
 		v(2) = 0.0;
 	return v;
 }
 
-// Unit direction that shrinks the target's position gap at `here_at` (zero if none). first: use the full solve's
-// gap if nearer, as RoomThenReach does.
-Eigen::Vector3d BaseGradientSolver::AimAt(int target, const InnerSolution& here_at, bool first)
+// Unit direction that shrinks the target's position gap (zero if none). first: the full solve's gap if nearer.
+Eigen::Vector3d Solver::AimAt(int target, const TourSolution& here_at, bool first)
 {
-	const auto it = std::find(here_at.missed_vp.begin(), here_at.missed_vp.end(), target);
-	const size_t mi = static_cast<size_t>(it - here_at.missed_vp.begin());
-	if (it == here_at.missed_vp.end() || mi >= here_at.missed_gap.size())
+	auto gap_of = [&](const TourSolution& s) -> const Vector6d* {
+		for (const Miss& m : s.missed)
+			if (m.vp == target)
+				return &m.gap;
+		return nullptr;
+	};
+	const Vector6d* gap = gap_of(here_at);
+	if (!gap)
 		return Eigen::Vector3d::Zero();
-	Eigen::Matrix<double, 6, 1> pose_error = here_at.missed_gap[mi];
-	const auto ci = std::find(cur.missed_vp.begin(), cur.missed_vp.end(), target);
-	const size_t c = static_cast<size_t>(ci - cur.missed_vp.begin());
-	if (first && ci != cur.missed_vp.end() && c < cur.missed_gap.size() &&
-		WeightedPoseGap(cur.missed_gap[c], params.rot_metric_scale) <
-			WeightedPoseGap(pose_error, params.rot_metric_scale))
-		pose_error = cur.missed_gap[c];
-	pose_error.tail<3>() *= params.rot_metric_scale * params.rot_metric_scale;
-	const Eigen::Vector3d aim = -LockAxes(PlacementJacobian().transpose() * pose_error);
+	const Vector6d* full = first ? gap_of(current) : nullptr;
+	if (full && PoseGap(*full, params.rot_metric_scale) < PoseGap(*gap, params.rot_metric_scale))
+		gap = full;
+	const Eigen::Vector3d aim = -LockAxes(gap->head<3>());
 	return aim.norm() < 1e-9 ? Eigen::Vector3d::Zero() : Eigen::Vector3d(aim.normalized());
 }
 
-Eigen::MatrixXd BaseGradientSolver::ToolJacobian(const std::vector<double>& q)
+// Smallest singular value of the tool Jacobian: 0 when fully stretched or folded.
+double Solver::Stretch(const Joints& q)
 {
-	state.setJointGroupPositions(jmg, q);
+	return Eigen::JacobiSVD<Eigen::MatrixXd>(Jacobian(q)).singularValues().minCoeff();
+}
+
+double Solver::ShoulderToWrist(const Joints& q)
+{
+	state.setJointGroupPositions(group, q);
 	state.update();
-	Eigen::MatrixXd J;
-	state.getJacobian(jmg, tool0_link, Eigen::Vector3d::Zero(), J);
-	return J;
+	return (state.getGlobalLinkTransform(wrist).translation() - state.getGlobalLinkTransform(shoulder).translation())
+		.norm();
 }
 
-// Smallest singular value of the tool Jacobian: 0 at a singular (fully stretched or folded) pose.
-double BaseGradientSolver::Stretch(const std::vector<double>& q)
+ArmModel Solver::ArmModelAt(const Position& at, const TourSolution& sol)
 {
-	return Eigen::JacobiSVD<Eigen::MatrixXd>(ToolJacobian(q)).singularValues().minCoeff();
-}
-
-// Every reached viewpoint's margins at `at` (ViewpointMargins), its joints and dq/db.
-ArmModel BaseGradientSolver::ArmModelAt(const ObjectPlacement& at, const InnerSolution& sol)
-{
-	SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
+	PlaceObject(at);
 	ArmModel model;
-	model.q.resize(static_cast<size_t>(n));
-	model.dq_db.resize(static_cast<size_t>(n));
+	model.q.resize(static_cast<size_t>(num_vp));
+	model.dq_dp.resize(static_cast<size_t>(num_vp));
 	for (size_t k = 0; k < sol.tour.size(); ++k)
 	{
-		const std::vector<double>& q = sol.joints[k];
+		const Joints& q = sol.joints[k];
 		if (q.empty())
 			continue;
 		const size_t v = static_cast<size_t>(sol.tour[k]);
 		model.q[v] = q;
-		model.dq_db[v] = DampedPinv(ToolJacobian(q), params.jacobian_damping) * PlacementJacobian();
+		model.dq_dp[v] = DampedPinv(Jacobian(q), params.jacobian_damping).leftCols<3>();
 		const std::vector<Margin> m = ViewpointMargins(sol.tour[k], q);
 		model.margins.insert(model.margins.end(), m.begin(), m.end());
 	}
 	return model;
 }
 
-// Viewpoint v's margins at arm pose q (object already placed) and how they change as the object moves, the arm
-// following the viewpoint with dq = J^+ dp: joint limits, stretch, reach (shoulder-wrist distance short of its max)
-// and collision pairs within 10 cm.
-std::vector<Margin> BaseGradientSolver::ViewpointMargins(int v, const std::vector<double>& q)
+// Viewpoint v's margins at pose q (object already placed): joint limits, stretch, reach, collision pairs within
+// 10 cm; slopes with the arm following the viewpoint.
+std::vector<Margin> Solver::ViewpointMargins(int v, const Joints& q)
 {
-	const double kJointFloor = 0.05;  // rad
+	const double kJointFloor = 0.05;	 // rad
 	const double kStretchFloor = 0.02;
 	const double kReachFloor = 0.01;	 // m short of full stretch
-	const double kCollisionFloor = 0.01;	 // m
-	const double kWindow = 0.1;	 // m
-	const double h = 1e-5;  // rad, finite-difference step for the stretch and reach slopes
+	const double kCollisionFloor = 0.01;  // m
+	const double kWindow = 0.1;			 // m
+	const double h = 1e-5;				 // rad, finite-difference step
 	const int dof = static_cast<int>(q.size());
-	const Eigen::MatrixXd dq_db = DampedPinv(ToolJacobian(q), params.jacobian_damping) * PlacementJacobian();
+	const Eigen::MatrixXd dq_dp = DampedPinv(Jacobian(q), params.jacobian_damping).leftCols<3>();
 	std::vector<Margin> margins;
-	auto add = [&](const std::string& what, double value, double floor, const Eigen::VectorXd& joint_slope,
+	auto add = [&](const std::string& name, double value, double floor, const Eigen::VectorXd& joint_slope,
 				   const Eigen::Vector3d& direct) {
-		margins.push_back({v, what, value, floor, LockAxes(dq_db.transpose() * joint_slope + direct), joint_slope});
+		margins.push_back({v, name, value, floor, LockAxes(dq_dp.transpose() * joint_slope + direct), joint_slope});
 	};
 	for (int i = 0; i < dof; ++i)
 	{
-		const moveit::core::VariableBounds& b =
-			robot_model->getVariableBounds(jmg->getVariableNames()[static_cast<size_t>(i)]);
+		const moveit::core::VariableBounds& b = robot_model->getVariableBounds(group->getVariableNames()[static_cast<size_t>(i)]);
 		if (!b.position_bounded_)
 			continue;
 		const Eigen::VectorXd e = Eigen::VectorXd::Unit(dof, i);
@@ -3012,173 +2155,69 @@ std::vector<Margin> BaseGradientSolver::ViewpointMargins(int v, const std::vecto
 		Eigen::VectorXd g(dof);
 		for (int i = 0; i < dof; ++i)
 		{
-			std::vector<double> qh = q;
+			Joints qh = q;
 			qh[static_cast<size_t>(i)] += h;
 			g(i) = (f(qh) - f0) / h;
 		}
 		return g;
 	};
-	add("stretch", Stretch(q), kStretchFloor, slope_of([this](const std::vector<double>& x) { return Stretch(x); }),
+	add("stretch", Stretch(q), kStretchFloor, slope_of([this](const Joints& x) { return Stretch(x); }),
 		Eigen::Vector3d::Zero());
-	if (shoulder_link && wrist_link)
+	if (shoulder && wrist)
 		add("reach", max_reach - ShoulderToWrist(q), kReachFloor,
-			-slope_of([this](const std::vector<double>& x) { return ShoulderToWrist(x); }), Eigen::Vector3d::Zero());
-	state.setJointGroupPositions(jmg, q);
+			-slope_of([this](const Joints& x) { return ShoulderToWrist(x); }), Eigen::Vector3d::Zero());
+	state.setJointGroupPositions(group, q);
 	state.update();
-	collision_detection::DistanceRequest req = MakeClosePairRequest(state, jmg, kWindow);
-	const ClosePairs pairs = FindClosePairs(planning_scene_monitor, state, jmg, req, kWindow);
-	for (size_t p = 0; p < pairs.dists.size(); ++p)
-		add("collision " + pairs.names[p], pairs.dists[p], kCollisionFloor, pairs.gradients[p].transpose(),
-			pairs.object_slopes[p]);
+	collision_detection::DistanceRequest req = CloseRequest(state, group, kWindow);
+	const ClosePairs pairs = FindClosePairs(scene, state, group, req, kWindow);
+	for (size_t i = 0; i < pairs.dists.size(); ++i)
+		add("collision " + pairs.names[i], pairs.dists[i], kCollisionFloor, pairs.gradients[i].transpose(),
+			pairs.object_slopes[i]);
 	return margins;
 }
 
-double BaseGradientSolver::ShoulderToWrist(const std::vector<double>& q)
+Joints Solver::PredictedPose(const ArmModel& model, int v, const Eigen::Vector3d& d)
 {
-	state.setJointGroupPositions(jmg, q);
-	state.update();
-	return (state.getGlobalLinkTransform(wrist_link).translation() -
-			state.getGlobalLinkTransform(shoulder_link).translation())
-		.norm();
-}
-
-// Viewpoint v's predicted joints after the object moves by d: q + dq/db d.
-std::vector<double> BaseGradientSolver::PredictedPose(const ArmModel& model, int v, const Eigen::Vector3d& d)
-{
-	const size_t vi = static_cast<size_t>(v);
-	std::vector<double> q = model.q[vi];
-	const Eigen::VectorXd dq = model.dq_db[vi] * d;
+	Joints q = model.q[static_cast<size_t>(v)];
+	const Eigen::VectorXd dq = model.dq_dp[static_cast<size_t>(v)] * d;
 	for (size_t i = 0; i < q.size(); ++i)
 		q[i] += dq(static_cast<Eigen::Index>(i));
 	return q;
 }
 
-// Viewpoint v's other collision-free IK solutions at `at`, `tries` in all, two ways: half from random starts, half
-// sliding its current pose along its self-motion (camera fixed) the way that raises its tightest margin, by growing
-// amounts. The one whose smallest margin, in floors, beats the current pose's by at least one floor; none if v
-// already has room.
-std::optional<std::vector<double>> BaseGradientSolver::RoomierPose(
-	int v, const ObjectPlacement& at, const ArmModel& model, int tries)
+// Newton steps from q onto viewpoint v's exact pose at `at` (limits ignored); empty if it doesn't converge.
+std::optional<Joints> Solver::ExactPose(int v, const Position& at, Joints q)
 {
-	const int kResamples = tries / 2;
-	const int kNudges = tries - kResamples;
-	const double kNudgeStep = 0.1;	// rad: nudge i slides (i + 1) times this
-	auto smallest = [](const std::vector<Margin>& margins) {
-		double lo = std::numeric_limits<double>::infinity();
-		for (const Margin& m : margins)
-			lo = std::min(lo, m.value / m.floor);
-		return lo;
-	};
-	std::vector<Margin> mine;
-	for (const Margin& m : model.margins)
-		if (m.vp == v)
-			mine.push_back(m);
-	const double now = smallest(mine);
-	if (now >= 1.0)
-		return std::nullopt;  // not near a limit
-	std::string tightest;
-	Eigen::VectorXd raise;	// d(tightest margin)/dq
-	for (const Margin& m : mine)
-		if (m.value / m.floor == now)
-		{
-			char buf[96];
-			std::snprintf(buf, sizeof(buf), "%s %.4f", m.what.c_str(), m.value);
-			tightest = buf;
-			raise = m.joint_slope;
-		}
-	SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
-	auto validity = [this](moveit::core::RobotState* st, const moveit::core::JointModelGroup* g, const double* jp) {
-		return IsStateCollisionFree(planning_scene_monitor, st, g, jp);
-	};
-	const geometry_msgs::msg::Pose target = ToPoseMsg(MakePlacement(at) * tour_poses_obj[static_cast<size_t>(v)]);
-	double best_score = now + 1.0;
-	std::optional<std::vector<double>> best;
-	std::string how;
-	auto consider = [&](const std::vector<double>& q, const char* kind) {
-		const double score = smallest(ViewpointMargins(v, q));
-		if (score > best_score)
-		{
-			best_score = score;
-			best = q;
-			how = kind;
-		}
-	};
-	for (int i = 0; i < kResamples; ++i)
-	{
-		state.setToRandomPositions(jmg, SeededRng());
-		if (!CollisionFreeExactIk(state, jmg, target, 1, params.ik_timeout, validity))
-			continue;
-		std::vector<double> q;
-		state.copyJointGroupPositions(jmg, q);
-		consider(q, "resampled");
-	}
-	const std::vector<double>& q0 = model.q[static_cast<size_t>(v)];
-	const Eigen::MatrixXd J = ToolJacobian(q0);
-	const Eigen::VectorXd slide =
-		(Eigen::MatrixXd::Identity(J.cols(), J.cols()) - DampedPinv(J, params.jacobian_damping) * J) * raise;
-	for (int i = 0; i < kNudges && slide.norm() > 1e-9; ++i)
-	{
-		std::vector<double> q = q0;
-		const Eigen::VectorXd dq = (i + 1) * kNudgeStep * slide.normalized();
-		for (size_t j = 0; j < q.size(); ++j)
-			q[j] += dq(static_cast<Eigen::Index>(j));
-		const std::optional<std::vector<double>> exact = ExactPose(v, at, q);  // back onto the viewpoint
-		if (!exact)
-			continue;
-		state.setJointGroupPositions(jmg, *exact);
-		if (!state.satisfiesBounds(jmg) || !IsStateCollisionFree(planning_scene_monitor, &state, jmg, exact->data()))
-			continue;
-		consider(*exact, "nudged");
-	}
-	if (params.trace_line_search)
-		RCLCPP_INFO(
-			node->get_logger(), "    vp %d near a limit (smallest margin %.2f floors, %s): %s", v, now, tightest.c_str(),
-			best ? (how + " IK with " + std::to_string(best_score) + " floors swapped in").c_str()
-				 : "no roomier IK");
-	return best;
-}
-
-// Newton steps from q to viewpoint v's exact pose with the object at `at` (joint limits ignored); empty if it
-// doesn't converge.
-std::optional<std::vector<double>> BaseGradientSolver::ExactPose(int v, const ObjectPlacement& at, std::vector<double> q)
-{
-	const Eigen::Isometry3d target = MakePlacement(at) * tour_poses_obj[static_cast<size_t>(v)];
+	const Eigen::Isometry3d target = Translation(at) * viewpoints[static_cast<size_t>(v)];
 	for (int it = 0; it < 50; ++it)
 	{
-		state.setJointGroupPositions(jmg, q);
+		state.setJointGroupPositions(group, q);
 		state.update();
-		const Eigen::Isometry3d tool = state.getGlobalLinkTransform(tool0_link);
-		const Eigen::AngleAxisd rot(target.linear() * tool.linear().transpose());
-		Eigen::Matrix<double, 6, 1> e;
-		e.head<3>() = target.translation() - tool.translation();
-		e.tail<3>() = rot.angle() * rot.axis();
+		const Vector6d e = PoseError(target, state.getGlobalLinkTransform(tool));
 		if (e.head<3>().norm() < 1e-4 && e.tail<3>().norm() < 1e-3)
 			return q;
-		const Eigen::VectorXd dq = DampedPinv(ToolJacobian(q), params.jacobian_damping) * e;
+		const Eigen::VectorXd dq = DampedPinv(Jacobian(q), params.jacobian_damping) * e;
 		for (size_t i = 0; i < q.size(); ++i)
 			q[i] += dq(static_cast<Eigen::Index>(i));
 	}
 	return std::nullopt;
 }
 
-// What ran out for viewpoint v, lost by moving the object by d from `at`: its pose after the move (Newton from the
-// prediction to the exact viewpoint pose, limits ignored) is measured there, and v's margins at `at` whose
-// counterparts fell under their floor are returned. No exact pose: out of reach, so its reach and stretch. Nothing
-// matched: the margins predicted to run out along d.
-Shortage BaseGradientSolver::RanOut(int v, const ArmModel& model, const ObjectPlacement& at, const Eigen::Vector3d& d)
+// What ran out for viewpoint v, lost by moving the object by d from `at`: its exact pose after the move is measured,
+// and its margins under their floor there are returned (as modeled at `at`). No exact pose: out of reach (reach and
+// stretch). Nothing found: the margins predicted to run out along d.
+Shortage Solver::RanOut(int v, const ArmModel& model, const Position& at, const Eigen::Vector3d& d)
 {
-	const ObjectPlacement cand = Shifted(at, d, 1.0, params.bounds);
-	const Eigen::Vector3d moved = ToOffsetVec(cand, at);
-	const std::optional<std::vector<double>> exact_q = ExactPose(v, cand, PredictedPose(model, v, moved));
-	const bool exact = exact_q.has_value();
-	const std::vector<double> q = exact ? *exact_q : std::vector<double>();
+	const Position cand = Clamp(at + d, params.bounds);
+	const Eigen::Vector3d moved = cand - at;
+	const std::optional<Joints> q = ExactPose(v, cand, PredictedPose(model, v, moved));
 	Shortage out;
-	auto take = [&](const std::string& what) {
+	auto take = [&](const std::string& name) {
 		for (const Margin& m : model.margins)
-			if (m.vp == v && m.what == what)
+			if (m.vp == v && m.name == name)
 				out.margins.push_back(m);
 	};
-	if (!exact)
+	if (!q)
 	{
 		out.why = "out of reach";
 		take("reach");
@@ -3186,14 +2225,14 @@ Shortage BaseGradientSolver::RanOut(int v, const ArmModel& model, const ObjectPl
 	}
 	else
 	{
-		SetObjectPose(planning_scene_monitor, MakePlacement(cand) * object_pose_obj);
-		for (const Margin& after : ViewpointMargins(v, q))
+		PlaceObject(cand);
+		for (const Margin& after : ViewpointMargins(v, *q))
 			if (after.value < after.floor)
 			{
-				out.why += (out.why.empty() ? "" : ", ") + after.what;
-				take(after.what);
+				out.why += (out.why.empty() ? "" : ", ") + after.name;
+				take(after.name);
 			}
-		SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
+		PlaceObject(at);
 	}
 	if (out.margins.empty())
 	{
@@ -3205,25 +2244,98 @@ Shortage BaseGradientSolver::RanOut(int v, const ArmModel& model, const ObjectPl
 	return out;
 }
 
-// Cost terms before and after weighting, one per line, fixed columns.
-void BaseGradientSolver::LogCostTerms(const InnerSolution& sol)
+// Viewpoint v's roomier IK solution at `at`, if it is near a limit: `tries` candidates, half from random starts, half
+// sliding its pose along its self-motion (camera fixed) toward more room on its tightest margin. The best, if its
+// tightest margin beats the current one by at least one floor.
+std::optional<Joints> Solver::RoomierPose(int v, const Position& at, const ArmModel& model, int tries)
 {
-	const double travel_weight = (planned_travel || params.travel_in_cost) ? 1.0 : 0.0;
-	const double travel_raw = planned_travel ? TravelTerm(sol) : sol.travel_cost;  // 0 until planned (all reached)
+	const int resamples = tries / 2;
+	const int nudges = tries - resamples;
+	const double nudge_step = 0.1;	// rad: nudge i slides (i + 1) times this
+	const std::vector<Margin> mine = model.Of(v);
+	const double now = Tightest(mine);
+	if (now >= 1.0)
+		return std::nullopt;
+	std::string tightest;
+	Eigen::VectorXd raise;	// d(tightest margin)/dq
+	for (const Margin& m : mine)
+		if (m.value / m.floor == now)
+		{
+			char buf[96];
+			std::snprintf(buf, sizeof(buf), "%s %.4f", m.name.c_str(), m.value);
+			tightest = buf;
+			raise = m.joint_slope;
+		}
+	PlaceObject(at);
+	const geometry_msgs::msg::Pose target = ToPoseMsg(Translation(at) * viewpoints[static_cast<size_t>(v)]);
+	double best_score = now + 1.0;
+	std::optional<Joints> roomiest;
+	std::string how;
+	auto consider = [&](const Joints& q, const char* kind) {
+		const double score = Tightest(ViewpointMargins(v, q));
+		if (score > best_score)
+		{
+			best_score = score;
+			roomiest = q;
+			how = kind;
+		}
+	};
+	for (int i = 0; i < resamples; ++i)
+	{
+		state.setToRandomPositions(group, SeededRng());
+		if (!ExactIk(state, group, target, 1, params.ik_timeout, validity))
+			continue;
+		Joints q;
+		state.copyJointGroupPositions(group, q);
+		consider(q, "resampled");
+	}
+	const Joints& q0 = model.q[static_cast<size_t>(v)];
+	const Eigen::MatrixXd J = Jacobian(q0);
+	const Eigen::VectorXd slide =
+		(Eigen::MatrixXd::Identity(J.cols(), J.cols()) - DampedPinv(J, params.jacobian_damping) * J) * raise;
+	for (int i = 0; i < nudges && slide.norm() > 1e-9; ++i)
+	{
+		Joints q = q0;
+		const Eigen::VectorXd dq = (i + 1) * nudge_step * slide.normalized();
+		for (size_t j = 0; j < q.size(); ++j)
+			q[j] += dq(static_cast<Eigen::Index>(j));
+		const std::optional<Joints> exact = ExactPose(v, at, q);
+		if (!exact)
+			continue;
+		state.setJointGroupPositions(group, *exact);
+		if (state.satisfiesBounds(group) && IsStateValid(scene, &state, group, exact->data()))
+			consider(*exact, "nudged");
+	}
+	if (params.trace_line_search)
+		RCLCPP_INFO(
+			node->get_logger(), "    vp %d near a limit (smallest margin %.2f floors, %s): %s", v, now, tightest.c_str(),
+			roomiest ? (how + " IK with " + std::to_string(best_score) + " floors swapped in").c_str() : "no roomier IK");
+	return roomiest;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Logging and progress markers
+// ---------------------------------------------------------------------------------------------
+
+void Solver::LogCostTerms(const TourSolution& sol)
+{
 	auto row = [&](const char* name, double raw, double weight) {
 		RCLCPP_INFO(node->get_logger(), "    %-16s %12.4f %10.1f %12.2f", name, raw, weight, raw * weight);
 	};
 	RCLCPP_INFO(node->get_logger(), "    %-16s %12s %10s %12s", "term", "raw", "weight", "weighted");
-	row(planned_travel ? "planned travel" : "L2 travel", travel_raw, travel_weight);
+	if (planned_travel)
+		row("planned travel", TravelTerm(sol), 1.0);
+	else
+		row("L2 travel", sol.travel, 0.0);
 	row("manipulability", sol.sum_manipulability, -params.manipulability_weight);
 	row("soft-min manip", sol.softmin_manipulability, -params.softmin_manipulability_weight);
 	row("missed count", static_cast<double>(sol.num_total - sol.num_reachable), params.unreachable_penalty);
 	row("miss gap (m)", sol.gap_sum, params.miss_gap_weight);
-	RCLCPP_INFO(node->get_logger(), "    %-16s %12s %10s %12.2f", "total cost", "", "", sol.weighted_cost);
+	RCLCPP_INFO(node->get_logger(), "    %-16s %12s %10s %12.2f", "total cost", "", "", sol.cost);
 }
 
-// Per missed viewpoint, what blocks it at its closest pose: gap, joints near a limit, closest pairs.
-void BaseGradientSolver::LogMissed(const ObjectPlacement& at, const InnerSolution& sol)
+// Per missed viewpoint, what blocks its closest pose: gap, joints near a limit, closest pairs.
+void Solver::LogMissed(const Position& at, const TourSolution& sol)
 {
 	auto closest = [](const collision_detection::DistanceResult& r) {
 		const auto& d = r.minimum_distance;
@@ -3234,51 +2346,153 @@ void BaseGradientSolver::LogMissed(const ObjectPlacement& at, const InnerSolutio
 			buf, sizeof(buf), "%s - %s %.1f mm", d.link_names[0].c_str(), d.link_names[1].c_str(), d.distance * 1000.0);
 		return std::string(buf);
 	};
-	SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
-	for (size_t m = 0; m < sol.missed_vp.size(); ++m)
+	PlaceObject(at);
+	for (const Miss& m : sol.missed)
 	{
-		const int v = sol.missed_vp[m];
-		if (m >= sol.missed_q.size() || sol.missed_q[m].empty())
+		if (m.q.empty())
 		{
-			RCLCPP_INFO(node->get_logger(), "    missed vp %2d: no collision-free closest pose", v);
+			RCLCPP_INFO(node->get_logger(), "    missed vp %2d: no collision-free closest pose", m.vp);
 			continue;
 		}
-		const std::vector<double>& q = sol.missed_q[m];
-		const Eigen::Matrix<double, 6, 1>& e = sol.missed_gap[m];
 		std::string limits;
-		for (size_t k = 0; k < q.size(); ++k)
+		for (size_t k = 0; k < m.q.size(); ++k)
 		{
-			const moveit::core::VariableBounds& b = robot_model->getVariableBounds(jmg->getVariableNames()[k]);
+			const moveit::core::VariableBounds& b = robot_model->getVariableBounds(group->getVariableNames()[k]);
 			const double range = b.max_position_ - b.min_position_;
 			if (!b.position_bounded_ || range <= 0.0)
 				continue;
-			if (q[k] - b.min_position_ < 0.02 * range)
+			if (m.q[k] - b.min_position_ < 0.02 * range)
 				limits += " j" + std::to_string(k + 1) + "@min";
-			else if (b.max_position_ - q[k] < 0.02 * range)
+			else if (b.max_position_ - m.q[k] < 0.02 * range)
 				limits += " j" + std::to_string(k + 1) + "@max";
 		}
-		state.setJointGroupPositions(jmg, q);
+		state.setJointGroupPositions(group, m.q);
 		state.update();
-		collision_detection::DistanceRequest req = MakeClosePairRequest(state, jmg, 1.0);
-		collision_detection::DistanceResult self_res, world_res;
-		{
-			planning_scene_monitor::LockedPlanningSceneRO locked_scene(planning_scene_monitor);
-			req.acm = &locked_scene->getAllowedCollisionMatrix();
-			req.enableGroup(locked_scene->getRobotModel());
-			locked_scene->getCollisionEnv()->distanceSelf(req, self_res, state);
-			locked_scene->getCollisionEnv()->distanceRobot(req, world_res, state);
-		}
+		collision_detection::DistanceRequest req = CloseRequest(state, group, 1.0);
+		const auto [self_res, world_res] = Distances(scene, state, req);
 		RCLCPP_INFO(
-			node->get_logger(), "    missed vp %2d: gap %.1f mm %.1f deg | near limit:%s | arm-object %s | arm-arm %s", v,
-			e.head<3>().norm() * 1000.0, e.tail<3>().norm() * 180.0 / M_PI, limits.empty() ? " none" : limits.c_str(),
+			node->get_logger(), "    missed vp %2d: gap %.1f mm %.1f deg | near limit:%s | arm-object %s | arm-arm %s", m.vp,
+			m.gap.head<3>().norm() * 1000.0, m.gap.tail<3>().norm() * 180.0 / M_PI, limits.empty() ? " none" : limits.c_str(),
 			closest(world_res).c_str(), closest(self_res).c_str());
 	}
 }
 
-void BaseGradientSolver::Publish(const Eigen::Vector3d& neg_grad)
+visualization_msgs::msg::Marker MakeMarker(const std::string& ns, int type, const rclcpp::Time& stamp, int id = 0)
 {
-	PublishProgress(
-		node, params, object_pose_obj, tour_poses_obj, base_history, neg_grad, base, state, jmg, cur);
+	visualization_msgs::msg::Marker m;
+	m.header.frame_id = "world";
+	m.header.stamp = stamp;
+	m.ns = ns;
+	m.id = id;
+	m.type = type;
+	m.action = visualization_msgs::msg::Marker::ADD;
+	m.pose.orientation.w = 1.0;
+	return m;
+}
+
+std_msgs::msg::ColorRGBA Rgba(float r, float g, float b, float a)
+{
+	std_msgs::msg::ColorRGBA c;
+	c.r = r;
+	c.g = g;
+	c.b = b;
+	c.a = a;
+	return c;
+}
+
+// Live markers: object mesh, trail of past positions, -gradient arrow, viewpoints (green reached, red missed), and
+// each miss's closest pose with a line to its target. The previous publish is cleared first.
+void Solver::Publish(const Eigen::Vector3d& neg_grad)
+{
+	using visualization_msgs::msg::Marker;
+	if (!params.progress_pub)
+		return;
+	const rclcpp::Time stamp = node->now();
+	const Eigen::Isometry3d xform = Translation(position);
+	const Eigen::Vector3d object_at = (xform * object_pose).translation();
+	visualization_msgs::msg::MarkerArray markers;
+	Marker clear;
+	clear.action = Marker::DELETEALL;
+	markers.markers.push_back(clear);
+
+	if (!params.progress_mesh_path.empty())
+	{
+		Marker mesh = MakeMarker("base_gradient_current", Marker::MESH_RESOURCE, stamp);
+		mesh.mesh_resource = "file://" + params.progress_mesh_path;
+		mesh.mesh_use_embedded_materials = false;
+		mesh.pose = ToPoseMsg(xform * object_pose);
+		mesh.scale.x = mesh.scale.y = mesh.scale.z = params.progress_mesh_scale;
+		mesh.color = Rgba(1.0f, 0.85f, 0.0f, 0.6f);
+		markers.markers.push_back(mesh);
+	}
+
+	Marker vps = MakeMarker("base_gradient_viewpoints", Marker::SPHERE_LIST, stamp);
+	vps.scale.x = vps.scale.y = vps.scale.z = 0.01;
+	for (size_t v = 0; v < viewpoints.size(); ++v)
+	{
+		const bool missed = std::any_of(
+			current.missed.begin(), current.missed.end(), [&](const Miss& m) { return m.vp == static_cast<int>(v); });
+		vps.points.push_back(ToPoint((xform * viewpoints[v]).translation()));
+		vps.colors.push_back(missed ? Rgba(0.9f, 0.1f, 0.1f, 1.0f) : Rgba(0.1f, 0.9f, 0.1f, 1.0f));
+	}
+	markers.markers.push_back(vps);
+
+	if (trail.size() > 1)
+	{
+		Marker line = MakeMarker("base_gradient_trail", Marker::LINE_STRIP, stamp);
+		line.scale.x = 0.004;
+		line.color = Rgba(1.0f, 0.4f, 0.1f, 0.8f);
+		Marker crumbs = MakeMarker("base_gradient_history", Marker::SPHERE_LIST, stamp);
+		crumbs.scale.x = crumbs.scale.y = crumbs.scale.z = 0.012;
+		crumbs.color = line.color;
+		for (const Position& p : trail)
+		{
+			line.points.push_back(ToPoint((Translation(p) * object_pose).translation()));
+			crumbs.points.push_back(line.points.back());
+		}
+		markers.markers.push_back(line);
+		markers.markers.push_back(crumbs);
+	}
+
+	const double gnorm = neg_grad.norm();
+	if (gnorm > 1e-9)
+	{
+		Marker arrow = MakeMarker("base_gradient_descent_dir", Marker::ARROW, stamp);
+		arrow.scale.x = 0.006;
+		arrow.scale.y = 0.014;
+		arrow.color = Rgba(0.1f, 0.5f, 1.0f, 0.95f);
+		arrow.points = {ToPoint(object_at), ToPoint(object_at + neg_grad * (0.15 / gnorm))};
+		markers.markers.push_back(arrow);
+	}
+
+	Marker gaps = MakeMarker("base_gradient_miss_gap", Marker::LINE_LIST, stamp);
+	gaps.scale.x = 0.003;
+	gaps.color = Rgba(1.0f, 0.2f, 1.0f, 1.0f);
+	visualization_msgs::msg::MarkerArray arms;
+	moveit::core::RobotState ghost(state);
+	for (const Miss& m : current.missed)
+	{
+		if (m.q.empty())
+			continue;
+		ghost.setJointGroupPositions(group, m.q);
+		ghost.update();
+		ghost.getRobotMarkers(
+			arms, ghost.getRobotModel()->getLinkModelNamesWithCollisionGeometry(), Rgba(0.9f, 0.2f, 0.2f, 0.35f),
+			"base_gradient_miss_ik", rclcpp::Duration(0, 0));
+		gaps.points.push_back(ToPoint(ghost.getGlobalLinkTransform("tool0").translation()));
+		gaps.points.push_back(ToPoint((xform * viewpoints[static_cast<size_t>(m.vp)]).translation()));
+	}
+	if (!gaps.points.empty())
+		markers.markers.push_back(gaps);
+	for (Marker& m : arms.markers)
+	{
+		m.header.frame_id = "world";
+		m.header.stamp = stamp;
+		markers.markers.push_back(m);
+	}
+	params.progress_pub->publish(markers);
+	if (params.visualize_progress_delay_sec > 0.0)
+		std::this_thread::sleep_for(std::chrono::duration<double>(params.visualize_progress_delay_sec));
 }
 
 }  // namespace
@@ -3294,62 +2508,54 @@ BaseGradientResult SolveBaseGradient(
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const std::vector<double>& start_reference_joints,
 	const BaseGradientParams& params)
 {
-	BaseGradientSolver solver(
+	Solver solver(
 		node, robot_model, planning_scene_monitor, group_name, object_translation_nominal, object_rotation_nominal,
 		tour_tcp_poses_nominal, start_reference_joints, params);
 	const int n = static_cast<int>(tour_tcp_poses_nominal.size());
+	auto start_or_nominal = [&](double v, int axis) { return std::isnan(v) ? object_translation_nominal(axis) : v; };
+	const Position start(
+		start_or_nominal(params.initial_x, 0), start_or_nominal(params.initial_y, 1), start_or_nominal(params.initial_z, 2));
 
-	// Restarts: the first descent starts at the given position, later ones at the best so far with a new IK
-	// seed. Stops once every viewpoint is reached.
-	const int descent_num_restart = std::max(1, params.descent_num_restart);
-	RestartResult overall;
-	for (int r = 0; r < descent_num_restart && rclcpp::ok(); ++r)
+	// Restarts begin at the best so far with a new IK seed; stop once every viewpoint is reached.
+	const int num_restarts = std::max(1, params.descent_num_restart);
+	DescentResult overall;
+	for (int r = 0; r < num_restarts && rclcpp::ok(); ++r)
 	{
-		const ObjectPlacement start =
-			(r == 0) ? ObjectPlacement{
-						   std::isnan(params.initial_x) ? object_translation_nominal.x() : params.initial_x,
-						   std::isnan(params.initial_y) ? object_translation_nominal.y() : params.initial_y,
-						   std::isnan(params.initial_z) ? object_translation_nominal.z() : params.initial_z}
-					 : overall.placement;  // restarts change only the IK seed
-		RestartResult rr = solver.RunDescent(start, r, r == 0 ? nullptr : &overall.sol);
-
-		// More viewpoints reached wins, then lower cost.
-		const bool improved = (r == 0) || rr.sol.num_reachable > overall.sol.num_reachable ||
-			(rr.sol.num_reachable == overall.sol.num_reachable && rr.cost < overall.cost);
+		const DescentResult d = solver.RunDescent(r == 0 ? start : overall.position, r, r == 0 ? nullptr : &overall.sol);
+		const bool improved = r == 0 || d.sol.num_reachable > overall.sol.num_reachable ||
+			(d.sol.num_reachable == overall.sol.num_reachable && d.cost < overall.cost);
 		RCLCPP_INFO(
 			node->get_logger(),
 			"restart %d/%d done: total cost=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, %.4f, %.4f) m%s",
-			r + 1, descent_num_restart, rr.cost, rr.sol.travel_cost + params.unreachable_penalty * (n - rr.sol.num_reachable),
-			rr.sol.sum_manipulability, rr.sol.num_reachable, n, rr.placement.x, rr.placement.y, rr.placement.z,
+			r + 1, num_restarts, d.cost, d.sol.travel + params.unreachable_penalty * (n - d.sol.num_reachable),
+			d.sol.sum_manipulability, d.sol.num_reachable, n, d.position.x(), d.position.y(), d.position.z(),
 			(r > 0 && improved) ? "  <-- new best" : "");
 		if (improved)
-			overall = rr;
+			overall = d;
 		if (overall.ok)
-			break;  // every viewpoint reached: no more restarts needed
+			break;
 	}
 
 	BaseGradientResult result = solver.result;
-	const InnerSolution& fin = overall.sol;
-	result.x = overall.placement.x;
-	result.y = overall.placement.y;
-	result.z = overall.placement.z;
+	const TourSolution& fin = overall.sol;
+	result.x = overall.position.x();
+	result.y = overall.position.y();
+	result.z = overall.position.z();
 	result.tour_order = fin.tour;
 	result.joint_solutions = fin.joints;
-	// Report the honest tour cost -- strip the unreachable penalty baked in for comparison.
-	result.total_weighted_cost = fin.weighted_cost - params.unreachable_penalty * (fin.num_total - fin.num_reachable);
-	result.total_joint_path_length = JointPathLength(start_reference_joints, fin);
+	result.total_weighted_cost = fin.cost - params.unreachable_penalty * (fin.num_total - fin.num_reachable);
+	for (size_t k = 0; k < fin.joints.size(); ++k)
+		result.total_joint_path_length += JointDistance(k == 0 ? start_reference_joints : fin.joints[k - 1], fin.joints[k]);
 	result.num_reachable = fin.num_reachable;
 	result.ok = overall.ok;
 
-	// Leave the scene as we found it.
-	SetObjectPose(planning_scene_monitor, MakeIsometry(object_translation_nominal, object_rotation_nominal));
-
+	MoveObject(planning_scene_monitor, MakeIsometry(object_translation_nominal, object_rotation_nominal));
 	if (result.ok)
 		RCLCPP_INFO(
 			node->get_logger(),
-			"Done. Object abs (%.4f, %.4f, %.4f) m -- reaches "
-			"all %d poses, tour joint path %.4f rad, travel %.2f, sum_w %.3f (weighted cost %.4f).",
-			result.x, result.y, result.z, n, result.total_joint_path_length, fin.travel_cost, fin.sum_manipulability,
+			"Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, tour joint path %.4f rad, travel %.2f, sum_w "
+			"%.3f (weighted cost %.4f).",
+			result.x, result.y, result.z, n, result.total_joint_path_length, fin.travel, fin.sum_manipulability,
 			result.total_weighted_cost);
 	else
 		RCLCPP_WARN(
@@ -3361,7 +2567,6 @@ BaseGradientResult SolveBaseGradient(
 void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientResult& result)
 {
 	std::filesystem::create_directories(output_dir);
-
 	Json::Value root;
 	root["ok"] = result.ok;
 	root["num_reachable"] = result.num_reachable;
@@ -3371,22 +2576,19 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 	root["z"] = result.z;
 	root["total_joint_path_length"] = result.total_joint_path_length;
 	root["total_weighted_cost"] = result.total_weighted_cost;
-
 	Json::Value tour(Json::arrayValue);
-	for (int idx : result.tour_order)
-		tour.append(idx);
+	for (int v : result.tour_order)
+		tour.append(v);
 	root["tour_order"] = tour;
-
 	Json::Value joints(Json::arrayValue);
-	for (const auto& sol : result.joint_solutions)
+	for (const auto& q : result.joint_solutions)
 	{
 		Json::Value entry(Json::arrayValue);
-		for (double v : sol)
-			entry.append(v);
+		for (double x : q)
+			entry.append(x);
 		joints.append(entry);
 	}
 	root["joint_solutions"] = joints;
-
 	Json::Value history(Json::arrayValue);
 	for (const auto& h : result.history)
 	{
@@ -3400,28 +2602,24 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 	}
 	root["history"] = history;
 
-	std::string json_path = output_dir + "/base_gradient_result.json";
-	std::ofstream json_file(json_path);
-	Json::StreamWriterBuilder writer_builder;
-	writer_builder["indentation"] = "    ";
-	std::unique_ptr<Json::StreamWriter> writer(writer_builder.newStreamWriter());
-	writer->write(root, &json_file);
-
-	printf("Saved base gradient result JSON: %s\n", json_path.c_str());
+	const std::string path = output_dir + "/base_gradient_result.json";
+	std::ofstream file(path);
+	Json::StreamWriterBuilder builder;
+	builder["indentation"] = "    ";
+	std::unique_ptr<Json::StreamWriter>(builder.newStreamWriter())->write(root, &file);
+	printf("Saved base gradient result JSON: %s\n", path.c_str());
 }
 
 Eigen::Isometry3d PlacementTransform(const Eigen::Vector3d& object_translation_nominal, double x, double y, double z)
 {
-	return MakePlacement(ObjectPlacement{x, y, z}) * Eigen::Translation3d(-object_translation_nominal);
+	return Translation(Position(x, y, z)) * Eigen::Translation3d(-object_translation_nominal);
 }
 
 void ApplyObjectPlacementToScene(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
 	const Eigen::Matrix3d& object_rotation_nominal, double x, double y, double z)
 {
-	SetObjectPose(
-		planning_scene_monitor,
-		MakePlacement(ObjectPlacement{x, y, z}) * MakeIsometry(Eigen::Vector3d::Zero(), object_rotation_nominal));
+	MoveObject(planning_scene_monitor, MakeIsometry(Position(x, y, z), object_rotation_nominal));
 }
 
 visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
@@ -3429,67 +2627,32 @@ visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
 	const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const BaseGradientResult& result)
 {
+	using visualization_msgs::msg::Marker;
 	visualization_msgs::msg::MarkerArray markers;
 	int id = 0;
-
 	const Eigen::Isometry3d xform = PlacementTransform(object_translation_nominal, result.x, result.y, result.z);
-	const Eigen::Isometry3d object_pose_nominal = MakeIsometry(object_translation_nominal, object_rotation_nominal);
 
-	visualization_msgs::msg::Marker mesh_marker;
-	mesh_marker.header.frame_id = "world";
-	mesh_marker.header.stamp = stamp;
-	mesh_marker.ns = "base_gradient_object";
-	mesh_marker.id = id++;
-	mesh_marker.type = visualization_msgs::msg::Marker::MESH_RESOURCE;
-	mesh_marker.action = visualization_msgs::msg::Marker::ADD;
-	mesh_marker.mesh_resource = "file://" + resolved_mesh_path;
-	mesh_marker.mesh_use_embedded_materials = false;
-	mesh_marker.pose = ToPoseMsg(xform * object_pose_nominal);
-	mesh_marker.scale.x = mesh_marker.scale.y = mesh_marker.scale.z = mesh_scale;
-	mesh_marker.color.r = mesh_marker.color.g = mesh_marker.color.b = 0.7f;
-	mesh_marker.color.a = 0.5f;
-	markers.markers.push_back(mesh_marker);
+	Marker mesh = MakeMarker("base_gradient_object", Marker::MESH_RESOURCE, stamp, id++);
+	mesh.mesh_resource = "file://" + resolved_mesh_path;
+	mesh.mesh_use_embedded_materials = false;
+	mesh.pose = ToPoseMsg(xform * MakeIsometry(object_translation_nominal, object_rotation_nominal));
+	mesh.scale.x = mesh.scale.y = mesh.scale.z = mesh_scale;
+	mesh.color = Rgba(0.7f, 0.7f, 0.7f, 0.5f);
+	markers.markers.push_back(mesh);
 
-	visualization_msgs::msg::Marker line;
-	line.header.frame_id = "world";
-	line.header.stamp = stamp;
-	line.ns = "base_gradient_tour";
-	line.id = id++;
-	line.type = visualization_msgs::msg::Marker::LINE_STRIP;
-	line.action = visualization_msgs::msg::Marker::ADD;
-	line.pose.orientation.w = 1.0;
+	Marker line = MakeMarker("base_gradient_tour", Marker::LINE_STRIP, stamp, id++);
 	line.scale.x = 0.002;
-	line.color.r = 0.1f;
-	line.color.g = 0.9f;
-	line.color.b = 0.1f;
-	line.color.a = 0.9f;
-
+	line.color = Rgba(0.1f, 0.9f, 0.1f, 0.9f);
 	for (size_t k = 0; k < result.tour_order.size(); ++k)
 	{
-		Eigen::Isometry3d local = xform * tour_tcp_poses_nominal[result.tour_order[k]];
-
-		visualization_msgs::msg::Marker sphere;
-		sphere.header.frame_id = "world";
-		sphere.header.stamp = stamp;
-		sphere.ns = "base_gradient_waypoints";
-		sphere.id = id++;
-		sphere.type = visualization_msgs::msg::Marker::SPHERE;
-		sphere.action = visualization_msgs::msg::Marker::ADD;
-		sphere.pose.position.x = local.translation().x();
-		sphere.pose.position.y = local.translation().y();
-		sphere.pose.position.z = local.translation().z();
-		sphere.pose.orientation.w = 1.0;
+		Marker sphere = MakeMarker("base_gradient_waypoints", Marker::SPHERE, stamp, id++);
+		sphere.pose.position = ToPoint((xform * tour_tcp_poses_nominal[static_cast<size_t>(result.tour_order[k])]).translation());
 		sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.008;
-		bool reachable = k < result.joint_solutions.size() && !result.joint_solutions[k].empty();
-		sphere.color.r = reachable ? 0.1f : 0.9f;
-		sphere.color.g = reachable ? 0.9f : 0.1f;
-		sphere.color.b = 0.1f;
-		sphere.color.a = 1.0f;
+		const bool reached = k < result.joint_solutions.size() && !result.joint_solutions[k].empty();
+		sphere.color = reached ? Rgba(0.1f, 0.9f, 0.1f, 1.0f) : Rgba(0.9f, 0.1f, 0.1f, 1.0f);
 		markers.markers.push_back(sphere);
-
 		line.points.push_back(sphere.pose.position);
 	}
 	markers.markers.push_back(line);
-
 	return markers;
 }
