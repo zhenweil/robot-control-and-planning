@@ -17,6 +17,7 @@
     # Descent
     bg_descent_num_restart: 1
     bg_stop_when_all_reached: false
+    bg_reach_time_limit: 120.0              # s per descent to reach every viewpoint, then stuck; 0 = none
     bg_refine_solves: 3                      # after all reached: full solves, kept by lowest cost (planned travel, comfort)
     bg_refine_ik_solutions: 8                # IK solutions per viewpoint in those solves
     bg_reconfig_threshold: 1.0               # rad: a move turning any joint (joint 7 aside) more than this is a reconfiguration

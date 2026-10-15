@@ -76,6 +76,7 @@ struct BaseGradientParams
 	double convergence_tolerance_cost = 1e-3;	  // stop optimization when cost improvement < 0.1%
 	int patience = 3; // stop optimization if no improvement after this many iterations
 	bool stop_when_all_reached = false;  // end each descent as soon as every viewpoint is reached
+	double reach_time_limit = 0.0;  // s per descent to reach every viewpoint; then it counts as stuck. 0 = none
 	int refine_solves = 0;  // extra full solves at each descent's result, warm-started from the best so far
 	int refine_ik_solutions = 8;  // IK solutions per viewpoint in refine solves: more same-branch choices for GTSP
 	// Reconfiguration: a move turning any joint (joint 7 aside) more than reconfig_threshold. Refine's GTSP edges
