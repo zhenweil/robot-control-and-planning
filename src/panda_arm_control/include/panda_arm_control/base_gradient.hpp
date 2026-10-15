@@ -110,6 +110,9 @@ struct BaseGradientParams
 	// margins (predicted through the arm Jacobian) instead of walls. Needs room_then_reach.
 	bool kinematic_room = false;
 	bool tracking = false;  // internal: set on the params copy used for tracked solves
+	// internal: a solve reaching fewer viewpoints than this skips the missed ones' closest-IK gaps (a probe that is
+	// rejected on count anyway); 0 = never
+	int gaps_min_reached = 0;
 	bool trace_line_search = false;  // log every line-search probe and full solve against the current point
 	int refine_at_reach = 0;  // log N refine solves at the first all-reached placement (descent continues)
 

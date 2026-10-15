@@ -1025,10 +1025,24 @@ InnerSolution InnerSolve(
 	std::vector<std::vector<double>> missed_q;
 	int num_rescued = 0, num_no_free = 0;
 	const Eigen::Isometry3d xform = MakePlacement(base);
+	const int num_found = static_cast<int>(
+		std::count_if(ik_solutions.begin(), ik_solutions.end(), [](const auto& s) { return !s.empty(); }));
+	const bool skip_gaps = num_found < params.gaps_min_reached;
 	for (size_t i = 0; i < ik_solutions.size(); ++i)
 	{
 		if (!ik_solutions[i].empty())
 			continue;
+		if (skip_gaps)
+		{
+			// Rejected on count anyway: a gap at the cap, no closest-IK search.
+			Eigen::Matrix<double, 6, 1> capped = Eigen::Matrix<double, 6, 1>::Zero();
+			capped(0) = params.miss_gap_cap;
+			missed_vp.push_back(static_cast<int>(i));
+			missed_q.push_back({});
+			missed_gap.push_back(capped);
+			++num_no_free;
+			continue;
+		}
 		const Eigen::Isometry3d target = xform * tour_poses_obj[i];
 		ClosestIkResult best;
 		// First start: the arm pose of the nearest reached viewpoint, often in the right posture family
@@ -2037,8 +2051,7 @@ private:
 	void ElbowSwingAtResult();
 
 	// --- Solving and scoring ---
-	InnerSolution SolveAt(const ObjectPlacement& at, int max_solutions);
-	InnerSolution QuickSolve(const ObjectPlacement& at);
+	InnerSolution QuickSolve(const ObjectPlacement& at, int gaps_min_reached = 0);
 	InnerSolution Refine(const ObjectPlacement& at, InnerSolution best_sol, int num_solves);
 	double RealCost(const ObjectPlacement& at, const InnerSolution& sol);
 	InnerSolution WithPlannedTravel(const ObjectPlacement& at, InnerSolution sol);
@@ -2441,7 +2454,7 @@ std::optional<Step> BaseGradientSolver::LineSearch(Eigen::Vector3d dir)
 	{
 		const ObjectPlacement cand = Shifted(base, dir, step, params.bounds);
 		// weighted_cost carries the unreachable penalty, so a probe that drops a viewpoint fails.
-		InnerSolution probe = QuickSolve(cand);
+		InnerSolution probe = QuickSolve(cand, here_quick.num_reachable);
 		result.num_inner_solves += 1;
 		if (probe.num_reachable >= here_quick.num_reachable)
 			probe = WithPlannedTravel(cand, std::move(probe));  // plan only probes that could be accepted
@@ -2647,7 +2660,7 @@ std::optional<Step> BaseGradientSolver::KinematicRoomThenReach()
 		for (size_t k = 0; k < here_at.tour.size(); ++k)
 			seeds[static_cast<size_t>(here_at.tour[k])] = here_at.joints[k];
 		result.num_inner_solves += 1;
-		return QuickSolve(cand);
+		return QuickSolve(cand, here_at.num_reachable);
 	};
 	std::vector<size_t> order(here_quick.missed_vp.size());
 	std::iota(order.begin(), order.end(), 0);
@@ -2743,9 +2756,13 @@ std::optional<Step> BaseGradientSolver::KinematicRoomThenReach()
 			}
 			if (room.norm() < 1e-9)
 				break;	// nothing raises them: next missed viewpoint
+			// Room move: a full step. One that loses a viewpoint adds what ran out for it and is worked out again
+			// (kMaxReplans times); last, half the step of the final direction.
+			const int kMaxReplans = 3;
 			bool moved = false;
-			for (double size : {step, 0.5 * step})
+			for (int plan = 0; plan <= kMaxReplans && !moved && room.norm() > 1e-9; ++plan)
 			{
+				const double size = plan < kMaxReplans ? step : 0.5 * step;
 				const ObjectPlacement back = Shifted(at, room, size, params.bounds);
 				InnerSolution rp = probe_from(here_at, back);
 				const std::vector<int> back_lost = LostViewpoints(here_at, rp);
@@ -2756,16 +2773,26 @@ std::optional<Step> BaseGradientSolver::KinematicRoomThenReach()
 					trace(what, target, back, rp, back_lost, "gained, accepted");
 					return Step{back, WithPlannedTravel(back, std::move(rp)), size};
 				}
-				if (!back_lost.empty())
+				if (back_lost.empty())
 				{
-					trace(what, target, back, rp, back_lost, "rejected");
-					continue;
+					trace(what, target, back, rp, back_lost, "moved");
+					at = back;
+					here_at = std::move(rp);
+					moved = true;
+					break;
 				}
-				trace(what, target, back, rp, back_lost, "moved");
-				at = back;
-				here_at = std::move(rp);
-				moved = true;
-				break;
+				std::string room_why;
+				for (int v : back_lost)
+				{
+					if (swap_pose(v))
+						model = ArmModelAt(at, here_at);
+					const Shortage sh = RanOut(v, model, at, ToOffsetVec(back, at));
+					short_margins.insert(short_margins.end(), sh.margins.begin(), sh.margins.end());
+					joined[static_cast<size_t>(v)] = true;
+					room_why += " vp " + std::to_string(v) + ": " + sh.why + ";";
+				}
+				trace(what, target, back, rp, back_lost, "lost, add what ran out (" + room_why + " ) and replan");
+				room = MostRoomDirection(short_margins, step);
 			}
 			if (!moved)
 				break;
@@ -2934,22 +2961,20 @@ void BaseGradientSolver::ElbowSwingAtResult()
 	rr.cost = CostAtFinalWeight(rr.sol);
 }
 
-// One full solve at `at` with this iteration's seeds and order lock.
-InnerSolution BaseGradientSolver::SolveAt(const ObjectPlacement& at, int max_solutions)
-{
-	ReseedRng(params.random_seed);
-	return InnerSolve(
-		state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, home_joints, home_tcp_local, at,
-		params, &cur.tour, max_solutions, order_lock);
-}
-
 // Tracked probes: every viewpoint follows its current arm pose (one warm IK attempt, fixed order), so
 // nearby placements compare the same arm poses; the full solve at an accepted spot searches anew.
-InnerSolution BaseGradientSolver::QuickSolve(const ObjectPlacement& at)
+// gaps_min_reached: a probe reaching fewer viewpoints than this is rejected anyway, so it skips the miss gaps.
+InnerSolution BaseGradientSolver::QuickSolve(const ObjectPlacement& at, int gaps_min_reached)
 {
-	if (!params.track_probes)
-		return SolveAt(at, params.max_solutions_per_candidate);
 	BaseGradientParams track_params = params;
+	track_params.gaps_min_reached = gaps_min_reached;
+	if (!params.track_probes)
+	{
+		ReseedRng(params.random_seed);
+		return InnerSolve(
+			state, jmg, planning_scene_monitor, object_pose_obj, tour_poses_obj, seeds, home_joints, home_tcp_local,
+			at, track_params, &cur.tour, params.max_solutions_per_candidate, order_lock);
+	}
 	track_params.tracking = true;
 	ReseedRng(params.random_seed);
 	return InnerSolve(
