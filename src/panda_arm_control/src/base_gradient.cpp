@@ -2060,6 +2060,7 @@ private:
 	std::vector<double> PredictedPose(const ArmModel& model, int v, const Eigen::Vector3d& d);
 	Shortage RanOut(int v, const ArmModel& model, const ObjectPlacement& at, const Eigen::Vector3d& d);
 	std::optional<std::vector<double>> RoomierPose(int v, const ObjectPlacement& at, const ArmModel& model);
+	std::optional<std::vector<double>> ExactPose(int v, const ObjectPlacement& at, std::vector<double> q);
 	Eigen::Vector3d LossDirection(
 		int v, const InnerSolution& from_sol, const InnerSolution& probe, const Eigen::Vector3d& step_dir);
 	Eigen::Vector3d AimWithinWalls(const Eigen::Vector3d& a) const;
@@ -3224,11 +3225,15 @@ std::vector<double> BaseGradientSolver::PredictedPose(const ArmModel& model, int
 	return q;
 }
 
-// Viewpoint v's other collision-free IK solutions at `at` (random starts): the one whose smallest margin, in floors,
-// beats its current pose's by at least one floor; none if v already has room.
+// Viewpoint v's other collision-free IK solutions at `at`, two ways: kResamples from random starts, and kNudges
+// sliding its current pose along its self-motion (camera fixed) the way that raises its tightest margin, by growing
+// amounts. The one whose smallest margin, in floors, beats the current pose's by at least one floor; none if v
+// already has room.
 std::optional<std::vector<double>> BaseGradientSolver::RoomierPose(int v, const ObjectPlacement& at, const ArmModel& model)
 {
-	const int kStarts = 16;
+	const int kResamples = 5;
+	const int kNudges = 5;
+	const double kNudgeStep = 0.1;	// rad: nudge i slides (i + 1) times this
 	auto smallest = [](const std::vector<Margin>& margins) {
 		double lo = std::numeric_limits<double>::infinity();
 		for (const Margin& m : margins)
@@ -3242,6 +3247,16 @@ std::optional<std::vector<double>> BaseGradientSolver::RoomierPose(int v, const 
 	const double now = smallest(mine);
 	if (now >= 1.0)
 		return std::nullopt;  // not near a limit
+	std::string tightest;
+	Eigen::VectorXd raise;	// d(tightest margin)/dq
+	for (const Margin& m : mine)
+		if (m.value / m.floor == now)
+		{
+			char buf[96];
+			std::snprintf(buf, sizeof(buf), "%s %.4f", m.what.c_str(), m.value);
+			tightest = buf;
+			raise = m.joint_slope;
+		}
 	SetObjectPose(planning_scene_monitor, MakePlacement(at) * object_pose_obj);
 	auto validity = [this](moveit::core::RobotState* st, const moveit::core::JointModelGroup* g, const double* jp) {
 		return IsStateCollisionFree(planning_scene_monitor, st, g, jp);
@@ -3249,26 +3264,72 @@ std::optional<std::vector<double>> BaseGradientSolver::RoomierPose(int v, const 
 	const geometry_msgs::msg::Pose target = ToPoseMsg(MakePlacement(at) * tour_poses_obj[static_cast<size_t>(v)]);
 	double best_score = now + 1.0;
 	std::optional<std::vector<double>> best;
-	for (int i = 0; i < kStarts; ++i)
+	std::string how;
+	auto consider = [&](const std::vector<double>& q, const char* kind) {
+		const double score = smallest(ViewpointMargins(v, q));
+		if (score > best_score)
+		{
+			best_score = score;
+			best = q;
+			how = kind;
+		}
+	};
+	for (int i = 0; i < kResamples; ++i)
 	{
 		state.setToRandomPositions(jmg, SeededRng());
 		if (!CollisionFreeExactIk(state, jmg, target, 1, params.ik_timeout, validity))
 			continue;
 		std::vector<double> q;
 		state.copyJointGroupPositions(jmg, q);
-		const double score = smallest(ViewpointMargins(v, q));
-		if (score > best_score)
-		{
-			best_score = score;
-			best = q;
-		}
+		consider(q, "resampled");
+	}
+	const std::vector<double>& q0 = model.q[static_cast<size_t>(v)];
+	const Eigen::MatrixXd J = ToolJacobian(q0);
+	const Eigen::VectorXd slide =
+		(Eigen::MatrixXd::Identity(J.cols(), J.cols()) - DampedPinv(J, params.jacobian_damping) * J) * raise;
+	for (int i = 0; i < kNudges && slide.norm() > 1e-9; ++i)
+	{
+		std::vector<double> q = q0;
+		const Eigen::VectorXd dq = (i + 1) * kNudgeStep * slide.normalized();
+		for (size_t j = 0; j < q.size(); ++j)
+			q[j] += dq(static_cast<Eigen::Index>(j));
+		const std::optional<std::vector<double>> exact = ExactPose(v, at, q);  // back onto the viewpoint
+		if (!exact)
+			continue;
+		state.setJointGroupPositions(jmg, *exact);
+		if (!state.satisfiesBounds(jmg) || !IsStateCollisionFree(planning_scene_monitor, &state, jmg, exact->data()))
+			continue;
+		consider(*exact, "nudged");
 	}
 	if (params.trace_line_search)
 		RCLCPP_INFO(
-			node->get_logger(), "    vp %d near a limit (smallest margin %.2f floors): %s", v, now,
-			best ? ("other IK with " + std::to_string(best_score) + " floors swapped in").c_str()
+			node->get_logger(), "    vp %d near a limit (smallest margin %.2f floors, %s): %s", v, now, tightest.c_str(),
+			best ? (how + " IK with " + std::to_string(best_score) + " floors swapped in").c_str()
 				 : "no roomier IK");
 	return best;
+}
+
+// Newton steps from q to viewpoint v's exact pose with the object at `at` (joint limits ignored); empty if it
+// doesn't converge.
+std::optional<std::vector<double>> BaseGradientSolver::ExactPose(int v, const ObjectPlacement& at, std::vector<double> q)
+{
+	const Eigen::Isometry3d target = MakePlacement(at) * tour_poses_obj[static_cast<size_t>(v)];
+	for (int it = 0; it < 50; ++it)
+	{
+		state.setJointGroupPositions(jmg, q);
+		state.update();
+		const Eigen::Isometry3d tool = state.getGlobalLinkTransform(tool0_link);
+		const Eigen::AngleAxisd rot(target.linear() * tool.linear().transpose());
+		Eigen::Matrix<double, 6, 1> e;
+		e.head<3>() = target.translation() - tool.translation();
+		e.tail<3>() = rot.angle() * rot.axis();
+		if (e.head<3>().norm() < 1e-4 && e.tail<3>().norm() < 1e-3)
+			return q;
+		const Eigen::VectorXd dq = DampedPinv(ToolJacobian(q), params.jacobian_damping) * e;
+		for (size_t i = 0; i < q.size(); ++i)
+			q[i] += dq(static_cast<Eigen::Index>(i));
+	}
+	return std::nullopt;
 }
 
 // What ran out for viewpoint v, lost by moving the object by d from `at`: its pose after the move (Newton from the
@@ -3279,26 +3340,9 @@ Shortage BaseGradientSolver::RanOut(int v, const ArmModel& model, const ObjectPl
 {
 	const ObjectPlacement cand = Shifted(at, d, 1.0, params.bounds);
 	const Eigen::Vector3d moved = ToOffsetVec(cand, at);
-	const Eigen::Isometry3d target = MakePlacement(cand) * tour_poses_obj[static_cast<size_t>(v)];
-	std::vector<double> q = PredictedPose(model, v, moved);
-	bool exact = false;
-	for (int it = 0; it < 50 && !exact; ++it)
-	{
-		state.setJointGroupPositions(jmg, q);
-		state.update();
-		const Eigen::Isometry3d tool = state.getGlobalLinkTransform(tool0_link);
-		const Eigen::AngleAxisd rot(target.linear() * tool.linear().transpose());
-		Eigen::Matrix<double, 6, 1> e;
-		e.head<3>() = target.translation() - tool.translation();
-		e.tail<3>() = rot.angle() * rot.axis();
-		exact = e.head<3>().norm() < 1e-4 && e.tail<3>().norm() < 1e-3;
-		if (!exact)
-		{
-			const Eigen::VectorXd dq = DampedPinv(ToolJacobian(q), params.jacobian_damping) * e;
-			for (size_t i = 0; i < q.size(); ++i)
-				q[i] += dq(static_cast<Eigen::Index>(i));
-		}
-	}
+	const std::optional<std::vector<double>> exact_q = ExactPose(v, cand, PredictedPose(model, v, moved));
+	const bool exact = exact_q.has_value();
+	const std::vector<double> q = exact ? *exact_q : std::vector<double>();
 	Shortage out;
 	auto take = [&](const std::string& what) {
 		for (const Margin& m : model.margins)
