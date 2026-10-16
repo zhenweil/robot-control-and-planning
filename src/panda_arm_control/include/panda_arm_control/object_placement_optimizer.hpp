@@ -138,9 +138,14 @@ private:
 	TourSolution QuickSolveTour(const Position& at, BaseGradientParams p);
 	TourSolution QuickSolveTour(const Position& at, int gaps_min_reached = 0);
 	TourSolution RefineTour(const Position& at, TourSolution best_sol, int num_solves);
-	std::vector<std::vector<Joints>> CollectIkPoses(const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed, int max_solutions);
-	TourSolution SolveTourBestOf(const Position& at, const BaseGradientParams& p, const std::vector<int>* initial_order, const std::vector<int>* fixed_order);
-	TourSolution SolveTour(const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
+	std::vector<std::vector<Joints>> CollectIkPoses(
+		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed, int max_solutions);
+	TourSolution SolveTourBestOf(
+		const Position& at, const BaseGradientParams& p, const std::vector<int>* initial_order,
+		const std::vector<int>* fixed_order);
+	TourSolution SolveTour(
+		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed,
+		const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
 
 	// Compute gradient
 	Eigen::Vector3d ComputeNumericCostGradient();
@@ -157,16 +162,14 @@ private:
 	// --- Room-then-reach ---
 	Eigen::MatrixXd GetToolJacobian(const Joints& q);
 	Eigen::Vector3d RemoveMotionOnLockedAxes(Eigen::Vector3d v) const;
-	std::optional<Joints> SolveExactPose(int v, const Position& at, Joints q);
-	std::vector<room_margins::Margin> GetViewpointMargins(int v, const Joints& q);
-	room_margins::ArmModel BuildArmModel(const Position& at, const TourSolution& sol);
-	Joints PredictPose(const room_margins::ArmModel& model, int v, const Eigen::Vector3d& d);
+	std::vector<room_margins::Margin> GetIkPoseMargins(int v, const Joints& q);
+	room_margins::ArmModel BuildRoomMarginArmModel(const Position& at, const TourSolution& sol);
 	Eigen::Vector3d GetMoveDirectionToCloseGap(int target, const TourSolution& here_at, bool first);
 	std::optional<Joints> FindRoomierPose(int v, const Position& at, const room_margins::ArmModel& model, int tries);
-	room_margins::Shortage GetShortage(int v, const room_margins::ArmModel& model, const Position& at, const Eigen::Vector3d& d);
+	room_margins::Shortage GetMarginsThatRunOut(
+		int v, const room_margins::ArmModel& model, const Position& at, const Eigen::Vector3d& d);
 
 	// --- Fixed for the whole run ---
-
 	std::string group_name;
 	rclcpp::Node::SharedPtr node;
 	const BaseGradientParams params;
@@ -184,19 +187,20 @@ private:
 	std::vector<Eigen::Isometry3d> viewpoints;  // viewpoints relative to the object's position
 	const moveit::core::JointModelGroup* joint_group;
 
-	Joints home_pose;
-	std::vector<int> travel_joints;  // joints that count as travel: all but joint 7, which only spins the camera
-	moveit::core::GroupStateValidityCallbackFn state_validity;
 	bool can_plan;	   // planned travel can be computed
+	Joints home_pose;
 	bool use_planned_travel_in_cost;  // and replaces the L2 travel in the cost
-	std::optional<ReachabilityMap> reachability_map;  // loaded on first use
-	bool reachability_map_tried = false;
+	std::vector<int> counted_joint_indices;  // joints that count as travel: all but joint 7, which only spins the camera
+	moveit::core::GroupStateValidityCallbackFn state_validity;
+
 	std::vector<int> reachability_bins;  // each viewpoint's approach-direction bin
+	bool reachability_map_load_attempted = false;
+	std::optional<ReachabilityMap> reachability_map;  // loaded on first use
 
 	// --- Whole run ---
+	int outer_iteration = 0;
 	BaseGradientResult run_result;		 // history and solve count; Optimize fills in the rest
 	std::vector<MoveSegment> move_history;	 // every move, kept for RViz
-	int outer_iteration = 0;		 // reachability-map outer iteration, for logs; 0 = the first solve
 
 	// --- Per reach attempt ---
 	int attempt_index = 0;
@@ -213,13 +217,13 @@ private:
 	std::chrono::steady_clock::time_point reach_deadline;
 
 	// --- Per kinematic move ---
+	TourSolution quick_solve_tour;  // quick solve at current_position: what line-search tries compare against
 	std::vector<int> locked_order;
 	const std::vector<int>* fixed_order = nullptr;  // order the GTSP must keep; null = it reorders
-	TourSolution baseline_tour;  // quick solve at current_position: what line-search tries compare against
 
 	// --- Scene and markers ---
-	void PublishProgressMarkers(const Eigen::Vector3d& neg_grad);
 	void MoveObjectTo(const Position& at);
+	void PublishProgressMarkers(const Eigen::Vector3d& neg_grad);
 };
 
 }  // namespace object_placement

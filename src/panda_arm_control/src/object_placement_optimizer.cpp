@@ -72,12 +72,13 @@ ObjectPlacementOptimizer::ObjectPlacementOptimizer(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& scene, const std::string& group_name,
 	const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
 	const std::vector<Eigen::Isometry3d>& viewpoints_nominal, const Joints& home, const BaseGradientParams& params)
-	: node(node), robot_model(robot_model), scene(scene), group_name(group_name), params(params),
-	  object_translation_nominal(object_translation_nominal), object_rotation_nominal(object_rotation_nominal),
+	: group_name(group_name), node(node), params(params), robot_model(robot_model), scene(scene),
 	  object_pose(scene_geometry::MakeIsometry(Eigen::Vector3d::Zero(), object_rotation_nominal)),
-	  viewpoints(viewpoints_nominal), num_viewpoint(static_cast<int>(viewpoints_nominal.size())),
-	  input_order(static_cast<size_t>(viewpoints_nominal.size())), robot_state(robot_model), home_pose(home),
-	  travel_joints(joint_travel::AllJoints(static_cast<int>(home.size()) - 1))
+	  object_rotation_nominal(object_rotation_nominal), object_translation_nominal(object_translation_nominal),
+	  num_viewpoint(static_cast<int>(viewpoints_nominal.size())),
+	  input_order(static_cast<size_t>(viewpoints_nominal.size())), robot_state(robot_model),
+	  viewpoints(viewpoints_nominal), home_pose(home),
+	  counted_joint_indices(joint_travel::AllJoints(static_cast<int>(home.size()) - 1))
 {
 	ik_sampling::ReseedRng(this->params.random_seed);
 	for (Eigen::Isometry3d& t : this->viewpoints)
@@ -99,62 +100,56 @@ ObjectPlacementOptimizer::ObjectPlacementOptimizer(
 
 BaseGradientResult ObjectPlacementOptimizer::Optimize()
 {
-	const int n = this->num_viewpoint;
-	auto start_or_nominal = [&](double v, int axis) { return std::isnan(v) ? this->object_translation_nominal(axis) : v; };
-	const Position start(
-		start_or_nominal(this->params.initial_x, 0), start_or_nominal(this->params.initial_y, 1),
-		start_or_nominal(this->params.initial_z, 2));
+	const Position start(this->params.initial_x, this->params.initial_y, this->params.initial_z);
 
 	// Outer: once every viewpoint is reached (and refined), step up the reachability map and solve again from there;
 	// keep the result if its cost is lower, else halve the step.
 	this->outer_iteration = 0;
-	ReachAttemptResult overall = this->ReachAllViewpoints(start);
+	ReachAttemptResult best_result = this->ReachAllViewpoints(start);
 	double step = this->params.reach_outer_step;
-	for (int outer = 1;
-		 outer <= this->params.reach_outer_iterations && overall.all_reachable && step >= 0.02 && rclcpp::ok(); ++outer)
+	for (int outer = 1; outer <= this->params.reach_outer_iterations && best_result.all_reachable && step >= 0.02 && rclcpp::ok(); ++outer)
 	{
-		const std::optional<Position> next = this->GetReachabilityMapStep(overall.position, step, outer);
-		if (!next)
-			break;
+		const std::optional<Position> next = this->GetReachabilityMapStep(best_result.position, step, outer);
+		if (!next) break;
+		
 		this->outer_iteration = outer;
 		const ReachAttemptResult d = this->ReachAllViewpoints(*next);
-		const bool better = d.all_reachable && d.weighted_cost_sum < overall.weighted_cost_sum;
+		const bool better = d.all_reachable && d.weighted_cost_sum < best_result.weighted_cost_sum;
 		RCLCPP_INFO(
 			this->node->get_logger(), "outer %d done: reachable %d/%d, cost %.4f vs %.4f best -> %s", outer,
-			d.tour_solution.num_reachable, n, d.weighted_cost_sum, overall.weighted_cost_sum,
+			d.tour_solution.num_reachable, this->num_viewpoint, d.weighted_cost_sum, best_result.weighted_cost_sum,
 			better ? "new best" : "kept the best, halving the step");
 		if (better)
-			overall = d;
+			best_result = d;
 		else
 			step *= 0.5;
 	}
 
-	BaseGradientResult out = this->run_result;
-	const TourSolution& fin = overall.tour_solution;
-	out.x = overall.position.x();
-	out.y = overall.position.y();
-	out.z = overall.position.z();
-	out.tour_order = fin.viewpoint_order;
-	out.joint_solutions = fin.ik_poses;
-	out.total_weighted_cost =
-		fin.weighted_cost_sum - this->params.unreachable_penalty * (this->num_viewpoint - fin.num_reachable);
-	for (size_t k = 0; k < fin.ik_poses.size(); ++k)
-		out.total_joint_path_length += joint_travel::JointDistance(
-			k == 0 ? this->home_pose : fin.ik_poses[k - 1], fin.ik_poses[k], this->travel_joints);
-	out.num_reachable = fin.num_reachable;
-	out.ok = overall.all_reachable;
+	const TourSolution& final_tour = best_result.tour_solution;
+	this->run_result.x = best_result.position.x();
+	this->run_result.y = best_result.position.y();
+	this->run_result.z = best_result.position.z();
+	this->run_result.tour_order = final_tour.viewpoint_order;
+	this->run_result.joint_solutions = final_tour.ik_poses;
+	this->run_result.total_weighted_cost = final_tour.weighted_cost_sum - this->params.unreachable_penalty * (this->num_viewpoint - final_tour.num_reachable);
+	for (size_t k = 0; k < final_tour.ik_poses.size(); ++k)
+		this->run_result.total_joint_path_length += joint_travel::JointDistance(k == 0 ? this->home_pose : final_tour.ik_poses[k - 1], final_tour.ik_poses[k], this->counted_joint_indices);
+	
+		this->run_result.num_reachable = final_tour.num_reachable;
+	this->run_result.ok = best_result.all_reachable;
 
 	scene_geometry::MoveObject(
 		this->scene, scene_geometry::MakeIsometry(this->object_translation_nominal, this->object_rotation_nominal));
-	if (out.ok)
+	if (this->run_result.ok)
 		RCLCPP_INFO(
 			this->node->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned travel %.2f rad.",
-			out.x, out.y, out.z, n, fin.planned_cost);
+			this->run_result.x, this->run_result.y, this->run_result.z, this->num_viewpoint, final_tour.planned_cost);
 	else
 		RCLCPP_WARN(
-			this->node->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses.", out.x, out.y,
-			out.z, out.num_reachable, n);
-	return out;
+			this->node->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses.",
+			this->run_result.x, this->run_result.y, this->run_result.z, this->run_result.num_reachable,
+			this->num_viewpoint);
+	return this->run_result;
 }
 
 // Up to descent_num_restart tries to reach every viewpoint. Each try: a full solve at its start, then kinematic moves
@@ -162,7 +157,6 @@ BaseGradientResult ObjectPlacementOptimizer::Optimize()
 // Returns the best try.
 ReachAttemptResult ObjectPlacementOptimizer::ReachAllViewpoints(const Position& from)
 {
-	const int n = this->num_viewpoint;
 	const int num_tries = std::max(1, this->params.descent_num_restart);
 	ReachAttemptResult best_attempt;
 	for (int r = 0; r < num_tries && rclcpp::ok(); ++r)
@@ -183,7 +177,7 @@ ReachAttemptResult ObjectPlacementOptimizer::ReachAllViewpoints(const Position& 
 						this->node->get_logger(), "  reach attempt %d: %s with %d/%d reachable -- stuck", r + 1,
 						no_gain >= this->params.reach_patience ? "no viewpoint gained for reach_patience iterations"
 															   : "reach time limit hit",
-						this->current_tour.num_reachable, n);
+						this->current_tour.num_reachable, this->num_viewpoint);
 					break;
 				}
 				const int reached = this->current_tour.num_reachable;
@@ -206,9 +200,10 @@ ReachAttemptResult ObjectPlacementOptimizer::ReachAllViewpoints(const Position& 
 			"reach attempt %d/%d done: total cost=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, "
 			"%.4f, %.4f) m%s",
 			r + 1, num_tries, d.weighted_cost_sum,
-			d.tour_solution.straight_line_travel + this->params.unreachable_penalty * (n - d.tour_solution.num_reachable),
-			d.tour_solution.manipulability_sum, d.tour_solution.num_reachable, n, d.position.x(), d.position.y(),
-			d.position.z(), (r > 0 && improved) ? "  <-- new best" : "");
+			d.tour_solution.straight_line_travel +
+				this->params.unreachable_penalty * (this->num_viewpoint - d.tour_solution.num_reachable),
+			d.tour_solution.manipulability_sum, d.tour_solution.num_reachable, this->num_viewpoint, d.position.x(),
+			d.position.y(), d.position.z(), (r > 0 && improved) ? "  <-- new best" : "");
 		if (improved)
 			best_attempt = d;
 		if (best_attempt.all_reachable)
@@ -315,7 +310,7 @@ bool ObjectPlacementOptimizer::TryReachViewpoints(int iter)
 	}
 	this->PrepareReachViewpoints();
 	std::optional<MoveCandidate> step = this->LineSearch(-g_free / gnorm);
-	if (!step && this->params.room_then_reach && !this->baseline_tour.missed_viewpoints.empty())
+	if (!step && this->params.room_then_reach && !this->quick_solve_tour.missed_viewpoints.empty())
 		step = this->TryKinematicRoomMove();
 	std::optional<TourSolution> committed;
 	if (step)
@@ -350,7 +345,7 @@ void ObjectPlacementOptimizer::PrepareReachViewpoints()
 	this->fixed_order = this->params.lock_input_order ? &this->input_order
 		: (this->params.freeze_order && this->current_tour.all_reachable) ? &this->locked_order
 														 : nullptr;
-	this->baseline_tour = this->AddPlannedTravel(this->current_position, this->QuickSolveTour(this->current_position));
+	this->quick_solve_tour = this->AddPlannedTravel(this->current_position, this->QuickSolveTour(this->current_position));
 	this->run_result.num_inner_solves += 1;
 }
 
@@ -362,20 +357,20 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::LineSearch(const Eigen::V
 	for (int ls = 0; ls < this->params.max_line_search_iters; ++ls)
 	{
 		const Position cand = ClampToBounds(this->current_position + step * dir, this->params.bounds);
-		TourSolution probe = this->QuickSolveTour(cand, this->baseline_tour.num_reachable);
+		TourSolution probe = this->QuickSolveTour(cand, this->quick_solve_tour.num_reachable);
 		this->run_result.num_inner_solves += 1;
-		if (probe.num_reachable >= this->baseline_tour.num_reachable)
+		if (probe.num_reachable >= this->quick_solve_tour.num_reachable)
 			probe = this->AddPlannedTravel(cand, std::move(probe));	// plan only probes that could be accepted
 		if (this->params.trace_line_search)
 			RCLCPP_INFO(
 				this->node->get_logger(),
 				"    probe step=%.4f m abs (%.4f, %.4f, %.4f): reached %d vs %d here, cost %.2f vs %.2f here "
 				"(sum_w %.3f vs %.3f, planned %.2f vs %.2f)  lost:%s",
-				step, cand.x(), cand.y(), cand.z(), probe.num_reachable, this->baseline_tour.num_reachable,
-				probe.weighted_cost_sum, this->baseline_tour.weighted_cost_sum, probe.manipulability_sum,
-				this->baseline_tour.manipulability_sum, probe.planned_cost, this->baseline_tour.planned_cost,
-				FormatIndexList(GetLostViewpoints(this->baseline_tour, probe)).c_str());
-		if (this->IsBetter(probe, this->baseline_tour))
+				step, cand.x(), cand.y(), cand.z(), probe.num_reachable, this->quick_solve_tour.num_reachable,
+				probe.weighted_cost_sum, this->quick_solve_tour.weighted_cost_sum, probe.manipulability_sum,
+				this->quick_solve_tour.manipulability_sum, probe.planned_cost, this->quick_solve_tour.planned_cost,
+				FormatIndexList(GetLostViewpoints(this->quick_solve_tour, probe)).c_str());
+		if (this->IsBetter(probe, this->quick_solve_tour))
 			return MoveCandidate{std::move(probe), step, cand};
 		step *= this->params.step_shrink;
 	}
@@ -395,15 +390,15 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 	std::vector<std::optional<Position>> searched_at(static_cast<size_t>(this->num_viewpoint));
 	auto gained = [&](const TourSolution& probe)
 	{
-		return GetLostViewpoints(this->baseline_tour, probe).empty() &&
-			probe.num_reachable > this->baseline_tour.num_reachable;
+		return GetLostViewpoints(this->quick_solve_tour, probe).empty() &&
+			probe.num_reachable > this->quick_solve_tour.num_reachable;
 	};
 	auto trace = [&](const std::string& what, int target, const Position& cand, const TourSolution& probe,
 					 const std::vector<int>& lost, const std::string& verdict) {
 		if (this->params.trace_line_search)
 			RCLCPP_INFO(
 				this->node->get_logger(), "    %s for vp %d abs (%.4f, %.4f, %.4f): reached %d vs %d here  lost:%s -> %s",
-				what.c_str(), target, cand.x(), cand.y(), cand.z(), probe.num_reachable, this->baseline_tour.num_reachable,
+				what.c_str(), target, cand.x(), cand.y(), cand.z(), probe.num_reachable, this->quick_solve_tour.num_reachable,
 				FormatIndexList(lost).c_str(), verdict.c_str());
 	};
 	// Probes start each reached viewpoint's IK from its pose at the spot they move from.
@@ -413,7 +408,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 		this->run_result.num_inner_solves += 1;
 		return this->QuickSolveTour(cand, here_at.num_reachable);
 	};
-	std::vector<MissedViewpoint> targets = this->baseline_tour.missed_viewpoints;
+	std::vector<MissedViewpoint> targets = this->quick_solve_tour.missed_viewpoints;
 	std::sort(
 		targets.begin(), targets.end(),
 		[&](const MissedViewpoint& a, const MissedViewpoint& b)
@@ -427,7 +422,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 	{
 		const int target = miss.viewpoint_index;
 		Position at = this->current_position;
-		TourSolution here_at = this->baseline_tour;
+		TourSolution here_at = this->quick_solve_tour;
 		for (int round = 0; round < kMaxRounds && std::chrono::steady_clock::now() < this->reach_deadline; ++round)
 		{
 			// Aim: a full step at the target.
@@ -451,7 +446,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 			}
 
 			// Back up. A viewpoint near a limit first takes its roomiest other IK solution here (once per spot).
-			room_margins::ArmModel model = this->BuildArmModel(at, here_at);
+			room_margins::ArmModel model = this->BuildRoomMarginArmModel(at, here_at);
 			auto swap_pose = [&](int v, int tries) {
 				std::optional<Position>& last = searched_at[static_cast<size_t>(v)];
 				if (last && *last == at)
@@ -468,7 +463,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 			std::vector<bool> joined(static_cast<size_t>(this->num_viewpoint), false);
 			// Adds what ran out for viewpoint v on the move to `to`.
 			auto add_shortage = [&](int v, const Position& to) {
-				const room_margins::Shortage sh = this->GetShortage(v, model, at, to - at);
+				const room_margins::Shortage sh = this->GetMarginsThatRunOut(v, model, at, to - at);
 				short_margins.insert(short_margins.end(), sh.margins.begin(), sh.margins.end());
 				joined[static_cast<size_t>(v)] = true;
 				return " vp " + std::to_string(v) + ": " + sh.why + ";";
@@ -477,7 +472,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 			for (int v : lost)
 				swapped = swap_pose(v, kLostTries) || swapped;
 			if (swapped)
-				model = this->BuildArmModel(at, here_at);
+				model = this->BuildRoomMarginArmModel(at, here_at);
 			std::string why;
 			for (int v : lost)
 				why += add_shortage(v, cand);
@@ -497,7 +492,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 				for (int v : squeezed)
 					swapped_any = swap_pose(v, kSqueezedTries) || swapped_any;
 				if (swapped_any)
-					model = this->BuildArmModel(at, here_at);
+					model = this->BuildRoomMarginArmModel(at, here_at);
 				for (int v : squeezed)
 				{
 					const std::vector<room_margins::Margin> mine = room_margins::MarginsOf(model, v);
@@ -541,7 +536,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 				for (int v : back_lost)
 				{
 					if (swap_pose(v, kLostTries))
-						model = this->BuildArmModel(at, here_at);
+						model = this->BuildRoomMarginArmModel(at, here_at);
 					room_why += add_shortage(v, back);
 				}
 				trace(what, target, back, rp, back_lost, "lost, add what ran out (" + room_why + " ) and replan");
@@ -622,9 +617,9 @@ bool ObjectPlacementOptimizer::CommitMove(
 // a quarter of it, whichever first raises the score.
 std::optional<Position> ObjectPlacementOptimizer::GetReachabilityMapStep(const Position& from, double step, int outer)
 {
-	if (!this->reachability_map_tried)
+	if (!this->reachability_map_load_attempted)
 	{
-		this->reachability_map_tried = true;
+		this->reachability_map_load_attempted = true;
 		ReachabilityMap::Options options;
 		options.samples = this->params.reach_map_samples;
 		options.self_collision = this->params.reach_map_self_collision;
@@ -718,7 +713,7 @@ Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, c
 			break;
 		this->ik_start_poses = GetIkStartPoses(this->current_tour, this->home_pose, this->num_viewpoint);
 		this->locked_order = this->current_tour.viewpoint_order;
-		this->baseline_tour = this->QuickSolveTour(this->current_position, p);
+		this->quick_solve_tour = this->QuickSolveTour(this->current_position, p);
 		std::optional<MoveCandidate> step;
 		double size = this->params.initial_step;
 		for (int ls = 0; ls < this->params.max_line_search_iters && !step; ++ls, size *= this->params.step_shrink)
@@ -729,8 +724,8 @@ Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, c
 			if (this->params.trace_line_search)
 				RCLCPP_INFO(
 					this->node->get_logger(), "    jump probe step=%.4f m: reached %d, score %.4f vs %.4f here", size,
-					probe.num_reachable, score(probe), score(this->baseline_tour));
-			if (score(probe) > score(this->baseline_tour))
+					probe.num_reachable, score(probe), score(this->quick_solve_tour));
+			if (score(probe) > score(this->quick_solve_tour))
 				step = MoveCandidate{std::move(probe), size, cand};
 		}
 		if (!step)
@@ -797,10 +792,10 @@ void ObjectPlacementOptimizer::RefineBestTour()
 	{
 		const Joints& a = k == 0 ? this->home_pose : s.ik_poses[k - 1];
 		const Joints& b = s.ik_poses[k];
-		if (joint_travel::MaxJointTurn(a, b, this->travel_joints) <= this->params.reconfig_threshold)
+		if (joint_travel::MaxJointTurn(a, b, this->counted_joint_indices) <= this->params.reconfig_threshold)
 			continue;
 		size_t jmax = 0;
-		for (int j : this->travel_joints)
+		for (int j : this->counted_joint_indices)
 			if (std::abs(b[static_cast<size_t>(j)] - a[static_cast<size_t>(j)]) > std::abs(b[jmax] - a[jmax]))
 				jmax = static_cast<size_t>(j);
 		char buf[64];
@@ -821,9 +816,9 @@ void ObjectPlacementOptimizer::RefineBestTour()
 		this->best_in_attempt.position.y(), this->best_in_attempt.position.z(), start.straight_line_travel,
 		s.straight_line_travel, start.planned_cost, s.planned_cost, reordered, s.viewpoint_order.size(),
 		joint_travel::CountReconfigs(
-			PrependHomePose(this->home_pose, start.ik_poses), this->params.reconfig_threshold, this->travel_joints),
+			PrependHomePose(this->home_pose, start.ik_poses), this->params.reconfig_threshold, this->counted_joint_indices),
 		joint_travel::CountReconfigs(
-			PrependHomePose(this->home_pose, s.ik_poses), this->params.reconfig_threshold, this->travel_joints),
+			PrependHomePose(this->home_pose, s.ik_poses), this->params.reconfig_threshold, this->counted_joint_indices),
 		where.empty() ? " none" : where.c_str());
 }
 
@@ -864,7 +859,7 @@ std::vector<std::vector<Joints>> ObjectPlacementOptimizer::CollectIkPoses(
 				continue;
 			this->robot_state.copyJointGroupPositions(this->joint_group, q);
 			const bool dup = std::any_of(sols.begin(), sols.end(), [&](const Joints& s) {
-				return joint_travel::JointDistance(s, q, this->travel_joints) < 0.1;
+				return joint_travel::JointDistance(s, q, this->counted_joint_indices) < 0.1;
 			});
 			if (!dup)
 				sols.push_back(q);
@@ -941,7 +936,7 @@ TourSolution ObjectPlacementOptimizer::SolveTour(
 
 	const double k = p.manipulability_limit_sharpness;
 	gtsp::Solver tour_solver(std::move(ik), this->home_pose, p.edge_weights, p.gtsp_two_opt_rounds);
-	tour_solver.SetTravelJoints(this->travel_joints);
+	tour_solver.SetTravelJoints(this->counted_joint_indices);
 	gtsp::Tour tour = fixed_order ? tour_solver.SolveFixedOrder(*fixed_order)
 		: initial_order			  ? tour_solver.Solve(*initial_order)
 								  : tour_solver.Solve();
@@ -951,7 +946,7 @@ TourSolution ObjectPlacementOptimizer::SolveTour(
 	out.num_reachable = static_cast<int>(out.viewpoint_order.size());
 	out.all_reachable = out.num_reachable == this->num_viewpoint;
 	out.straight_line_travel =
-		joint_travel::TravelCost(PrependHomePose(this->home_pose, out.ik_poses), p.edge_weights, this->travel_joints);
+		joint_travel::TravelCost(PrependHomePose(this->home_pose, out.ik_poses), p.edge_weights, this->counted_joint_indices);
 
 	// Comfort: manipulability over the tour poses (and the misses' closest poses, if included).
 	std::vector<double> ws;
@@ -1060,7 +1055,8 @@ double ObjectPlacementOptimizer::ComputePlannedTravel(const Position& at, const 
 	for (size_t k = 0; k < sol.ik_poses.size(); ++k)
 		total += (k < edges.size() && edges[k] >= 0.0)
 			? edges[k]
-			: joint_travel::JointDistance(k == 0 ? this->home_pose : sol.ik_poses[k - 1], sol.ik_poses[k], this->travel_joints) +
+			: joint_travel::JointDistance(
+				  k == 0 ? this->home_pose : sol.ik_poses[k - 1], sol.ik_poses[k], this->counted_joint_indices) +
 				this->params.unreachable_penalty;
 	return total;
 }
@@ -1178,7 +1174,7 @@ Eigen::Vector3d ObjectPlacementOptimizer::ComputeCostGradient(const TourSolution
 		const Joints& qa = i == 0 ? this->home_pose : sol.ik_poses[i - 1];
 		const Joints& qb = sol.ik_poses[i];
 		Eigen::VectorXd diff = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(dof));
-		for (int j : this->travel_joints)
+		for (int j : this->counted_joint_indices)
 			diff(j) = qa[static_cast<size_t>(j)] - qb[static_cast<size_t>(j)];
 		const Eigen::MatrixXd d_diff = (i == 0 ? fixed : dq[i - 1]) - dq[i];
 		const double nrm = diff.norm();
@@ -1220,7 +1216,7 @@ Eigen::Vector3d ObjectPlacementOptimizer::ComputeNumericCostGradient()
 			cost -= this->params.manipulability_weight *
 				manipulability::Value(this->robot_state, this->joint_group, this->tool_link, qs[i], k);
 			if (prev_ok)
-				cost += joint_travel::EdgeCost(*prev, qs[i], this->params.edge_weights, this->travel_joints);
+				cost += joint_travel::EdgeCost(*prev, qs[i], this->params.edge_weights, this->counted_joint_indices);
 			prev = &qs[i];
 			prev_ok = true;
 		}
@@ -1278,7 +1274,7 @@ Eigen::Vector3d ObjectPlacementOptimizer::GetMoveDirectionToCloseGap(
 	return aim.norm() < 1e-9 ? Eigen::Vector3d::Zero() : Eigen::Vector3d(aim.normalized());
 }
 
-room_margins::ArmModel ObjectPlacementOptimizer::BuildArmModel(const Position& at, const TourSolution& sol)
+room_margins::ArmModel ObjectPlacementOptimizer::BuildRoomMarginArmModel(const Position& at, const TourSolution& sol)
 {
 	this->MoveObjectTo(at);
 	room_margins::ArmModel model;
@@ -1292,7 +1288,7 @@ room_margins::ArmModel ObjectPlacementOptimizer::BuildArmModel(const Position& a
 		const size_t v = static_cast<size_t>(sol.viewpoint_order[k]);
 		model.q[v] = q;
 		model.dq_dp[v] = scene_geometry::DampedPinv(this->GetToolJacobian(q), this->params.jacobian_damping).leftCols<3>();
-		const std::vector<room_margins::Margin> m = this->GetViewpointMargins(sol.viewpoint_order[k], q);
+		const std::vector<room_margins::Margin> m = this->GetIkPoseMargins(sol.viewpoint_order[k], q);
 		model.margins.insert(model.margins.end(), m.begin(), m.end());
 	}
 	return model;
@@ -1300,7 +1296,7 @@ room_margins::ArmModel ObjectPlacementOptimizer::BuildArmModel(const Position& a
 
 // Viewpoint v's margins at pose q (object already placed): joint limits, stretch, collision pairs within
 // 10 cm; slopes with the arm following the viewpoint.
-std::vector<room_margins::Margin> ObjectPlacementOptimizer::GetViewpointMargins(int v, const Joints& q)
+std::vector<room_margins::Margin> ObjectPlacementOptimizer::GetIkPoseMargins(int v, const Joints& q)
 {
 	const double kJointFloor = 0.05;	 // rad
 	const double kStretchFloor = 0.02;
@@ -1356,72 +1352,21 @@ std::vector<room_margins::Margin> ObjectPlacementOptimizer::GetViewpointMargins(
 	return margins;
 }
 
-Joints ObjectPlacementOptimizer::PredictPose(const room_margins::ArmModel& model, int v, const Eigen::Vector3d& d)
-{
-	Joints q = model.q[static_cast<size_t>(v)];
-	const Eigen::VectorXd dq = model.dq_dp[static_cast<size_t>(v)] * d;
-	for (size_t i = 0; i < q.size(); ++i)
-		q[i] += dq(static_cast<Eigen::Index>(i));
-	return q;
-}
-
-// Newton steps from q onto viewpoint v's exact pose at `at` (limits ignored); empty if it doesn't converge.
-std::optional<Joints> ObjectPlacementOptimizer::SolveExactPose(int v, const Position& at, Joints q)
-{
-	const Eigen::Isometry3d target = scene_geometry::Translation(at) * this->viewpoints[static_cast<size_t>(v)];
-	for (int it = 0; it < 50; ++it)
-	{
-		this->robot_state.setJointGroupPositions(this->joint_group, q);
-		this->robot_state.update();
-		const scene_geometry::Vector6d e =
-			scene_geometry::PoseError(target, this->robot_state.getGlobalLinkTransform(this->tool_link));
-		if (e.head<3>().norm() < 1e-4 && e.tail<3>().norm() < 1e-3)
-			return q;
-		const Eigen::VectorXd dq = scene_geometry::DampedPinv(this->GetToolJacobian(q), this->params.jacobian_damping) * e;
-		for (size_t i = 0; i < q.size(); ++i)
-			q[i] += dq(static_cast<Eigen::Index>(i));
-	}
-	return std::nullopt;
-}
-
-// What ran out for viewpoint v, lost by moving the object by d from `at`: its exact pose after the move is measured,
-// and its margins under their floor there are returned (as modeled at `at`). No exact pose: out of reach (the stretch
-// margin). Nothing found: the margins predicted to run out along d.
-room_margins::Shortage ObjectPlacementOptimizer::GetShortage(
+// What ran out for viewpoint v, lost by moving the object by d from `at`: its margins that, by their slopes, run out
+// within the move.
+room_margins::Shortage ObjectPlacementOptimizer::GetMarginsThatRunOut(
 	int v, const room_margins::ArmModel& model, const Position& at, const Eigen::Vector3d& d)
 {
-	const Position cand = ClampToBounds(at + d, this->params.bounds);
-	const Eigen::Vector3d moved = cand - at;
-	const std::optional<Joints> q = this->SolveExactPose(v, cand, this->PredictPose(model, v, moved));
+	const Eigen::Vector3d moved = ClampToBounds(at + d, this->params.bounds) - at;
 	room_margins::Shortage out;
-	auto take = [&](const std::string& name) {
-		for (const room_margins::Margin& m : model.margins)
-			if (m.viewpoint_index == v && m.name == name)
-				out.margins.push_back(m);
-	};
-	if (!q)
-	{
-		out.why = "out of reach";
-		take("stretch");
-	}
-	else
-	{
-		this->MoveObjectTo(cand);
-		for (const room_margins::Margin& after : this->GetViewpointMargins(v, *q))
-			if (after.value < after.floor)
-			{
-				out.why += (out.why.empty() ? "" : ", ") + after.name;
-				take(after.name);
-			}
-		this->MoveObjectTo(at);
-	}
-	if (out.margins.empty())
-	{
-		out.why += out.why.empty() ? "predicted" : " (predicted)";
-		for (const room_margins::Margin& m : model.margins)
-			if (m.viewpoint_index == v && room_margins::RoomAlong({m}, moved.normalized()) < moved.norm())
-				out.margins.push_back(m);
-	}
+	for (const room_margins::Margin& m : model.margins)
+		if (m.viewpoint_index == v && room_margins::RoomAlong({m}, moved.normalized()) < moved.norm())
+		{
+			out.margins.push_back(m);
+			out.why += (out.why.empty() ? "" : ", ") + m.name;
+		}
+	if (out.why.empty())
+		out.why = "nothing predicted";
 	return out;
 }
 
@@ -1455,7 +1400,7 @@ std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(
 	std::optional<Joints> roomiest;
 	std::string how;
 	auto consider = [&](const Joints& q, const char* kind) {
-		const double score = room_margins::Tightest(this->GetViewpointMargins(v, q));
+		const double score = room_margins::Tightest(this->GetIkPoseMargins(v, q));
 		if (score > best_score)
 		{
 			best_score = score;
@@ -1484,13 +1429,15 @@ std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(
 		const Eigen::VectorXd dq = (i + 1) * nudge_step * slide.normalized();
 		for (size_t j = 0; j < q.size(); ++j)
 			q[j] += dq(static_cast<Eigen::Index>(j));
-		const std::optional<Joints> exact = this->SolveExactPose(v, at, q);
-		if (!exact)
+		// Back onto the viewpoint: one IK attempt from the nudged pose stays near it (collision-free, within limits).
+		this->robot_state.setJointGroupPositions(this->joint_group, q);
+		if (!ik_sampling::ExactIk(
+				this->robot_state, this->joint_group, target, 1, this->params.ik_timeout, this->state_validity))
 			continue;
-		this->robot_state.setJointGroupPositions(this->joint_group, *exact);
-		if (this->robot_state.satisfiesBounds(this->joint_group) &&
-			scene_geometry::IsStateValid(this->scene, &this->robot_state, this->joint_group, exact->data()))
-			consider(*exact, "nudged");
+		Joints exact;
+		this->robot_state.copyJointGroupPositions(this->joint_group, exact);
+		if (this->robot_state.satisfiesBounds(this->joint_group))
+			consider(exact, "nudged");
 	}
 	if (this->params.trace_line_search)
 		RCLCPP_INFO(

@@ -24,8 +24,8 @@ struct BaseGradientBounds
 struct BaseGradientParams
 {
 	BaseGradientBounds bounds;
-	// Absolute start position (m, base frame), NaN = nominal.
-	double initial_x = NAN, initial_y = NAN, initial_z = NAN;
+	// Absolute start position (m, base frame).
+	double initial_x = 0.5, initial_y = 0.0, initial_z = 0.15;
 
 	// Tour edge cost: joint distance and largest single-joint turn
 	joint_travel::EdgeWeights edge_weights;

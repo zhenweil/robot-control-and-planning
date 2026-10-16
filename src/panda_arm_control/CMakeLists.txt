@@ -116,6 +116,9 @@ add_executable(reachability_climb
 
 # Random-sampling placement baseline (separate from base_gradient).
 add_executable(random_placement
+	src/gtsp.cpp
+	src/ik_sampling.cpp
+	src/joint_travel.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
 	src/random_placement_node.cpp

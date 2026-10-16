@@ -1,7 +1,6 @@
-// Random-sampling baseline for object placement: draws object positions uniformly in a box and keeps the one that
-// reaches the most tour viewpoints (a viewpoint counts as reached if it has a collision-free IK solution). Stops at
-// the first position that reaches every viewpoint, or when the time / sample budget runs out. Independent of the
-// base_gradient method: own scene setup, own IK check.
+// Random-sampling baseline for object placement: draws object positions uniformly in a box until the time / sample
+// budget runs out. At each, the tour is solved like base_gradient (IK poses, GTSP, OMPL-planned travel); keeps the one
+// reaching the most viewpoints, then the least planned travel, and refines it. Own node, shares only the tour modules.
 
 #include <algorithm>
 #include <chrono>
@@ -16,6 +15,7 @@
 #include <Eigen/Geometry>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <json/json.h>
+#include <limits>
 #include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 #include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_state/robot_state.h>
@@ -24,11 +24,26 @@
 #include <rclcpp/rclcpp.hpp>
 #include <shape_msgs/msg/solid_primitive.hpp>
 
+#include "panda_arm_control/gtsp.hpp"
+#include "panda_arm_control/ik_sampling.hpp"
+#include "panda_arm_control/joint_travel.hpp"
 #include "panda_arm_control/real_cost_planning.hpp"
 #include "panda_arm_control/viewpoint_io.hpp"
 
 namespace
 {
+
+using Joints = std::vector<double>;
+
+// The tour at one sampled position. planned_travel stays infinite unless every viewpoint is reached.
+struct PlacementTour
+{
+	Eigen::Vector3d position = Eigen::Vector3d::Zero();
+	int num_reachable = -1;
+	std::vector<int> viewpoint_order;
+	std::vector<Joints> ik_poses;  // parallel to viewpoint_order
+	double planned_travel = std::numeric_limits<double>::infinity();
+};
 
 geometry_msgs::msg::Pose ToPoseMsg(const Eigen::Isometry3d& t)
 {
@@ -132,72 +147,159 @@ public:
 			planning_scene_monitor::LockedPlanningSceneRO scene(psm);
 			return scene->isStateValid(*s, g->getName());
 		};
-		random_numbers::RandomNumberGenerator ik_rng(static_cast<boost::uint32_t>(std::max(1, seed)));
-		// Viewpoints with a collision-free IK solution: the home pose first, then random starts, ik_attempts in all.
-		auto count_reached = [&](const Eigen::Vector3d& at) {
-			const Eigen::Isometry3d shift(Eigen::Translation3d(at - nominal));
+		// Tour solve settings: base_gradient's parameter names and defaults, so one params file serves both.
+		const int max_ik_solutions = std::max(1, static_cast<int>(param<int64_t>("bg_max_solutions_per_candidate", 4)));
+		const int ik_retries_per_point = static_cast<int>(param<int64_t>("bg_ik_retries_per_point", 14));
+		const int num_tour_solves = std::max(1, static_cast<int>(param<int64_t>("bg_gtsp_num_restart", 2)));
+		const int two_opt_rounds = static_cast<int>(param<int64_t>("bg_gtsp_two_opt_rounds", 5));
+		const int refine_solves = static_cast<int>(param<int64_t>("bg_refine_solves", 0));
+		const int refine_ik_solutions = static_cast<int>(param<int64_t>("bg_refine_ik_solutions", 8));
+		const double planning_time = param<double>("bg_real_cost_planning_time", 0.5);
+		const int planning_attempts = static_cast<int>(param<int64_t>("bg_real_cost_attempts", 3));
+		const double unreachable_penalty = param<double>("bg_unreachable_penalty", 50.0);
+		joint_travel::EdgeWeights edge_weights;
+		edge_weights.joint_distance = param<double>("bg_joint_distance_weight", 1.0);
+		edge_weights.max_turn = param<double>("bg_max_joint_deviation_weight", 1.0);
+		// All joints but the last, which only spins the camera.
+		const std::vector<int> travel_joints = joint_travel::AllJoints(static_cast<int>(home.size()) - 1);
+
+		// IK poses per viewpoint, collected like base_gradient: one from the seed, the rest from random starts.
+		auto collect_ik_poses = [&](const Eigen::Vector3d& position, const std::vector<Joints>& seeds, int max_solutions)
+		{
+			const Eigen::Isometry3d shift(Eigen::Translation3d(position - nominal));
 			Eigen::Isometry3d object_pose = Eigen::Isometry3d::Identity();
-			object_pose.translation() = at;
+			object_pose.translation() = position;
 			object_pose.linear() = rotation;
 			MoveObject(psm, frame, object_pose);
-			int reached = 0;
-			for (const Eigen::Isometry3d& tcp : tour)
+			std::vector<std::vector<Joints>> ik_poses(tour.size());
+			for (size_t v = 0; v < tour.size(); ++v)
 			{
-				const geometry_msgs::msg::Pose target = ToPoseMsg(shift * tcp);
-				state.setJointGroupPositions(jmg, home);
-				for (int a = 0; a < ik_attempts; ++a)
+				const geometry_msgs::msg::Pose target = ToPoseMsg(shift * tour[v]);
+				Joints pose;
+				state.setJointGroupPositions(jmg, seeds[v]);
+				if (ik_sampling::ExactIk(state, jmg, target, ik_attempts, 0.0, valid))
 				{
-					if (a > 0)
-						state.setToRandomPositions(jmg, ik_rng);
-					if (state.setFromIK(jmg, target, "tool0", 1e-9, valid))
-					{
-						++reached;
-						break;
-					}
+					state.copyJointGroupPositions(jmg, pose);
+					ik_poses[v].push_back(pose);
+				}
+				for (int attempt = 0; attempt < max_solutions * 3 + ik_retries_per_point &&
+					 static_cast<int>(ik_poses[v].size()) < max_solutions;
+					 ++attempt)
+				{
+					if (ik_poses[v].empty() && attempt >= 4)
+						break;	// out of reach: every miss costs a full IK call
+					state.setToRandomPositions(jmg, ik_sampling::SeededRng());
+					if (!ik_sampling::ExactIk(state, jmg, target, ik_attempts, 0.0, valid))
+						continue;
+					state.copyJointGroupPositions(jmg, pose);
+					const bool duplicate = std::any_of(ik_poses[v].begin(), ik_poses[v].end(), [&](const Joints& other) {
+						return joint_travel::JointDistance(other, pose, travel_joints) < 0.1;
+					});
+					if (!duplicate)
+						ik_poses[v].push_back(pose);
 				}
 			}
-			return reached;
+			return ik_poses;
+		};
+
+		// Best of num_solves GTSP tours (most reached, then straight-line travel); planned travel only if all reached.
+		auto solve_tour = [&](const Eigen::Vector3d& position, const std::vector<Joints>& seeds, int max_solutions,
+							  int num_solves, const std::vector<int>& initial_order)
+		{
+			PlacementTour best_tour;
+			double best_straight_line_travel = std::numeric_limits<double>::infinity();
+			for (int s = 0; s < num_solves; ++s)
+			{
+				gtsp::Solver tour_solver(collect_ik_poses(position, seeds, max_solutions), home, edge_weights, two_opt_rounds);
+				tour_solver.SetTravelJoints(travel_joints);
+				const gtsp::Tour gtsp_tour = tour_solver.Solve(initial_order);
+				const int num_reachable = static_cast<int>(gtsp_tour.order.size());
+				if (num_reachable < best_tour.num_reachable ||
+					(num_reachable == best_tour.num_reachable && gtsp_tour.cost >= best_straight_line_travel))
+					continue;
+				best_straight_line_travel = gtsp_tour.cost;
+				best_tour.position = position;
+				best_tour.num_reachable = num_reachable;
+				best_tour.viewpoint_order = gtsp_tour.order;
+				best_tour.ik_poses = gtsp_tour.poses;
+			}
+			if (best_tour.num_reachable < n)
+				return best_tour;
+			const std::vector<double> edges = PlanTourJointPathLengths(
+				shared_from_this(), model, psm, best_tour.ik_poses, home, group_name, planning_time, planning_attempts,
+				/*count_last_joint=*/false);
+			best_tour.planned_travel = 0.0;
+			for (size_t k = 0; k < best_tour.ik_poses.size(); ++k)
+				best_tour.planned_travel += (k < edges.size() && edges[k] >= 0.0)
+					? edges[k]
+					: joint_travel::JointDistance(k == 0 ? home : best_tour.ik_poses[k - 1], best_tour.ik_poses[k], travel_joints) +
+						unreachable_penalty;
+			return best_tour;
+		};
+		auto is_better = [](const PlacementTour& a, const PlacementTour& b)
+		{
+			return a.num_reachable > b.num_reachable ||
+				(a.num_reachable == b.num_reachable && a.planned_travel < b.planned_travel);
 		};
 
 		std::mt19937 rng(static_cast<unsigned int>(seed));
 		std::uniform_real_distribution<double> ux(lo.x(), hi.x()), uy(lo.y(), hi.y()), uz(lo.z(), hi.z());
 		const auto t0 = std::chrono::steady_clock::now();
 		auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
-		Eigen::Vector3d best = nominal;
-		int best_reached = -1, samples = 0;
+		const std::vector<Joints> home_seeds(tour.size(), home);
+		PlacementTour best;
+		best.position = nominal;
+		int samples = 0, samples_reaching_all = 0;
 		while (rclcpp::ok() && elapsed() < time_budget && (max_samples <= 0 || samples < max_samples))
 		{
 			const Eigen::Vector3d at(ux(rng), uy(rng), uz(rng));
-			const int reached = count_reached(at);
+			ik_sampling::ReseedRng(seed + samples);
+			const PlacementTour sample_tour = solve_tour(at, home_seeds, max_ik_solutions, num_tour_solves, {});
 			++samples;
-			if (reached > best_reached)
-			{
-				best_reached = reached;
-				best = at;
-				RCLCPP_INFO(get_logger(), "sample %d (%.1f s): abs (%.4f, %.4f, %.4f) m reaches %d/%d  <-- best",
-					samples, elapsed(), at.x(), at.y(), at.z(), reached, n);
-			}
-			if (best_reached == n)
-				break;
+			samples_reaching_all += sample_tour.num_reachable == n ? 1 : 0;
+			if (!is_better(sample_tour, best))
+				continue;
+			best = sample_tour;
+			RCLCPP_INFO(get_logger(), "sample %d (%.1f s): abs (%.4f, %.4f, %.4f) m reaches %d/%d, planned travel %.2f rad  <-- best",
+				samples, elapsed(), at.x(), at.y(), at.z(), best.num_reachable, n, best.planned_travel);
 		}
+		const double sampling_secs = elapsed();
+		RCLCPP_INFO(get_logger(), "%d samples in %.1f s, %d reach all viewpoints", samples, sampling_secs, samples_reaching_all);
+
+		// Refine the best like base_gradient: more full solves there, seeded from its poses, with more IK choices.
+		const double travel_before_refine = best.planned_travel;
+		for (int i = 0; i < refine_solves && best.num_reachable == n && rclcpp::ok(); ++i)
+		{
+			std::vector<Joints> seeds = home_seeds;
+			for (size_t k = 0; k < best.viewpoint_order.size(); ++k)
+				seeds[static_cast<size_t>(best.viewpoint_order[k])] = best.ik_poses[k];
+			const PlacementTour refined = solve_tour(best.position, seeds, refine_ik_solutions, 1, best.viewpoint_order);
+			if (is_better(refined, best))
+				best = refined;
+		}
+		if (refine_solves > 0 && best.num_reachable == n)
+			RCLCPP_INFO(get_logger(), "refined %d solves: planned travel %.2f -> %.2f rad", refine_solves,
+				travel_before_refine, best.planned_travel);
 
 		const double secs = elapsed();
-		if (best_reached == n)
-			RCLCPP_INFO(get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses (%d samples, %.1f s).",
-				best.x(), best.y(), best.z(), n, samples, secs);
+		if (best.num_reachable == n)
+			RCLCPP_INFO(get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned travel %.2f rad (%d samples, %.1f s).",
+				best.position.x(), best.position.y(), best.position.z(), n, best.planned_travel, samples, secs);
 		else
 			RCLCPP_WARN(get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses (%d samples, %.1f s).",
-				best.x(), best.y(), best.z(), std::max(0, best_reached), n, samples, secs);
+				best.position.x(), best.position.y(), best.position.z(), std::max(0, best.num_reachable), n, samples, secs);
 
 		std::filesystem::create_directories(output_dir);
 		Json::Value out;
-		out["ok"] = best_reached == n;
-		out["num_reachable"] = best_reached;
+		out["ok"] = best.num_reachable == n;
+		out["num_reachable"] = std::max(0, best.num_reachable);
 		out["num_total"] = n;
-		out["x"] = best.x();
-		out["y"] = best.y();
-		out["z"] = best.z();
+		out["x"] = best.position.x();
+		out["y"] = best.position.y();
+		out["z"] = best.position.z();
+		out["planned_travel"] = best.num_reachable == n ? best.planned_travel : -1.0;
 		out["samples"] = samples;
+		out["samples_reaching_all"] = samples_reaching_all;
 		out["seconds"] = secs;
 		std::ofstream(output_dir + "/random_placement_result.json") << out;
 	}
