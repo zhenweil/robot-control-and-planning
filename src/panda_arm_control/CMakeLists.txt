@@ -84,8 +84,15 @@ add_executable(bstar_placement
 
 add_executable(base_gradient
 	src/base_gradient.cpp
+	src/closest_ik.cpp
 	src/gtsp.cpp
+	src/ik_sampling.cpp
 	src/joint_travel.cpp
+	src/manipulability.cpp
+	src/marker_utils.cpp
+	src/object_placement_optimizer.cpp
+	src/room_margins.cpp
+	src/scene_geometry.cpp
 	src/reachability_map.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp

@@ -19,6 +19,7 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include "panda_arm_control/base_gradient.hpp"
+#include "panda_arm_control/object_placement_optimizer.hpp"
 #include "panda_arm_control/real_cost_planning.hpp"
 #include "panda_arm_control/viewpoint_io.hpp"
 #include "panda_arm_control/viewpoint_types.hpp"
@@ -453,8 +454,8 @@ private:
 		bg.initial_y = this->params.bg_initial_y;
 		bg.initial_z = this->params.bg_initial_z;
 		bg.rot_metric_scale = this->params.bg_rot_metric_scale;
-		bg.joint_distance_weight = this->params.bg_joint_distance_weight;
-		bg.max_joint_deviation_weight = this->params.bg_max_joint_deviation_weight;
+		bg.edge_weights.joint_distance = this->params.bg_joint_distance_weight;
+		bg.edge_weights.max_turn = this->params.bg_max_joint_deviation_weight;
 		bg.manipulability_weight = this->params.bg_manipulability_weight;
 		bg.miss_gap_weight = this->params.bg_miss_gap_weight;
 		bg.manipulability_include_missed = this->params.bg_manipulability_include_missed;
@@ -521,9 +522,10 @@ private:
 			this->get_logger(), "Descending the object position (x, y, z) for a %zu-pose tour...",
 			tour_tcp_poses.size());
 
-		BaseGradientResult result = SolveBaseGradient(
+		object_placement::ObjectPlacementOptimizer optimizer(
 			this->shared_from_this(), this->robot_model, local_scene, this->params.group_name, object_translation_world,
 			object_rotation_world, tour_tcp_poses, this->home_joint_values, bg);
+		BaseGradientResult result = optimizer.Optimize();
 
 		ExportBaseGradientResult(this->params.output_dir, result);
 

@@ -46,7 +46,6 @@ public:
 	Tour SolveFixedOrder(const std::vector<int>& order) const;
 
 private:
-	const joint_travel::Joints& PoseOf(const Stop& stop) const;
 	// Cost of the move into `to`; from = nullptr means from the start pose.
 	double EdgeCost(const Stop* from, const Stop& to) const;
 	double TourCost(const std::vector<Stop>& stops) const;

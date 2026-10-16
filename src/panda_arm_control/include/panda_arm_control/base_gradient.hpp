@@ -11,6 +11,8 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 #include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 
+#include "panda_arm_control/joint_travel.hpp"
+
 // Absolute object position bounds (m, base frame). The object keeps its nominal orientation.
 struct BaseGradientBounds
 {
@@ -26,8 +28,7 @@ struct BaseGradientParams
 	double initial_x = NAN, initial_y = NAN, initial_z = NAN;
 
 	// Tour edge cost: joint distance and largest single-joint turn
-	double joint_distance_weight = 1.0;
-	double max_joint_deviation_weight = 1.0;
+	joint_travel::EdgeWeights edge_weights;
 
 	// Comfort: cost -= weight * sum of manipulability sqrt(det(J J^T))
 	double manipulability_weight = 0.0;
@@ -153,18 +154,7 @@ struct BaseGradientResult
 	std::vector<std::array<double, 5>> history;
 };
 
-// Finds the object position (abs x, y, z) that minimizes tour joint travel, alternating
-// GTSP solves with gradient-descent steps; restores the object's scene pose before returning.
-BaseGradientResult SolveBaseGradient(
-	const rclcpp::Node::SharedPtr& node,
-	const moveit::core::RobotModelConstPtr& robot_model,
-	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
-	const std::string& group_name,
-	const Eigen::Vector3d& object_translation_nominal,
-	const Eigen::Matrix3d& object_rotation_nominal,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal,
-	const std::vector<double>& start_reference_joints,
-	const BaseGradientParams& params);
+// The search itself is object_placement::ObjectPlacementOptimizer (object_placement_optimizer.hpp).
 
 // Writes base_gradient_result.json to output_dir.
 void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientResult& result);

@@ -45,7 +45,7 @@ Tour Solver::Solve(const std::vector<int>& initial_order) const
 	for (const Stop& stop : best)
 	{
 		tour.order.push_back(stop.viewpoint);
-		tour.poses.push_back(this->PoseOf(stop));
+		tour.poses.push_back(this->viewpoint_ik_poses[static_cast<size_t>(stop.viewpoint)][static_cast<size_t>(stop.pose)]);
 	}
 	tour.cost = this->TourCost(best);
 	return tour;
@@ -104,15 +104,14 @@ Tour Solver::SolveFixedOrder(const std::vector<int>& order_in) const
 	return tour;
 }
 
-const joint_travel::Joints& Solver::PoseOf(const Stop& stop) const
-{
-	return this->viewpoint_ik_poses[static_cast<size_t>(stop.viewpoint)][static_cast<size_t>(stop.pose)];
-}
-
 double Solver::EdgeCost(const Stop* from, const Stop& to) const
 {
-	return joint_travel::EdgeCost(
-		from ? this->PoseOf(*from) : this->start_pose, this->PoseOf(to), this->edge, this->travel_joints);
+	const joint_travel::Joints& to_pose =
+		this->viewpoint_ik_poses[static_cast<size_t>(to.viewpoint)][static_cast<size_t>(to.pose)];
+	const joint_travel::Joints& from_pose = from
+		? this->viewpoint_ik_poses[static_cast<size_t>(from->viewpoint)][static_cast<size_t>(from->pose)]
+		: this->start_pose;
+	return joint_travel::EdgeCost(from_pose, to_pose, this->edge, this->travel_joints);
 }
 
 double Solver::TourCost(const std::vector<Stop>& stops) const
