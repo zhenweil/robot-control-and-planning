@@ -90,15 +90,15 @@ def generate_launch_description():
     )
     ik_timeout = ParameterValue(LaunchConfiguration("ik_timeout"), value_type=float)
 
-    # Descent length; descent_num_restart:=1 max_outer_iterations:=0 just solves the tour at the start position.
+    # Descent length; descent_num_restart:=1 max_kinematic_moves:=0 just solves the tour at the start position.
     descent_num_restart_arg = DeclareLaunchArgument(
         "descent_num_restart", default_value="6", description="Number of descents (restarts)."
     )
     descent_num_restart = ParameterValue(LaunchConfiguration("descent_num_restart"), value_type=int)
-    max_outer_iterations_arg = DeclareLaunchArgument(
-        "max_outer_iterations", default_value="50", description="Max descent iterations per restart."
+    max_kinematic_moves_arg = DeclareLaunchArgument(
+        "max_kinematic_moves", default_value="20", description="Max kinematic moves per reach attempt."
     )
-    max_outer_iterations = ParameterValue(LaunchConfiguration("max_outer_iterations"), value_type=int)
+    max_kinematic_moves = ParameterValue(LaunchConfiguration("max_kinematic_moves"), value_type=int)
     stop_when_all_reached_arg = DeclareLaunchArgument(
         "stop_when_all_reached", default_value="false", description="End each descent once every viewpoint is reached."
     )
@@ -241,7 +241,7 @@ def generate_launch_description():
         "bg_gtsp_two_opt_rounds": 5,
         # Descents (1 = single). Each restart starts from the best position so far with a new IK seed.
         "bg_descent_num_restart": descent_num_restart,
-        "bg_max_outer_iterations": max_outer_iterations,
+        "bg_max_kinematic_moves": max_kinematic_moves,
         "bg_initial_step": 0.02,
         "bg_step_shrink": 0.25,
         "bg_max_line_search_iters": 4,
@@ -365,7 +365,7 @@ def generate_launch_description():
             ik_retries_per_point_arg,
             ik_timeout_arg,
             descent_num_restart_arg,
-            max_outer_iterations_arg,
+            max_kinematic_moves_arg,
             stop_when_all_reached_arg,
             refine_solves_arg,
             travel_gradient_arg,

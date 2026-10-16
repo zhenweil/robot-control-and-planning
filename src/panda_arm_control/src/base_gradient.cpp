@@ -22,6 +22,8 @@
 #include <moveit/collision_detection/collision_common.h>
 
 #include "panda_arm_control/base_gradient.hpp"
+#include "panda_arm_control/gtsp.hpp"
+#include "panda_arm_control/joint_travel.hpp"
 #include "panda_arm_control/reachability_map.hpp"
 #include "panda_arm_control/real_cost_planning.hpp"
 
@@ -130,65 +132,37 @@ Eigen::MatrixXd DampedPinv(const Eigen::MatrixXd& J, double damping)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Joint travel. Joint 7 (the flange spin about the camera axis) doesn't matter for a viewpoint: not counted.
+// Joint travel and the GTSP live in joint_travel.hpp and gtsp.hpp.
 // ---------------------------------------------------------------------------------------------
 
-size_t CountedJoints(const Joints& a, const Joints& b)
+
+joint_travel::EdgeWeights EdgeWeightsOf(const BaseGradientParams& p)
 {
-	const size_t n = std::min(a.size(), b.size());
-	return n > 0 ? n - 1 : 0;
+	return {p.joint_distance_weight, p.max_joint_deviation_weight};
 }
 
-double JointDistance(const Joints& a, const Joints& b)
+// Indices of the joints that count as travel: all but joint 7, which only spins the camera about its axis.
+std::vector<int> TravelJoints(const Joints& q)
 {
-	double d = 0.0;
-	for (size_t k = 0; k < CountedJoints(a, b); ++k)
-		d += (a[k] - b[k]) * (a[k] - b[k]);
-	return std::sqrt(d);
+	return joint_travel::AllJoints(static_cast<int>(q.size()) - 1);
 }
 
-double MaxJointTurn(const Joints& a, const Joints& b)
-{
-	double m = 0.0;
-	for (size_t k = 0; k < CountedJoints(a, b); ++k)
-		m = std::max(m, std::abs(a[k] - b[k]));
-	return m;
-}
-
-// Sum over joints of (turn past thr)^2: zero unless the move is a reconfiguration.
-double ReconfigPenalty(const Joints& a, const Joints& b, double thr)
-{
-	double p = 0.0;
-	for (size_t k = 0; k < CountedJoints(a, b); ++k)
-	{
-		const double excess = std::abs(a[k] - b[k]) - thr;
-		if (excess > 0.0)
-			p += excess * excess;
-	}
-	return p;
-}
-
-int CountReconfigs(const Joints& home, const std::vector<Joints>& tour, double thr)
-{
-	int count = 0;
-	for (size_t k = 0; k < tour.size(); ++k)
-		count += MaxJointTurn(k == 0 ? home : tour[k - 1], tour[k]) > thr ? 1 : 0;
-	return count;
-}
-
-// One tour edge's cost, shared by the GTSP and the descent.
 double EdgeCost(const Joints& a, const Joints& b, const BaseGradientParams& p)
 {
-	return p.joint_distance_weight * JointDistance(a, b) + p.max_joint_deviation_weight * MaxJointTurn(a, b) +
-		(p.edge_reconfig_weight > 0.0 ? p.edge_reconfig_weight * ReconfigPenalty(a, b, p.reconfig_threshold) : 0.0);
+	return joint_travel::EdgeCost(a, b, EdgeWeightsOf(p), TravelJoints(a));
+}
+
+// home, then the tour's poses.
+std::vector<Joints> PathFromHome(const Joints& home, const std::vector<Joints>& tour)
+{
+	std::vector<Joints> path{home};
+	path.insert(path.end(), tour.begin(), tour.end());
+	return path;
 }
 
 double TravelCost(const Joints& home, const std::vector<Joints>& tour, const BaseGradientParams& p)
 {
-	double total = 0.0;
-	for (size_t k = 0; k < tour.size(); ++k)
-		total += EdgeCost(k == 0 ? home : tour[k - 1], tour[k], p);
-	return total;
+	return joint_travel::TravelCost(PathFromHome(home, tour), EdgeWeightsOf(p), TravelJoints(home));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -592,250 +566,6 @@ bool ExactIk(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Tour: a GTSP over (viewpoint, IK solution) nodes, visiting one IK solution per reachable viewpoint.
-// Nearest neighbour, then 2-opt segment reversals and per-position IK-solution swaps.
-// ---------------------------------------------------------------------------------------------
-
-struct GtspNode
-{
-	int group = -1;	  // index into the reachable viewpoints
-	int branch = -1;  // index into that viewpoint's IK solutions
-};
-
-struct Gtsp
-{
-	std::vector<int> viewpoint;						   // group -> viewpoint
-	std::vector<std::vector<const Joints*>> branches;  // group -> IK solutions
-	std::vector<std::vector<double>> node_cost;		   // group -> per-solution cost; empty = none
-	const Joints* home = nullptr;
-	const BaseGradientParams* params = nullptr;
-
-	const Joints& Q(const GtspNode& n) const { return *branches[n.group][n.branch]; }
-	double NodeCost(const GtspNode& n) const { return node_cost.empty() ? 0.0 : node_cost[n.group][n.branch]; }
-	double Edge(const GtspNode* a, const GtspNode& b) const { return EdgeCost(a ? Q(*a) : *home, Q(b), *params); }
-};
-
-std::vector<GtspNode> NearestNeighborTour(const Gtsp& g)
-{
-	std::vector<bool> visited(g.branches.size(), false);
-	std::vector<GtspNode> order;
-	for (size_t step = 0; step < g.branches.size(); ++step)
-	{
-		double best = std::numeric_limits<double>::max();
-		GtspNode pick;
-		bool picked = false;
-		for (size_t grp = 0; grp < g.branches.size(); ++grp)
-			if (!visited[grp])
-				for (size_t b = 0; b < g.branches[grp].size(); ++b)
-				{
-					const GtspNode cand{static_cast<int>(grp), static_cast<int>(b)};
-					const double cost = g.Edge(order.empty() ? nullptr : &order.back(), cand) + g.NodeCost(cand);
-					if (!picked || cost < best)
-					{
-						best = cost;
-						pick = cand;
-						picked = true;
-					}
-				}
-		visited[static_cast<size_t>(pick.group)] = true;
-		order.push_back(pick);
-	}
-	return order;
-}
-
-std::vector<GtspNode> TwoOpt(const Gtsp& g, std::vector<GtspNode> order, int max_rounds)
-{
-	if (order.size() < 2)
-		return order;
-	auto edge_after = [&](size_t pos, const GtspNode& node) { return g.Edge(pos == 0 ? nullptr : &order[pos - 1], node); };
-	for (int round = 0; round < max_rounds; ++round)
-	{
-		bool improved = false;
-		for (bool reversed = order.size() >= 3; reversed;)
-		{
-			reversed = false;
-			for (size_t i = 0; i + 1 < order.size(); ++i)
-				for (size_t j = i + 1; j < order.size(); ++j)
-				{
-					double old_cost = edge_after(i, order[i]);
-					double new_cost = edge_after(i, order[j]);
-					if (j + 1 < order.size())
-					{
-						old_cost += g.Edge(&order[j], order[j + 1]);
-						new_cost += g.Edge(&order[i], order[j + 1]);
-					}
-					if (new_cost < old_cost - 1e-9)
-					{
-						std::reverse(
-							order.begin() + static_cast<std::ptrdiff_t>(i), order.begin() + static_cast<std::ptrdiff_t>(j) + 1);
-						reversed = improved = true;
-					}
-				}
-		}
-		// Hold the neighbours fixed and pick each position's best IK solution.
-		for (size_t pos = 0; pos < order.size(); ++pos)
-		{
-			const int grp = order[pos].group;
-			double best_cost = std::numeric_limits<double>::max();
-			int best_branch = order[pos].branch;
-			for (size_t b = 0; b < g.branches[static_cast<size_t>(grp)].size(); ++b)
-			{
-				const GtspNode cand{grp, static_cast<int>(b)};
-				double cost = edge_after(pos, cand) + g.NodeCost(cand);
-				if (pos + 1 < order.size())
-					cost += g.Edge(&cand, order[pos + 1]);
-				if (cost < best_cost)
-				{
-					best_cost = cost;
-					best_branch = static_cast<int>(b);
-				}
-			}
-			if (best_branch != order[pos].branch)
-			{
-				order[pos].branch = best_branch;
-				improved = true;
-			}
-		}
-		if (!improved)
-			break;
-	}
-	return order;
-}
-
-double TourCost(const Gtsp& g, const std::vector<GtspNode>& order)
-{
-	double total = 0.0;
-	for (size_t k = 0; k < order.size(); ++k)
-		total += g.Edge(k == 0 ? nullptr : &order[k - 1], order[k]);
-	for (const GtspNode& node : order)
-		total += g.NodeCost(node);
-	return total;
-}
-
-// Viewpoint order and chosen IK solution per visit. warm_order (a previous order) also seeds a 2-opt run when every
-// listed viewpoint is still reachable; the cheaper tour wins, so a step never loses to a re-ordering accident.
-std::pair<std::vector<int>, std::vector<Joints>> FindTour(
-	const std::vector<std::vector<Joints>>& ik, const Joints& home, const BaseGradientParams& params,
-	const std::vector<int>* warm_order, const std::vector<std::vector<double>>& node_cost)
-{
-	Gtsp g;
-	g.home = &home;
-	g.params = &params;
-	std::vector<int> group_of(ik.size(), -1);
-	for (size_t v = 0; v < ik.size(); ++v)
-	{
-		if (ik[v].empty())
-			continue;
-		group_of[v] = static_cast<int>(g.viewpoint.size());
-		g.viewpoint.push_back(static_cast<int>(v));
-		std::vector<const Joints*> qs;
-		for (const Joints& q : ik[v])
-			qs.push_back(&q);
-		g.branches.push_back(std::move(qs));
-		g.node_cost.push_back(node_cost[v]);
-	}
-	std::pair<std::vector<int>, std::vector<Joints>> tour;
-	if (g.branches.empty())
-		return tour;
-	const int rounds = std::max(1, params.gtsp_two_opt_rounds);
-	std::vector<GtspNode> best = TwoOpt(g, NearestNeighborTour(g), rounds);
-	if (warm_order && warm_order->size() == g.viewpoint.size())
-	{
-		std::vector<GtspNode> seeded;
-		for (int v : *warm_order)
-		{
-			if (v < 0 || v >= static_cast<int>(group_of.size()) || group_of[static_cast<size_t>(v)] < 0)
-				break;
-			seeded.push_back({group_of[static_cast<size_t>(v)], 0});
-		}
-		if (seeded.size() == warm_order->size())
-		{
-			seeded = TwoOpt(g, std::move(seeded), rounds);
-			if (TourCost(g, seeded) < TourCost(g, best))
-				best = std::move(seeded);
-		}
-	}
-	for (const GtspNode& node : best)
-	{
-		tour.first.push_back(g.viewpoint[static_cast<size_t>(node.group)]);
-		tour.second.push_back(g.Q(node));
-	}
-	return tour;
-}
-
-// Cheapest IK solution per viewpoint for a fixed order: dynamic programming over (edge + per-solution) costs.
-std::vector<Joints> BestPosesForOrder(
-	const std::vector<std::vector<Joints>>& ik, const std::vector<std::vector<double>>& pose_cost,
-	const std::vector<int>& order, const Joints& home, const BaseGradientParams& params)
-{
-	std::vector<std::vector<double>> best(order.size());  // best[k][j]: cheapest order[0..k] ending in solution j
-	std::vector<std::vector<int>> parent(order.size());
-	for (size_t k = 0; k < order.size(); ++k)
-	{
-		const size_t v = static_cast<size_t>(order[k]);
-		best[k].assign(ik[v].size(), std::numeric_limits<double>::max());
-		parent[k].assign(ik[v].size(), -1);
-		for (size_t j = 0; j < ik[v].size(); ++j)
-		{
-			if (k == 0)
-			{
-				best[k][j] = pose_cost[v][j] + EdgeCost(home, ik[v][j], params);
-				continue;
-			}
-			const size_t u = static_cast<size_t>(order[k - 1]);
-			for (size_t i = 0; i < ik[u].size(); ++i)
-			{
-				const double c = best[k - 1][i] + pose_cost[v][j] + EdgeCost(ik[u][i], ik[v][j], params);
-				if (c < best[k][j])
-				{
-					best[k][j] = c;
-					parent[k][j] = static_cast<int>(i);
-				}
-			}
-		}
-	}
-	std::vector<Joints> joints(order.size());
-	if (order.empty())
-		return joints;
-	int j = static_cast<int>(std::min_element(best.back().begin(), best.back().end()) - best.back().begin());
-	for (size_t k = order.size(); k-- > 0;)
-	{
-		joints[k] = ik[static_cast<size_t>(order[k])][static_cast<size_t>(j)];
-		j = parent[k][static_cast<size_t>(j)];
-	}
-	return joints;
-}
-
-// Inserts viewpoints missing from `order` where their joint detour is smallest.
-void InsertByDetour(std::vector<int>& order, const std::vector<std::vector<Joints>>& ik, const Joints& home)
-{
-	for (size_t v = 0; v < ik.size(); ++v)
-	{
-		if (ik[v].empty() || std::find(order.begin(), order.end(), static_cast<int>(v)) != order.end())
-			continue;
-		const Joints& qv = ik[v].front();
-		size_t best_pos = order.size();
-		double best_detour = std::numeric_limits<double>::max();
-		for (size_t pos = 0; pos <= order.size(); ++pos)
-		{
-			const Joints& qa = pos == 0 ? home : ik[static_cast<size_t>(order[pos - 1])].front();
-			double detour = JointDistance(qa, qv);
-			if (pos < order.size())
-			{
-				const Joints& qb = ik[static_cast<size_t>(order[pos])].front();
-				detour += JointDistance(qv, qb) - JointDistance(qa, qb);
-			}
-			if (detour < best_detour)
-			{
-				best_detour = detour;
-				best_pos = pos;
-			}
-		}
-		order.insert(order.begin() + static_cast<std::ptrdiff_t>(best_pos), static_cast<int>(v));
-	}
-}
-
-// ---------------------------------------------------------------------------------------------
 // Solutions
 // ---------------------------------------------------------------------------------------------
 
@@ -1027,6 +757,7 @@ public:
 	std::optional<Position> ReachabilityStep(const Position& from, double step, int outer);
 
 	BaseGradientResult result;  // history and solve count; SolveBaseGradient fills in the rest
+	int outer = 0;	// reachability-map outer iteration, for logs; 0 = the first solve
 
 private:
 	// --- Descent ---
@@ -1039,7 +770,7 @@ private:
 	std::optional<Step> LineSearch(const Eigen::Vector3d& dir);
 	std::optional<Step> RoomThenReach();
 	std::optional<TourSolution> FullSolveAt(const Step& step);
-	bool TakeStep(const Step& step, TourSolution committed, int iter, double gnorm, const Eigen::Vector3d& g);
+	bool TakeStep(const Step& step, TourSolution committed, int iter, const Eigen::Vector3d& g);
 	void LogRefineAtReach();
 	void RefineResult();
 
@@ -1048,9 +779,9 @@ private:
 		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed, int max_solutions);
 	TourSolution Solve(
 		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed,
-		const std::vector<int>* warm_order, int max_solutions, const std::vector<int>* fixed_order);
+		const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
 	TourSolution SolveBestOf(
-		const Position& at, const BaseGradientParams& p, const std::vector<int>* warm_order,
+		const Position& at, const BaseGradientParams& p, const std::vector<int>* initial_order,
 		const std::vector<int>* fixed_order);
 	TourSolution Probe(const Position& at, int gaps_min_reached = 0);
 	TourSolution Probe(const Position& at, BaseGradientParams p);
@@ -1079,8 +810,6 @@ private:
 	std::optional<Joints> RoomierPose(int v, const Position& at, const ArmModel& model, int tries);
 
 	// --- Logging ---
-	void LogCostTerms(const TourSolution& sol);
-	void LogMissed(const Position& at, const TourSolution& sol);
 	void Publish(const Eigen::Vector3d& neg_grad);
 	void PlaceObject(const Position& at) { MoveObject(scene, Translation(at) * object_pose); }
 
@@ -1227,17 +956,16 @@ bool Solver::StartDescent(const Position& start, int restart_in, const TourSolut
 	current = WithPlannedTravel(position, std::move(current));
 	if (current.tour.empty())
 	{
-		RCLCPP_WARN(node->get_logger(), "restart %d: no tour pose reachable at the start placement", restart + 1);
+		RCLCPP_WARN(node->get_logger(), "reach attempt %d: no tour pose reachable at the start placement", restart + 1);
 		return false;
 	}
 	Record(position, current);
 	Remember(current);
 	Publish(Eigen::Vector3d::Zero());
 	RCLCPP_INFO(
-		node->get_logger(), "restart %d/%d iter 0: abs (%.4f, %.4f, %.4f) m  reachable %d/%d", restart + 1,
-		std::max(1, params.descent_num_restart), position.x(), position.y(), position.z(), current.num_reachable, num_vp);
-	LogCostTerms(current);
-	LogMissed(position, current);
+		node->get_logger(), "outer %d/%d reach attempt %d/%d start: reachable %d/%d", this->outer,
+		params.reach_outer_iterations, restart + 1, std::max(1, params.descent_num_restart), current.num_reachable,
+		num_vp);
 	return true;
 }
 
@@ -1245,14 +973,14 @@ bool Solver::StartDescent(const Position& start, int restart_in, const TourSolut
 int Solver::ReachAllViewpoints()
 {
 	int no_gain = 0;  // iterations since a viewpoint was last gained
-	for (int iter = 0; iter < params.max_outer_iterations; ++iter)
+	for (int iter = 0; iter < params.max_kinematic_moves; ++iter)
 	{
 		if (current.all_reachable || !rclcpp::ok())
 			return iter;
 		if (std::chrono::steady_clock::now() > reach_deadline || no_gain >= params.reach_patience)
 		{
 			RCLCPP_WARN(
-				node->get_logger(), "  restart %d: %s with %d/%d reachable -- stuck", restart + 1,
+				node->get_logger(), "  reach attempt %d: %s with %d/%d reachable -- stuck", restart + 1,
 				no_gain >= params.reach_patience ? "no viewpoint gained for reach_patience iterations" : "reach time limit hit",
 				current.num_reachable, num_vp);
 			return iter;
@@ -1262,7 +990,7 @@ int Solver::ReachAllViewpoints()
 			return iter + 1;
 		no_gain = current.num_reachable > reached ? 0 : no_gain + 1;
 	}
-	return params.max_outer_iterations;
+	return params.max_kinematic_moves;
 }
 
 // 2) Once all are reached: keep descending on travel and comfort (unless stop_when_all_reached), then refine.
@@ -1271,9 +999,9 @@ void Solver::RefinePathAndPosition(int iter)
 	LogRefineAtReach();
 	tracked_probes = false;  // a dragged-along tour looks worse than the spot really is
 	if (params.stop_when_all_reached)
-		RCLCPP_INFO(node->get_logger(), "  restart %d: all viewpoints reached -- stopping", restart + 1);
+		RCLCPP_INFO(node->get_logger(), "  reach attempt %d: all viewpoints reached -- stopping", restart + 1);
 	else
-		for (; iter < params.max_outer_iterations && rclcpp::ok(); ++iter)
+		for (; iter < params.max_kinematic_moves && rclcpp::ok(); ++iter)
 			if (!DescentStep(iter))
 				break;
 	RefineResult();
@@ -1288,7 +1016,7 @@ bool Solver::DescentStep(int iter)
 	const double gnorm = g_free.norm();
 	if (gnorm < 1e-6)
 	{
-		RCLCPP_INFO(node->get_logger(), "  restart %d: gradient ~ 0 -- converged", restart + 1);
+		RCLCPP_INFO(node->get_logger(), "  reach attempt %d: gradient ~ 0 -- converged", restart + 1);
 		Publish(-g);
 		return false;
 	}
@@ -1302,42 +1030,20 @@ bool Solver::DescentStep(int iter)
 	if (!committed)
 	{
 		if (current.all_reachable)
-			RCLCPP_INFO(node->get_logger(), "  restart %d: no step reduces the tour cost -- converged", restart + 1);
+			RCLCPP_INFO(node->get_logger(), "  reach attempt %d: no step reduces the tour cost -- converged", restart + 1);
 		else
 			RCLCPP_WARN(
-				node->get_logger(), "  restart %d: no step reduces the tour cost with %d/%d reachable -- stuck",
+				node->get_logger(), "  reach attempt %d: no step reduces the tour cost with %d/%d reachable -- stuck",
 				restart + 1, current.num_reachable, num_vp);
 		Publish(-g);
 		return false;
 	}
-	return !TakeStep(*step, std::move(*committed), iter, gnorm, g);
+	return !TakeStep(*step, std::move(*committed), iter, g);
 }
 
 Eigen::Vector3d Solver::Gradient()
 {
 	const Eigen::Vector3d g = AnalyticGradient(current, params);
-	if (params.trace_line_search)
-	{
-		// Each term's own descent direction.
-		auto part = [&](bool manip, double gap_weight) {
-			BaseGradientParams p = params;
-			p.travel_gradient = false;
-			p.manipulability_gradient = manip;
-			p.miss_gap_weight = gap_weight;
-			return AnalyticGradient(current, p);
-		};
-		auto describe = [](const Eigen::Vector3d& gp) {
-			const double nrm = gp.norm();
-			const Eigen::Vector3d u = nrm > 1e-9 ? Eigen::Vector3d(-gp / nrm) : Eigen::Vector3d::Zero();
-			char buf[96];
-			std::snprintf(buf, sizeof(buf), "|%.1f| dir (%+.2f, %+.2f, %+.2f)", nrm, u.x(), u.y(), u.z());
-			return std::string(buf);
-		};
-		RCLCPP_INFO(
-			node->get_logger(), "    directions: manip %s  gap %s  total %s",
-			describe(part(params.manipulability_gradient, 0.0)).c_str(),
-			describe(part(false, params.miss_gap_weight)).c_str(), describe(g).c_str());
-	}
 	if (params.fd_gradient_check)
 	{
 		const Eigen::Vector3d g_fd = FiniteDifferenceGradient();
@@ -1582,7 +1288,7 @@ std::optional<TourSolution> Solver::FullSolveAt(const Step& step)
 }
 
 // Moves to the accepted spot and logs it. True when the descent has converged.
-bool Solver::TakeStep(const Step& step, TourSolution committed, int iter, double gnorm, const Eigen::Vector3d& g)
+bool Solver::TakeStep(const Step& step, TourSolution committed, int iter, const Eigen::Vector3d& g)
 {
 	const double moved = (step.at - position).norm();
 	const double rel_gain = (current.cost - committed.cost) / std::max(std::abs(current.cost), 1e-9);
@@ -1594,11 +1300,9 @@ bool Solver::TakeStep(const Step& step, TourSolution committed, int iter, double
 	Remember(current);
 	Record(position, current);
 	RCLCPP_INFO(
-		node->get_logger(), "restart %d/%d iter %d/%d: abs (%.4f, %.4f, %.4f) m  reachable %d/%d  |grad|=%.4f  step=%.4f m",
-		restart + 1, std::max(1, params.descent_num_restart), iter + 1, params.max_outer_iterations, position.x(),
-		position.y(), position.z(), current.num_reachable, num_vp, gnorm, step.size);
-	LogCostTerms(current);
-	LogMissed(position, current);
+		node->get_logger(), "outer %d/%d reach attempt %d/%d kinematic move %d/%d: reachable %d/%d", this->outer,
+		params.reach_outer_iterations, restart + 1, std::max(1, params.descent_num_restart), iter + 1,
+		params.max_kinematic_moves, current.num_reachable, num_vp);
 	Publish(-g);
 
 	if (gained || rel_gain >= params.convergence_tolerance_cost)
@@ -1606,13 +1310,13 @@ bool Solver::TakeStep(const Step& step, TourSolution committed, int iter, double
 	else if (++stall_count >= std::max(1, params.patience))
 	{
 		RCLCPP_INFO(
-			node->get_logger(), "  restart %d: %d iterations with <%.1e relative gain -- stopping early", restart + 1,
+			node->get_logger(), "  reach attempt %d: %d iterations with <%.1e relative gain -- stopping early", restart + 1,
 			stall_count, params.convergence_tolerance_cost);
 		return true;
 	}
 	if (!gained && moved < params.convergence_tolerance_offset && rel_gain < params.convergence_tolerance_cost)
 	{
-		RCLCPP_INFO(node->get_logger(), "  restart %d: placement settled -- converged", restart + 1);
+		RCLCPP_INFO(node->get_logger(), "  reach attempt %d: placement settled -- converged", restart + 1);
 		return true;
 	}
 	return false;
@@ -1701,7 +1405,7 @@ Position Solver::ManipulabilityJump(const Position& from, const TourSolution& wa
 	current = SolveBestOf(position, p, &warm.tour, nullptr);
 	log_step(0, 0.0);
 	stall_count = 0;
-	for (int iter = 0; iter < params.max_outer_iterations && rclcpp::ok(); ++iter)
+	for (int iter = 0; iter < params.max_kinematic_moves && rclcpp::ok(); ++iter)
 	{
 		const Eigen::Vector3d g = LockAxes(AnalyticGradient(current, p));
 		if (g.norm() < 1e-9)
@@ -1760,7 +1464,7 @@ void Solver::LogRefineAtReach()
 	const TourSolution refined = Refine(position, start, params.refine_at_reach);
 	RCLCPP_INFO(
 		node->get_logger(),
-		"  restart %d: refined %d solves at first all-reached abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  "
+		"  reach attempt %d: refined %d solves at first all-reached abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  "
 		"real %.2f -> %.2f",
 		restart + 1, params.refine_at_reach, position.x(), position.y(), position.z(), start.travel, refined.travel,
 		start.planned, refined.planned);
@@ -1783,12 +1487,13 @@ void Solver::RefineResult()
 	{
 		const Joints& a = k == 0 ? home : s.joints[k - 1];
 		const Joints& b = s.joints[k];
-		if (MaxJointTurn(a, b) <= params.reconfig_threshold)
+		const std::vector<int> joints = TravelJoints(a);
+		if (joint_travel::MaxJointTurn(a, b, joints) <= params.reconfig_threshold)
 			continue;
 		size_t jmax = 0;
-		for (size_t j = 0; j < CountedJoints(a, b); ++j)
-			if (std::abs(b[j] - a[j]) > std::abs(b[jmax] - a[jmax]))
-				jmax = j;
+		for (int j : joints)
+			if (std::abs(b[static_cast<size_t>(j)] - a[static_cast<size_t>(j)]) > std::abs(b[jmax] - a[jmax]))
+				jmax = static_cast<size_t>(j);
 		char buf[64];
 		std::snprintf(
 			buf, sizeof(buf), " %s->%d j%zu %+.2f", k == 0 ? "home" : std::to_string(s.tour[k - 1]).c_str(), s.tour[k],
@@ -1800,12 +1505,13 @@ void Solver::RefineResult()
 		reordered += (k >= start.tour.size() || start.tour[k] != s.tour[k]) ? 1 : 0;
 	RCLCPP_INFO(
 		node->get_logger(),
-		"  restart %d: refined %d solves at final abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  real %.2f -> %.2f  "
+		"  reach attempt %d: refined %d solves at final abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  real %.2f -> %.2f  "
 		"order changed at %d/%zu positions  reconfigurations %d -> %d:%s",
 		restart + 1, params.refine_solves, best.position.x(), best.position.y(), best.position.z(), start.travel,
 		s.travel, start.planned, s.planned, reordered, s.tour.size(),
-		CountReconfigs(home, start.joints, params.reconfig_threshold),
-		CountReconfigs(home, s.joints, params.reconfig_threshold), where.empty() ? " none" : where.c_str());
+		joint_travel::CountReconfigs(PathFromHome(home, start.joints), params.reconfig_threshold, TravelJoints(home)),
+		joint_travel::CountReconfigs(PathFromHome(home, s.joints), params.reconfig_threshold, TravelJoints(home)),
+		where.empty() ? " none" : where.c_str());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1842,7 +1548,9 @@ std::vector<std::vector<Joints>> Solver::CollectIk(
 			if (!ExactIk(state, group, target, p.ik_attempts, p.ik_timeout, validity))
 				continue;
 			state.copyJointGroupPositions(group, q);
-			const bool dup = std::any_of(sols.begin(), sols.end(), [&](const Joints& s) { return JointDistance(s, q) < 0.1; });
+			const bool dup = std::any_of(sols.begin(), sols.end(), [&](const Joints& s) {
+				return joint_travel::JointDistance(s, q, TravelJoints(q)) < 0.1;
+			});
 			if (!dup)
 				sols.push_back(q);
 		}
@@ -1853,7 +1561,7 @@ std::vector<std::vector<Joints>> Solver::CollectIk(
 // The tour at `at`: IK solutions, closest poses for the misses, then the GTSP (or the fixed order), scored.
 TourSolution Solver::Solve(
 	const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed_q,
-	const std::vector<int>* warm_order, int max_solutions, const std::vector<int>* fixed_order)
+	const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order)
 {
 	std::vector<std::vector<Joints>> ik = CollectIk(at, p, seed_q, max_solutions);
 	const double exact_gap = 1e-4;	// 0.1 mm: a closest pose this near counts as an IK solution
@@ -1915,21 +1623,14 @@ TourSolution Solver::Solve(
 	}
 
 	const double k = p.manipulability_limit_sharpness;
-	std::vector<std::vector<double>> node_cost(ik.size());
-	for (size_t v = 0; v < ik.size(); ++v)
-		for (const Joints& q : ik[v])
-			node_cost[v].push_back(-p.manipulability_weight * Manipulability(state, group, tool, q, k));
+	gtsp::Solver tour_solver(std::move(ik), home, EdgeWeightsOf(p), p.gtsp_two_opt_rounds);
+	tour_solver.SetTravelJoints(TravelJoints(home));
+	gtsp::Tour tour = fixed_order ? tour_solver.SolveFixedOrder(*fixed_order)
+		: initial_order			  ? tour_solver.Solve(*initial_order)
+								  : tour_solver.Solve();
 	TourSolution out;
-	if (fixed_order)
-	{
-		for (int v : *fixed_order)
-			if (!ik[static_cast<size_t>(v)].empty())
-				out.tour.push_back(v);
-		InsertByDetour(out.tour, ik, home);
-		out.joints = BestPosesForOrder(ik, node_cost, out.tour, home, p);
-	}
-	else
-		std::tie(out.tour, out.joints) = FindTour(ik, home, p, warm_order, node_cost);
+	out.tour = std::move(tour.order);
+	out.joints = std::move(tour.poses);
 	out.num_total = num_vp;
 	out.num_reachable = static_cast<int>(out.tour.size());
 	out.all_reachable = out.num_reachable == out.num_total;
@@ -1964,14 +1665,15 @@ TourSolution Solver::Solve(
 
 // The best of gtsp_num_restart solves (each draws new random IK starts).
 TourSolution Solver::SolveBestOf(
-	const Position& at, const BaseGradientParams& p, const std::vector<int>* warm_order, const std::vector<int>* fixed_order)
+	const Position& at, const BaseGradientParams& p, const std::vector<int>* initial_order,
+	const std::vector<int>* fixed_order)
 {
 	const int n = std::max(1, p.gtsp_num_restart);
 	result.num_inner_solves += n;
-	TourSolution best_sol = Solve(at, p, seeds, warm_order, p.max_solutions_per_candidate, fixed_order);
+	TourSolution best_sol = Solve(at, p, seeds, initial_order, p.max_solutions_per_candidate, fixed_order);
 	for (int i = 1; i < n; ++i)
 	{
-		TourSolution s = Solve(at, p, seeds, warm_order, p.max_solutions_per_candidate, fixed_order);
+		TourSolution s = Solve(at, p, seeds, initial_order, p.max_solutions_per_candidate, fixed_order);
 		if (s.cost < best_sol.cost)
 			best_sol = std::move(s);
 	}
@@ -1996,26 +1698,23 @@ TourSolution Solver::Probe(const Position& at, BaseGradientParams p)
 	return Solve(at, p, seeds, &current.tour, 1, &locked_order);
 }
 
-// More full solves at a fixed spot, each warm-started from the best so far, with more IK choices and GTSP edges that
-// penalize reconfigurations. Keeps the lowest cost; never fewer viewpoints reached.
+// More full solves at a fixed spot, each warm-started from the best so far, with more IK choices. Keeps the lowest
+// cost; never fewer viewpoints reached.
 TourSolution Solver::Refine(const Position& at, TourSolution best_sol, int num_solves)
 {
 	if (use_planning && best_sol.planned < 0.0)
 		best_sol.planned = PlannedTravel(at, best_sol);
 	best_sol.cost = Cost(best_sol);
-	BaseGradientParams p = params;
-	p.edge_reconfig_weight = params.reconfig_weight;
 	for (int i = 0; i < num_solves && rclcpp::ok(); ++i)
 	{
 		const std::vector<int>* lock = params.lock_input_order ? &input_order
 			: params.freeze_order								 ? &best_sol.tour
 																 : nullptr;
 		TourSolution s =
-			Solve(at, p, SeedsFrom(best_sol, home, num_vp), &best_sol.tour, params.refine_ik_solutions, lock);
+			Solve(at, params, SeedsFrom(best_sol, home, num_vp), &best_sol.tour, params.refine_ik_solutions, lock);
 		result.num_inner_solves += 1;
 		if (s.num_reachable < best_sol.num_reachable)
 			continue;
-		s.travel = TravelCost(home, s.joints, params);	// without the penalty, comparable with the descent's
 		if (use_planning)
 			s.planned = PlannedTravel(at, s);
 		s.cost = Cost(s);
@@ -2037,7 +1736,8 @@ double Solver::PlannedTravel(const Position& at, const TourSolution& sol)
 	for (size_t k = 0; k < sol.joints.size(); ++k)
 		total += (k < edges.size() && edges[k] >= 0.0)
 			? edges[k]
-			: JointDistance(k == 0 ? home : sol.joints[k - 1], sol.joints[k]) + params.unreachable_penalty;
+			: joint_travel::JointDistance(k == 0 ? home : sol.joints[k - 1], sol.joints[k], TravelJoints(home)) +
+				params.unreachable_penalty;
 	return total;
 }
 
@@ -2152,8 +1852,8 @@ Eigen::Vector3d Solver::AnalyticGradient(const TourSolution& sol, const BaseGrad
 		const Joints& qa = i == 0 ? home : sol.joints[i - 1];
 		const Joints& qb = sol.joints[i];
 		Eigen::VectorXd diff = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(dof));
-		for (size_t j = 0; j < CountedJoints(qa, qb); ++j)
-			diff(static_cast<Eigen::Index>(j)) = qa[j] - qb[j];
+		for (int j : TravelJoints(qa))
+			diff(j) = qa[static_cast<size_t>(j)] - qb[static_cast<size_t>(j)];
 		const Eigen::MatrixXd d_diff = (i == 0 ? fixed : dq[i - 1]) - dq[i];
 		const double nrm = diff.norm();
 		if (nrm > 1e-9)
@@ -2475,66 +2175,6 @@ std::optional<Joints> Solver::RoomierPose(int v, const Position& at, const ArmMo
 // Logging and progress markers
 // ---------------------------------------------------------------------------------------------
 
-void Solver::LogCostTerms(const TourSolution& sol)
-{
-	auto row = [&](const char* name, double raw, double weight) {
-		RCLCPP_INFO(node->get_logger(), "    %-16s %12.4f %10.1f %12.2f", name, raw, weight, raw * weight);
-	};
-	RCLCPP_INFO(node->get_logger(), "    %-16s %12s %10s %12s", "term", "raw", "weight", "weighted");
-	if (planned_travel)
-		row("planned travel", TravelTerm(sol), 1.0);
-	else
-		row("L2 travel", sol.travel, 0.0);
-	row("manipulability", sol.sum_manipulability, -params.manipulability_weight);
-	row("soft-min manip", sol.softmin_manipulability, -params.softmin_manipulability_weight);
-	row("missed count", static_cast<double>(sol.num_total - sol.num_reachable), params.unreachable_penalty);
-	row("miss gap (m)", sol.gap_sum, params.miss_gap_weight);
-	RCLCPP_INFO(node->get_logger(), "    %-16s %12s %10s %12.2f", "total cost", "", "", sol.cost);
-}
-
-// Per missed viewpoint, what blocks its closest pose: gap, joints near a limit, closest pairs.
-void Solver::LogMissed(const Position& at, const TourSolution& sol)
-{
-	auto closest = [](const collision_detection::DistanceResult& r) {
-		const auto& d = r.minimum_distance;
-		if (d.distance > 1e3)
-			return std::string("none within 1 m");
-		char buf[160];
-		std::snprintf(
-			buf, sizeof(buf), "%s - %s %.1f mm", d.link_names[0].c_str(), d.link_names[1].c_str(), d.distance * 1000.0);
-		return std::string(buf);
-	};
-	PlaceObject(at);
-	for (const Miss& m : sol.missed)
-	{
-		if (m.q.empty())
-		{
-			RCLCPP_INFO(node->get_logger(), "    missed vp %2d: no collision-free closest pose", m.vp);
-			continue;
-		}
-		std::string limits;
-		for (size_t k = 0; k < m.q.size(); ++k)
-		{
-			const moveit::core::VariableBounds& b = robot_model->getVariableBounds(group->getVariableNames()[k]);
-			const double range = b.max_position_ - b.min_position_;
-			if (!b.position_bounded_ || range <= 0.0)
-				continue;
-			if (m.q[k] - b.min_position_ < 0.02 * range)
-				limits += " j" + std::to_string(k + 1) + "@min";
-			else if (b.max_position_ - m.q[k] < 0.02 * range)
-				limits += " j" + std::to_string(k + 1) + "@max";
-		}
-		state.setJointGroupPositions(group, m.q);
-		state.update();
-		collision_detection::DistanceRequest req = CloseRequest(state, group, 1.0);
-		const auto [self_res, world_res] = Distances(scene, state, req);
-		RCLCPP_INFO(
-			node->get_logger(), "    missed vp %2d: gap %.1f mm %.1f deg | near limit:%s | arm-object %s | arm-arm %s", m.vp,
-			m.gap.head<3>().norm() * 1000.0, m.gap.tail<3>().norm() * 180.0 / M_PI, limits.empty() ? " none" : limits.c_str(),
-			closest(world_res).c_str(), closest(self_res).c_str());
-	}
-}
-
 visualization_msgs::msg::Marker MakeMarker(const std::string& ns, int type, const rclcpp::Time& stamp, int id = 0)
 {
 	visualization_msgs::msg::Marker m;
@@ -2693,7 +2333,7 @@ BaseGradientResult SolveBaseGradient(
 				(d.sol.num_reachable == best.sol.num_reachable && d.cost < best.cost);
 			RCLCPP_INFO(
 				node->get_logger(),
-				"restart %d/%d done: total cost=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, %.4f, %.4f) "
+				"reach attempt %d/%d done: total cost=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, %.4f, %.4f) "
 				"m%s",
 				r + 1, num_restarts, d.cost, d.sol.travel + params.unreachable_penalty * (n - d.sol.num_reachable),
 				d.sol.sum_manipulability, d.sol.num_reachable, n, d.position.x(), d.position.y(), d.position.z(),
@@ -2715,6 +2355,7 @@ BaseGradientResult SolveBaseGradient(
 		const std::optional<Position> next = solver.ReachabilityStep(overall.position, step, outer);
 		if (!next)
 			break;
+		solver.outer = outer;
 		const DescentResult d = solve_from(*next);
 		const bool better = d.ok && d.cost < overall.cost;
 		RCLCPP_INFO(
@@ -2735,7 +2376,8 @@ BaseGradientResult SolveBaseGradient(
 	result.joint_solutions = fin.joints;
 	result.total_weighted_cost = fin.cost - params.unreachable_penalty * (fin.num_total - fin.num_reachable);
 	for (size_t k = 0; k < fin.joints.size(); ++k)
-		result.total_joint_path_length += JointDistance(k == 0 ? start_reference_joints : fin.joints[k - 1], fin.joints[k]);
+		result.total_joint_path_length += joint_travel::JointDistance(
+			k == 0 ? start_reference_joints : fin.joints[k - 1], fin.joints[k], TravelJoints(fin.joints[k]));
 	result.num_reachable = fin.num_reachable;
 	result.ok = overall.ok;
 
@@ -2743,10 +2385,8 @@ BaseGradientResult SolveBaseGradient(
 	if (result.ok)
 		RCLCPP_INFO(
 			node->get_logger(),
-			"Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, tour joint path %.4f rad, travel %.2f, sum_w "
-			"%.3f (weighted cost %.4f).",
-			result.x, result.y, result.z, n, result.total_joint_path_length, fin.travel, fin.sum_manipulability,
-			result.total_weighted_cost);
+			"Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned travel %.2f rad.", result.x, result.y,
+			result.z, n, fin.planned);
 	else
 		RCLCPP_WARN(
 			node->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses.", result.x, result.y,

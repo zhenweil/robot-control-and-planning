@@ -78,7 +78,7 @@ struct Params
 	int bg_reach_patience = 3;
 	int bg_room_max_targets = 3;
 	int bg_descent_num_restart = 6;
-	int bg_max_outer_iterations = 50;
+	int bg_max_kinematic_moves = 20;
 	double bg_initial_step = 0.02;
 	double bg_step_shrink = 0.25;
 	int bg_max_line_search_iters = 4;
@@ -91,7 +91,6 @@ struct Params
 	int bg_refine_solves = 0;
 	int bg_refine_ik_solutions = 8;
 	double bg_reconfig_threshold = 1.0;
-	double bg_reconfig_weight = 10.0;
 	bool bg_travel_gradient = true;
 	bool bg_manipulability_gradient = true;
 	bool bg_freeze_order = false;
@@ -293,7 +292,7 @@ private:
 		this->declareIfNeeded("bg_reach_patience", this->params.bg_reach_patience);
 		this->declareIfNeeded("bg_room_max_targets", this->params.bg_room_max_targets);
 		this->declareIfNeeded("bg_descent_num_restart", this->params.bg_descent_num_restart);
-		this->declareIfNeeded("bg_max_outer_iterations", this->params.bg_max_outer_iterations);
+		this->declareIfNeeded("bg_max_kinematic_moves", this->params.bg_max_kinematic_moves);
 		this->declareIfNeeded("bg_initial_step", this->params.bg_initial_step);
 		this->declareIfNeeded("bg_step_shrink", this->params.bg_step_shrink);
 		this->declareIfNeeded("bg_max_line_search_iters", this->params.bg_max_line_search_iters);
@@ -305,7 +304,6 @@ private:
 		this->declareIfNeeded("bg_refine_solves", this->params.bg_refine_solves);
 		this->declareIfNeeded("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
 		this->declareIfNeeded("bg_reconfig_threshold", this->params.bg_reconfig_threshold);
-		this->declareIfNeeded("bg_reconfig_weight", this->params.bg_reconfig_weight);
 		this->declareIfNeeded("bg_travel_gradient", this->params.bg_travel_gradient);
 		this->declareIfNeeded("bg_manipulability_gradient", this->params.bg_manipulability_gradient);
 		this->declareIfNeeded("bg_freeze_order", this->params.bg_freeze_order);
@@ -379,7 +377,7 @@ private:
 		this->get_parameter("bg_reach_patience", this->params.bg_reach_patience);
 		this->get_parameter("bg_room_max_targets", this->params.bg_room_max_targets);
 		this->get_parameter("bg_descent_num_restart", this->params.bg_descent_num_restart);
-		this->get_parameter("bg_max_outer_iterations", this->params.bg_max_outer_iterations);
+		this->get_parameter("bg_max_kinematic_moves", this->params.bg_max_kinematic_moves);
 		this->get_parameter("bg_initial_step", this->params.bg_initial_step);
 		this->get_parameter("bg_step_shrink", this->params.bg_step_shrink);
 		this->get_parameter("bg_max_line_search_iters", this->params.bg_max_line_search_iters);
@@ -391,7 +389,6 @@ private:
 		this->get_parameter("bg_refine_solves", this->params.bg_refine_solves);
 		this->get_parameter("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
 		this->get_parameter("bg_reconfig_threshold", this->params.bg_reconfig_threshold);
-		this->get_parameter("bg_reconfig_weight", this->params.bg_reconfig_weight);
 		this->get_parameter("bg_travel_gradient", this->params.bg_travel_gradient);
 		this->get_parameter("bg_manipulability_gradient", this->params.bg_manipulability_gradient);
 		this->get_parameter("bg_freeze_order", this->params.bg_freeze_order);
@@ -489,7 +486,7 @@ private:
 		bg.reach_patience = this->params.bg_reach_patience;
 		bg.room_max_targets = this->params.bg_room_max_targets;
 		bg.descent_num_restart = this->params.bg_descent_num_restart;
-		bg.max_outer_iterations = this->params.bg_max_outer_iterations;
+		bg.max_kinematic_moves = this->params.bg_max_kinematic_moves;
 		bg.initial_step = this->params.bg_initial_step;
 		bg.step_shrink = this->params.bg_step_shrink;
 		bg.max_line_search_iters = this->params.bg_max_line_search_iters;
@@ -501,7 +498,6 @@ private:
 		bg.refine_solves = this->params.bg_refine_solves;
 		bg.refine_ik_solutions = this->params.bg_refine_ik_solutions;
 		bg.reconfig_threshold = this->params.bg_reconfig_threshold;
-		bg.reconfig_weight = this->params.bg_reconfig_weight;
 		bg.travel_gradient = this->params.bg_travel_gradient;
 		bg.manipulability_gradient = this->params.bg_manipulability_gradient;
 		bg.freeze_order = this->params.bg_freeze_order;

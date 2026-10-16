@@ -80,7 +80,7 @@ struct BaseGradientParams
 	double reach_map_tau = 0.05;  // soft-min temperature (map values are 0..1)
 	double reach_map_limit_sharpness = 20.0;  // map samples count by their joint-limit room; 0 = all count 1
 	int reach_map_seed = 42;
-	int max_outer_iterations = 50;
+	int max_kinematic_moves = 20;  // per reach attempt (also caps the manipulability jump's climb)
 	double initial_step = 0.02;
 	double step_shrink = 0.25;
 	int max_line_search_iters = 4;
@@ -95,11 +95,8 @@ struct BaseGradientParams
 	int reach_patience = 3;  // reach-phase iterations without gaining a viewpoint before the descent counts as stuck
 	int refine_solves = 0;  // extra full solves at each descent's result, warm-started from the best so far
 	int refine_ik_solutions = 8;  // IK solutions per viewpoint in refine solves: more same-branch choices for GTSP
-	// Reconfiguration: a move turning any joint (joint 7 aside) more than reconfig_threshold. Refine's GTSP edges add
-	// reconfig_weight per rad^2 of turn past it.
+	// Reconfiguration: a move turning any joint (joint 7 aside) more than this; refine logs how many are left.
 	double reconfig_threshold = 1.0;
-	double reconfig_weight = 10.0;
-	double edge_reconfig_weight = 0.0;  // internal: reconfig_weight while refining, 0 otherwise
 	bool travel_gradient = true;  // false: the descent direction ignores tour travel
 	bool manipulability_gradient = true;  // false: the descent direction ignores the comfort terms
 	bool freeze_order = false;  // once all viewpoints are reached, keep the viewpoint order fixed
