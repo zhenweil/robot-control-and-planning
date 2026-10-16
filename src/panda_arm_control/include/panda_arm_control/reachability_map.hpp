@@ -62,6 +62,7 @@ public:
 
 	Eigen::Array3i Dims() const { return dims; }
 	size_t NumDirections() const { return directions.size(); }
+	const Eigen::Vector3d& Direction(int bin) const { return directions[static_cast<size_t>(bin)]; }
 	size_t NumNonzero() const;
 
 private:

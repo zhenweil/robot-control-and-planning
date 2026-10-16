@@ -3,6 +3,8 @@
 // Markers on /base_gradient_progress_markers: the object, its trail, and the viewpoints colored by their map value
 // (red 0 .. green 1).
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <thread>
 
 #include <rclcpp/rclcpp.hpp>
@@ -60,6 +62,36 @@ int main(int argc, char** argv)
 	}
 
 	Eigen::Vector3d at(start[0], start[1], start[2]);
+	// Check: viewpoints the map calls unreachable here, how far each is from its bin's center direction, and the best
+	// value among bins within 30 deg. A good neighbor means the value is a binning artifact.
+	int negative = 0;
+	for (size_t v = 0; v < viewpoints.size(); ++v)
+	{
+		const Eigen::Vector3d approach = viewpoints[v].linear().col(2);
+		const Eigen::Vector3d p = at + viewpoints[v].translation();
+		const double value = map->Value(bins[v], p).value;
+		if (value > 0.0)
+			continue;
+		++negative;
+		double best = -std::numeric_limits<double>::infinity();
+		int best_bin = -1;
+		for (int b = 0; b < static_cast<int>(map->NumDirections()); ++b)
+		{
+			if (b == bins[v] || approach.dot(map->Direction(b)) < std::cos(30.0 * M_PI / 180.0))
+				continue;
+			const double nb = map->Value(b, p).value;
+			if (nb > best)
+			{
+				best = nb;
+				best_bin = b;
+			}
+		}
+		const auto deg = [&](int b) { return std::acos(std::clamp(approach.dot(map->Direction(b)), -1.0, 1.0)) * 180.0 / M_PI; };
+		RCLCPP_INFO(
+			log, "check vp %2zu: value %.3f in its bin (%.1f deg off center); best bin within 30 deg: %.3f (%.1f deg off)", v,
+			value, deg(bins[v]), best, best_bin < 0 ? 0.0 : deg(best_bin));
+	}
+	RCLCPP_INFO(log, "check: %d/%zu viewpoints unreachable by the map at abs (%.4f, %.4f, %.4f)", negative, viewpoints.size(), at.x(), at.y(), at.z());
 	ReachabilityMap::Score score = map->ScoreAt(viewpoints, bins, at, tau);
 	auto report = [&](int iter, double step) {
 		RCLCPP_INFO(
