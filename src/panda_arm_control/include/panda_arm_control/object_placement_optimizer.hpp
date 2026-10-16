@@ -160,7 +160,6 @@ private:
 	void RecordHistoryAndBest(const Position& at, const TourSolution& sol);
 
 	// --- Room-then-reach ---
-	Eigen::MatrixXd GetToolJacobian(const Joints& q);
 	Eigen::Vector3d RemoveMotionOnLockedAxes(Eigen::Vector3d v) const;
 	std::vector<room_margins::Margin> GetIkPoseMargins(int v, const Joints& q);
 	room_margins::ArmModel BuildRoomMarginArmModel(const Position& at, const TourSolution& sol);
@@ -222,7 +221,6 @@ private:
 	const std::vector<int>* fixed_order = nullptr;  // order the GTSP must keep; null = it reorders
 
 	// --- Scene and markers ---
-	void MoveObjectTo(const Position& at);
 	void PublishProgressMarkers(const Eigen::Vector3d& neg_grad);
 };
 

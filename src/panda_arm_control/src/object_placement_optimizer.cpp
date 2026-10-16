@@ -102,18 +102,18 @@ BaseGradientResult ObjectPlacementOptimizer::Optimize()
 {
 	const Position start(this->params.initial_x, this->params.initial_y, this->params.initial_z);
 
-	// Outer: once every viewpoint is reached (and refined), step up the reachability map and solve again from there;
-	// keep the result if its cost is lower, else halve the step.
 	this->outer_iteration = 0;
-	ReachAttemptResult best_result = this->ReachAllViewpoints(start);
+	ReachAttemptResult best_result = this->ReachAllViewpoints(start); // Try to reach all viewpoints
 	double step = this->params.reach_outer_step;
+
+	// After all viewpoints are reached
 	for (int outer = 1; outer <= this->params.reach_outer_iterations && best_result.all_reachable && step >= 0.02 && rclcpp::ok(); ++outer)
 	{
-		const std::optional<Position> next = this->GetReachabilityMapStep(best_result.position, step, outer);
+		const std::optional<Position> next = this->GetReachabilityMapStep(best_result.position, step, outer); // Try to move more based on reachability map
 		if (!next) break;
 		
 		this->outer_iteration = outer;
-		const ReachAttemptResult d = this->ReachAllViewpoints(*next);
+		const ReachAttemptResult d = this->ReachAllViewpoints(*next); // Try to reach all viewpoints again after reachability move
 		const bool better = d.all_reachable && d.weighted_cost_sum < best_result.weighted_cost_sum;
 		RCLCPP_INFO(
 			this->node->get_logger(), "outer %d done: reachable %d/%d, cost %.4f vs %.4f best -> %s", outer,
@@ -152,24 +152,20 @@ BaseGradientResult ObjectPlacementOptimizer::Optimize()
 	return this->run_result;
 }
 
-// Up to descent_num_restart tries to reach every viewpoint. Each try: a full solve at its start, then kinematic moves
-// until all are reached (then ImproveCost) or it is stuck (then a manipulability jump gives the next try's start).
-// Returns the best try.
 ReachAttemptResult ObjectPlacementOptimizer::ReachAllViewpoints(const Position& from)
 {
 	const int num_tries = std::max(1, this->params.descent_num_restart);
 	ReachAttemptResult best_attempt;
 	for (int r = 0; r < num_tries && rclcpp::ok(); ++r)
-	{
-		const Position start =
-			r == 0 ? from : this->RunManipulabilityJump(best_attempt.position, best_attempt.tour_solution, r);
+	{	
+		// First run start from input position. Later run at a manipulability jump from the best attempt so far
+		const Position start = r == 0 ? from : this->RunManipulabilityJump(best_attempt.position, best_attempt.tour_solution, r);
 		if (this->ResetAndSolveAtStart(start, r, r == 0 ? nullptr : &best_attempt.tour_solution))
 		{
 			// Kinematic moves while any viewpoint is missed.
 			int moves_used = 0;
-			int no_gain = 0;  // moves since a viewpoint was last gained
-			for (; moves_used < this->params.max_kinematic_moves && !this->current_tour.all_reachable && rclcpp::ok();
-				 ++moves_used)
+			int no_gain = 0;  // Moves since a viewpoint was last gained
+			for (; moves_used < this->params.max_kinematic_moves && !this->current_tour.all_reachable && rclcpp::ok(); ++moves_used)
 			{
 				if (std::chrono::steady_clock::now() > this->reach_deadline || no_gain >= this->params.reach_patience)
 				{
@@ -188,10 +184,12 @@ ReachAttemptResult ObjectPlacementOptimizer::ReachAllViewpoints(const Position& 
 				}
 				no_gain = this->current_tour.num_reachable > reached ? 0 : no_gain + 1;
 			}
-			if (this->current_tour.all_reachable)
+			if (this->current_tour.all_reachable) // After all viewpoints are reached, keep moving to lower travel cost
 				this->ImproveCost(moves_used);
 		}
 		const ReachAttemptResult d = this->best_in_attempt;
+
+		// Improved is true if it's 1) first attempt or 2) reaches more viewpoints or 3) same viewpoints but lower cost
 		const bool improved = r == 0 || d.tour_solution.num_reachable > best_attempt.tour_solution.num_reachable ||
 			(d.tour_solution.num_reachable == best_attempt.tour_solution.num_reachable &&
 			 d.weighted_cost_sum < best_attempt.weighted_cost_sum);
@@ -212,47 +210,28 @@ ReachAttemptResult ObjectPlacementOptimizer::ReachAllViewpoints(const Position& 
 	return best_attempt;
 }
 
-Eigen::MatrixXd ObjectPlacementOptimizer::GetToolJacobian(const Joints& q)
-{
-	return manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, q);
-}
-
-void ObjectPlacementOptimizer::MoveObjectTo(const Position& at)
-{
-	scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
-}
-
-
-// ---------------------------------------------------------------------------------------------
-// Descent
-// ---------------------------------------------------------------------------------------------
-
-// Resets the per-try state (seed, IK starts, last poses, deadline, best) and runs the first full solve at `start`.
-// False if nothing is reachable there.
 bool ObjectPlacementOptimizer::ResetAndSolveAtStart(const Position& start, int restart_in, const TourSolution* warm)
 {
+	// Resets the per-try state (seed, IK starts, last poses, deadline, best) and runs the first full solve at `start`.
+	// Return false if nothing is reachable there.
 	this->attempt_index = restart_in;
 	this->attempt_seed = this->params.random_seed + this->attempt_index;  // each restart draws its own IK luck
 	this->current_position = ClampToBounds(start, this->params.bounds);
-	this->ik_start_poses = warm ? GetIkStartPoses(*warm, this->home_pose, this->num_viewpoint)
-					   : std::vector<Joints>(static_cast<size_t>(this->num_viewpoint), this->home_pose);
+	this->ik_start_poses = warm ? GetIkStartPoses(*warm, this->home_pose, this->num_viewpoint) : std::vector<Joints>(static_cast<size_t>(this->num_viewpoint), this->home_pose);
 	this->stall_count = 0;
 	this->last_reached_poses.assign(static_cast<size_t>(this->num_viewpoint), {});
 	this->last_closest_poses.assign(static_cast<size_t>(this->num_viewpoint), {});
 	this->track_current_poses = true;
 	this->logged_refine_at_first_reach = false;
 	this->reach_deadline = this->params.reach_time_limit > 0.0
-		? std::chrono::steady_clock::now() +
-			std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-				std::chrono::duration<double>(this->params.reach_time_limit))
+		? std::chrono::steady_clock::now()
+		+ std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(this->params.reach_time_limit))
 		: std::chrono::steady_clock::time_point::max();
 	this->best_in_attempt = ReachAttemptResult{};
 	this->best_in_attempt.position = this->current_position;
 
 	ik_sampling::ReseedRng(this->attempt_seed);
-	this->current_tour = this->SolveTourBestOf(
-		this->current_position, this->params, warm ? &warm->viewpoint_order : nullptr,
-		this->params.lock_input_order ? &this->input_order : nullptr);
+	this->current_tour = this->SolveTourBestOf(this->current_position, this->params, warm ? &warm->viewpoint_order : nullptr, this->params.lock_input_order ? &this->input_order : nullptr);
 	this->current_tour = this->AddPlannedTravel(this->current_position, std::move(this->current_tour));
 	if (this->current_tour.viewpoint_order.empty())
 	{
@@ -271,8 +250,7 @@ bool ObjectPlacementOptimizer::ResetAndSolveAtStart(const Position& start, int r
 	return true;
 }
 
-// Once all are reached: kinematic moves to lower the cost (unless stop_when_all_reached), then refine. `iter`: moves
-// already used.
+// Once all are reached: kinematic moves to lower the cost (unless stop_when_all_reached), then refine. `iter`: moves already used.
 void ObjectPlacementOptimizer::ImproveCost(int iter)
 {
 	this->LogRefineAtFirstReach();
@@ -409,8 +387,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 		return this->QuickSolveTour(cand, here_at.num_reachable);
 	};
 	std::vector<MissedViewpoint> targets = this->quick_solve_tour.missed_viewpoints;
-	std::sort(
-		targets.begin(), targets.end(),
+	std::sort(targets.begin(), targets.end(),
 		[&](const MissedViewpoint& a, const MissedViewpoint& b)
 		{
 			return scene_geometry::PoseGap(a.pose_error, this->params.rot_metric_scale) <
@@ -418,6 +395,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 		});
 	if (this->params.room_max_targets > 0 && static_cast<int>(targets.size()) > this->params.room_max_targets)
 		targets.resize(static_cast<size_t>(this->params.room_max_targets));  // the far ones rarely succeed
+		
 	for (const MissedViewpoint& miss : targets)
 	{
 		const int target = miss.viewpoint_index;
@@ -1046,7 +1024,7 @@ TourSolution ObjectPlacementOptimizer::RefineTour(const Position& at, TourSoluti
 // unreachable_penalty.
 double ObjectPlacementOptimizer::ComputePlannedTravel(const Position& at, const TourSolution& sol)
 {
-	this->MoveObjectTo(at);
+	scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
 	const std::vector<double> edges = PlanTourJointPathLengths(
 		this->node, this->robot_model, this->scene, sol.ik_poses, this->home_pose, this->group_name,
 		this->params.real_cost_planning_time, this->params.real_cost_attempts,
@@ -1125,8 +1103,7 @@ Eigen::Vector3d ObjectPlacementOptimizer::ComputeCostGradient(const TourSolution
 {
 	const double k = p.manipulability_limit_sharpness;
 	const size_t n = sol.viewpoint_order.size();
-	auto dq_dp = [&](const Joints& q)
-	{ return Eigen::MatrixXd(scene_geometry::DampedPinv(this->GetToolJacobian(q), p.jacobian_damping).leftCols<3>()); };
+	auto dq_dp = [&](const Joints& q) { return Eigen::MatrixXd(scene_geometry::DampedPinv(manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, q), p.jacobian_damping).leftCols<3>()); };
 	std::vector<Eigen::MatrixXd> dq(n);
 	for (size_t i = 0; i < n; ++i)
 		dq[i] = dq_dp(sol.ik_poses[i]);
@@ -1276,7 +1253,7 @@ Eigen::Vector3d ObjectPlacementOptimizer::GetMoveDirectionToCloseGap(
 
 room_margins::ArmModel ObjectPlacementOptimizer::BuildRoomMarginArmModel(const Position& at, const TourSolution& sol)
 {
-	this->MoveObjectTo(at);
+	scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
 	room_margins::ArmModel model;
 	model.q.resize(static_cast<size_t>(this->num_viewpoint));
 	model.dq_dp.resize(static_cast<size_t>(this->num_viewpoint));
@@ -1287,7 +1264,7 @@ room_margins::ArmModel ObjectPlacementOptimizer::BuildRoomMarginArmModel(const P
 			continue;
 		const size_t v = static_cast<size_t>(sol.viewpoint_order[k]);
 		model.q[v] = q;
-		model.dq_dp[v] = scene_geometry::DampedPinv(this->GetToolJacobian(q), this->params.jacobian_damping).leftCols<3>();
+		model.dq_dp[v] = scene_geometry::DampedPinv(manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, q), this->params.jacobian_damping).leftCols<3>();
 		const std::vector<room_margins::Margin> m = this->GetIkPoseMargins(sol.viewpoint_order[k], q);
 		model.margins.insert(model.margins.end(), m.begin(), m.end());
 	}
@@ -1304,8 +1281,7 @@ std::vector<room_margins::Margin> ObjectPlacementOptimizer::GetIkPoseMargins(int
 	const double kWindow = 0.1;			 // m
 	const double h = 1e-5;				 // rad, finite-difference step
 	const int dof = static_cast<int>(q.size());
-	const Eigen::MatrixXd dq_dp =
-		scene_geometry::DampedPinv(this->GetToolJacobian(q), this->params.jacobian_damping).leftCols<3>();
+	const Eigen::MatrixXd dq_dp = scene_geometry::DampedPinv(manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, q), this->params.jacobian_damping).leftCols<3>();
 	std::vector<room_margins::Margin> margins;
 	auto add = [&](const std::string& name, double value, double floor, const Eigen::VectorXd& joint_slope,
 				   const Eigen::Vector3d& direct)
@@ -1337,7 +1313,7 @@ std::vector<room_margins::Margin> ObjectPlacementOptimizer::GetIkPoseMargins(int
 	};
 	// Smallest singular value of the tool Jacobian: 0 when fully stretched or folded.
 	auto stretch = [this](const Joints& x) {
-		return Eigen::JacobiSVD<Eigen::MatrixXd>(this->GetToolJacobian(x)).singularValues().minCoeff();
+		return Eigen::JacobiSVD<Eigen::MatrixXd>(manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, x)).singularValues().minCoeff();
 	};
 	add("stretch", stretch(q), kStretchFloor, slope_of(stretch),
 		Eigen::Vector3d::Zero());
@@ -1393,7 +1369,7 @@ std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(
 			tightest = buf;
 			raise = m.joint_slope;
 		}
-	this->MoveObjectTo(at);
+	scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
 	const geometry_msgs::msg::Pose target =
 		scene_geometry::ToPoseMsg(scene_geometry::Translation(at) * this->viewpoints[static_cast<size_t>(v)]);
 	double best_score = now + 1.0;
@@ -1419,7 +1395,7 @@ std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(
 		consider(q, "resampled");
 	}
 	const Joints& q0 = model.q[static_cast<size_t>(v)];
-	const Eigen::MatrixXd J = this->GetToolJacobian(q0);
+	const Eigen::MatrixXd J = manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, q0);
 	const Eigen::VectorXd slide = (Eigen::MatrixXd::Identity(J.cols(), J.cols()) -
 								   scene_geometry::DampedPinv(J, this->params.jacobian_damping) * J) *
 		raise;
