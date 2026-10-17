@@ -14,6 +14,7 @@
 #include "panda_arm_control/manipulability.hpp"
 #include "panda_arm_control/marker_utils.hpp"
 #include "panda_arm_control/real_cost_planning.hpp"
+#include "panda_arm_control/tour_placement.hpp"
 
 namespace object_placement
 {
@@ -263,6 +264,7 @@ void ObjectPlacementOptimizer::ImproveCost(int iter)
 			if (!this->TryReachViewpoints(iter))
 				break;
 	this->RefineBestTour();
+	this->OptimizeTourAndPlacement();
 }
 
 // One move of the object: gradient line search, else TryKinematicRoomMove (room-then-reach) while viewpoints are
@@ -796,6 +798,126 @@ void ObjectPlacementOptimizer::RefineBestTour()
 		where.empty() ? " none" : where.c_str());
 }
 
+// After refine: with the viewpoint order and IK branches fixed, move the object and slide each tour pose along its
+// self-motion to shorten the tour's joint distance (a QP per iteration on the linearized poses, then IK back onto the
+// viewpoints). The result is kept if its planned travel is lower.
+void ObjectPlacementOptimizer::OptimizeTourAndPlacement()
+{
+	if (this->params.tour_placement_iterations <= 0 || !this->best_in_attempt.all_reachable)
+		return;
+	// Comparison only: more refine solves from the same refined tour, logged and not used.
+	if (this->params.compare_extra_refine_solves > 0)
+	{
+		const auto refine_start = std::chrono::steady_clock::now();
+		const TourSolution extra = this->RefineTour(this->best_in_attempt.position, this->best_in_attempt.tour_solution, this->params.compare_extra_refine_solves, false);
+		RCLCPP_INFO(this->node->get_logger(), "  extra refine (%d solves, %.1f s): planned travel %.2f -> %.2f rad", this->params.compare_extra_refine_solves, std::chrono::duration<double>(std::chrono::steady_clock::now() - refine_start).count(), this->best_in_attempt.tour_solution.planned_cost, extra.planned_cost);
+	}
+	const auto tour_placement_start = std::chrono::steady_clock::now();
+	const std::vector<int>& order = this->best_in_attempt.tour_solution.viewpoint_order;
+	tour_placement::StepLimits limits;
+	for (const std::string& name : this->joint_group->getVariableNames())
+	{
+		limits.joint_min.push_back(this->robot_model->getVariableBounds(name).min_position_);
+		limits.joint_max.push_back(this->robot_model->getVariableBounds(name).max_position_);
+	}
+	limits.joint_margin = this->params.tour_placement_joint_margin;
+	limits.free_axes = this->RemoveMotionOnLockedAxes(Eigen::Vector3d::Ones());
+	limits.frozen_poses.assign(this->best_in_attempt.tour_solution.ik_poses.size(), false);
+	double object_step = this->params.tour_placement_object_step;
+	double self_motion_step = this->params.tour_placement_self_motion_step;
+	auto get_joint_distance = [&](const std::vector<Joints>& tour)
+	{
+		double distance = 0.0;
+		for (size_t k = 0; k < tour.size(); ++k)
+			distance += joint_travel::JointDistance(k == 0 ? this->home_pose : tour[k - 1], tour[k], this->counted_joint_indices);
+		return distance;
+	};
+
+	Position position = this->best_in_attempt.position;
+	std::vector<Joints> poses = this->best_in_attempt.tour_solution.ik_poses;
+	double distance = get_joint_distance(poses);
+	int num_accepted = 0;
+	for (int iter = 0; iter < this->params.tour_placement_iterations && object_step > 1e-4 && rclcpp::ok(); ++iter)
+	{
+		std::vector<tour_placement::LinearizedPose> linearized;
+		for (const Joints& q : poses)
+		{
+			const Eigen::MatrixXd jacobian = manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, q);
+			linearized.push_back({q, Eigen::MatrixXd(scene_geometry::DampedPinv(jacobian, this->params.jacobian_damping).leftCols<3>()), tour_placement::GetSelfMotionDirection(jacobian)});
+		}
+		limits.max_object_step = object_step;
+		limits.max_self_motion = self_motion_step;
+		const tour_placement::Step step = tour_placement::SolveStep(this->home_pose, linearized, this->counted_joint_indices, limits);
+		if (!step.ok)
+		{
+			RCLCPP_WARN(this->node->get_logger(), "  tour-placement %d: QP not solved -- stopping", iter + 1);
+			break;
+		}
+
+		// IK-correct each predicted pose onto its viewpoint (IK seeded there); a pose that fails or jumps branch rejects the step.
+		const Position next_position = ClampToBounds(position + step.object_move, this->params.bounds);
+		scene_geometry::MoveObject(this->scene, scene_geometry::Translation(next_position) * this->object_pose);
+		std::vector<Joints> next_poses;
+		for (size_t k = 0; k < poses.size(); ++k)
+		{
+			const Eigen::VectorXd predicted = Eigen::Map<const Eigen::VectorXd>(poses[k].data(), static_cast<Eigen::Index>(poses[k].size())) + linearized[k].dq_dp * (next_position - position) + linearized[k].self_motion * step.self_motion_amounts[k];
+			Joints seed(predicted.data(), predicted.data() + predicted.size());
+			for (size_t j = 0; j < seed.size(); ++j)
+				seed[j] = std::clamp(seed[j], limits.joint_min[j], limits.joint_max[j]);
+			this->robot_state.setJointGroupPositions(this->joint_group, seed);
+			const geometry_msgs::msg::Pose target = scene_geometry::ToPoseMsg(scene_geometry::Translation(next_position) * this->viewpoints[static_cast<size_t>(order[k])]);
+			if (!ik_sampling::ExactIk(this->robot_state, this->joint_group, target, 1, this->params.ik_timeout, this->state_validity))
+				break;
+			Joints projected;
+			this->robot_state.copyJointGroupPositions(this->joint_group, projected);
+			if (joint_travel::JointDistance(projected, seed, joint_travel::AllJoints(static_cast<int>(seed.size()))) > 0.2)
+				break;
+			next_poses.push_back(projected);
+		}
+		const size_t failed_pose = next_poses.size();
+		const double next_distance = failed_pose == poses.size() ? get_joint_distance(next_poses) : std::numeric_limits<double>::infinity();
+		if (next_distance >= distance)
+		{
+			scene_geometry::MoveObject(this->scene, scene_geometry::Translation(position) * this->object_pose);
+			// A pose that failed IK correction keeps its self-motion from now on; retry at the same step size once per pose.
+			if (failed_pose < poses.size() && !limits.frozen_poses[failed_pose])
+			{
+				limits.frozen_poses[failed_pose] = true;
+				continue;
+			}
+			object_step *= 0.5;
+			self_motion_step *= 0.5;
+			continue;
+		}
+		position = next_position;
+		poses = std::move(next_poses);
+		distance = next_distance;
+		++num_accepted;
+		// Grow the step back after a success, up to the starting size.
+		object_step = std::min(1.5 * object_step, this->params.tour_placement_object_step);
+		self_motion_step = std::min(1.5 * self_motion_step, this->params.tour_placement_self_motion_step);
+	}
+	if (num_accepted == 0)
+	{
+		RCLCPP_INFO(this->node->get_logger(), "  tour-placement: no improvement");
+		return;
+	}
+
+	TourSolution optimized = this->best_in_attempt.tour_solution;
+	optimized.ik_poses = poses;
+	optimized.joint_distance_plus_turn = joint_travel::TravelCost(PrependHomePose(this->home_pose, poses), this->params.edge_weights, this->counted_joint_indices);
+	optimized.planned_cost = this->can_plan ? this->ComputePlannedTravel(position, optimized) : -1.0;
+	optimized.weighted_cost_sum = this->ComputeWeightedCost(optimized);
+	const bool kept = optimized.weighted_cost_sum < this->best_in_attempt.weighted_cost_sum;
+	RCLCPP_INFO(this->node->get_logger(), "  tour-placement (%.1f s): planned travel %.2f -> %.2f rad%s", std::chrono::duration<double>(std::chrono::steady_clock::now() - tour_placement_start).count(), this->best_in_attempt.tour_solution.planned_cost, optimized.planned_cost, kept ? "" : "  -- not kept");
+	if (!kept)
+		return;
+	this->move_history.push_back({this->best_in_attempt.position, position, MoveKind::KinematicRoomMove});
+	this->best_in_attempt.position = position;
+	this->best_in_attempt.tour_solution = std::move(optimized);
+	this->best_in_attempt.weighted_cost_sum = this->best_in_attempt.tour_solution.weighted_cost_sum;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Solving and scoring
 // ---------------------------------------------------------------------------------------------
@@ -1021,12 +1143,13 @@ TourSolution ObjectPlacementOptimizer::QuickSolveTour(const Position& at, BaseGr
 
 // More full solves at a fixed spot, each warm-started from the best so far, with more IK choices. Keeps the lowest
 // cost; never fewer viewpoints reached.
-TourSolution ObjectPlacementOptimizer::RefineTour(const Position& at, TourSolution best_sol, int num_solves)
+TourSolution ObjectPlacementOptimizer::RefineTour(const Position& at, TourSolution best_sol, int num_solves, bool log_progress)
 {
 	if (this->can_plan && best_sol.planned_cost < 0.0)
 		best_sol.planned_cost = this->ComputePlannedTravel(at, best_sol);
 	best_sol.weighted_cost_sum = this->ComputeWeightedCost(best_sol);
-	RCLCPP_INFO(this->node->get_logger(), "  refine start: reachable %d/%d, joint dist + largest turn %.2f, planned travel %.2f rad", best_sol.num_reachable, this->num_viewpoint, best_sol.joint_distance_plus_turn, best_sol.planned_cost);
+	if (log_progress)
+		RCLCPP_INFO(this->node->get_logger(), "  refine start: reachable %d/%d, joint dist + largest turn %.2f, planned travel %.2f rad", best_sol.num_reachable, this->num_viewpoint, best_sol.joint_distance_plus_turn, best_sol.planned_cost);
 	for (int i = 0; i < num_solves && rclcpp::ok(); ++i)
 	{
 		const std::vector<int>* lock = this->params.lock_input_order ? &this->input_order
@@ -1038,14 +1161,16 @@ TourSolution ObjectPlacementOptimizer::RefineTour(const Position& at, TourSoluti
 		this->run_result.num_inner_solves += 1;
 		if (s.num_reachable < best_sol.num_reachable)
 		{
-			RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: reachable %d/%d, fewer than the best -- skipped", i + 1, num_solves, s.num_reachable, this->num_viewpoint);
+			if (log_progress)
+				RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: reachable %d/%d, fewer than the best -- skipped", i + 1, num_solves, s.num_reachable, this->num_viewpoint);
 			continue;
 		}
 		if (this->can_plan)
 			s.planned_cost = this->ComputePlannedTravel(at, s);
 		s.weighted_cost_sum = this->ComputeWeightedCost(s);
 		const bool better = s.weighted_cost_sum < best_sol.weighted_cost_sum;
-		RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: joint dist + largest turn %.2f, planned travel %.2f rad vs %.2f best%s", i + 1, num_solves, s.joint_distance_plus_turn, s.planned_cost, best_sol.planned_cost, better ? "  <-- new best" : "");
+		if (log_progress)
+			RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: joint dist + largest turn %.2f, planned travel %.2f rad vs %.2f best%s", i + 1, num_solves, s.joint_distance_plus_turn, s.planned_cost, best_sol.planned_cost, better ? "  <-- new best" : "");
 		if (better)
 			best_sol = std::move(s);
 	}

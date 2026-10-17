@@ -91,6 +91,11 @@ struct Params
 	bool bg_stop_when_all_reached = false;
 	int bg_refine_solves = 0;
 	int bg_refine_ik_solutions = 8;
+	int bg_tour_placement_iterations = 0;
+	double bg_tour_placement_object_step = 0.02;
+	double bg_tour_placement_self_motion_step = 0.3;
+	double bg_tour_placement_joint_margin = 0.05;
+	int bg_compare_extra_refine_solves = 0;
 	double bg_reconfig_threshold = 1.0;
 	bool bg_travel_gradient = true;
 	bool bg_freeze_order = false;
@@ -303,6 +308,11 @@ private:
 		this->declareIfNeeded("bg_stop_when_all_reached", this->params.bg_stop_when_all_reached);
 		this->declareIfNeeded("bg_refine_solves", this->params.bg_refine_solves);
 		this->declareIfNeeded("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
+		this->declareIfNeeded("bg_tour_placement_iterations", this->params.bg_tour_placement_iterations);
+		this->declareIfNeeded("bg_tour_placement_object_step", this->params.bg_tour_placement_object_step);
+		this->declareIfNeeded("bg_tour_placement_self_motion_step", this->params.bg_tour_placement_self_motion_step);
+		this->declareIfNeeded("bg_tour_placement_joint_margin", this->params.bg_tour_placement_joint_margin);
+		this->declareIfNeeded("bg_compare_extra_refine_solves", this->params.bg_compare_extra_refine_solves);
 		this->declareIfNeeded("bg_reconfig_threshold", this->params.bg_reconfig_threshold);
 		this->declareIfNeeded("bg_travel_gradient", this->params.bg_travel_gradient);
 		this->declareIfNeeded("bg_freeze_order", this->params.bg_freeze_order);
@@ -387,6 +397,11 @@ private:
 		this->get_parameter("bg_stop_when_all_reached", this->params.bg_stop_when_all_reached);
 		this->get_parameter("bg_refine_solves", this->params.bg_refine_solves);
 		this->get_parameter("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
+		this->get_parameter("bg_tour_placement_iterations", this->params.bg_tour_placement_iterations);
+		this->get_parameter("bg_tour_placement_object_step", this->params.bg_tour_placement_object_step);
+		this->get_parameter("bg_tour_placement_self_motion_step", this->params.bg_tour_placement_self_motion_step);
+		this->get_parameter("bg_tour_placement_joint_margin", this->params.bg_tour_placement_joint_margin);
+		this->get_parameter("bg_compare_extra_refine_solves", this->params.bg_compare_extra_refine_solves);
 		this->get_parameter("bg_reconfig_threshold", this->params.bg_reconfig_threshold);
 		this->get_parameter("bg_travel_gradient", this->params.bg_travel_gradient);
 		this->get_parameter("bg_freeze_order", this->params.bg_freeze_order);
@@ -495,6 +510,11 @@ private:
 		bg.stop_when_all_reached = this->params.bg_stop_when_all_reached;
 		bg.refine_solves = this->params.bg_refine_solves;
 		bg.refine_ik_solutions = this->params.bg_refine_ik_solutions;
+		bg.tour_placement_iterations = this->params.bg_tour_placement_iterations;
+		bg.tour_placement_object_step = this->params.bg_tour_placement_object_step;
+		bg.tour_placement_self_motion_step = this->params.bg_tour_placement_self_motion_step;
+		bg.tour_placement_joint_margin = this->params.bg_tour_placement_joint_margin;
+		bg.compare_extra_refine_solves = this->params.bg_compare_extra_refine_solves;
 		bg.reconfig_threshold = this->params.bg_reconfig_threshold;
 		bg.travel_gradient = this->params.bg_travel_gradient;
 		bg.freeze_order = this->params.bg_freeze_order;

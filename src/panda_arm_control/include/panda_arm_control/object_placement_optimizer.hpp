@@ -133,11 +133,12 @@ private:
 	bool CommitMove(const MoveCandidate& step, TourSolution committed, int iter, const Eigen::Vector3d& g);
 	void LogRefineAtFirstReach();
 	void RefineBestTour();
+	void OptimizeTourAndPlacement();
 
 	// --- Solving and scoring ---
 	TourSolution QuickSolveTour(const Position& at, BaseGradientParams p);
 	TourSolution QuickSolveTour(const Position& at, int gaps_min_reached = 0);
-	TourSolution RefineTour(const Position& at, TourSolution best_sol, int num_solves);
+	TourSolution RefineTour(const Position& at, TourSolution best_sol, int num_solves, bool log_progress = true);
 	std::vector<std::vector<Joints>> CollectIkPoses(
 		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed, int max_solutions);
 	TourSolution SolveMostManipulablePoses(const Position& at, const BaseGradientParams& p);
