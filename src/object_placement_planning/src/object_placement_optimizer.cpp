@@ -125,6 +125,10 @@ ObjectPlacementOptimizer::ObjectPlacementOptimizer(
 	this->state_validity = [this](moveit::core::RobotState* s, const moveit::core::JointModelGroup* g, const double* q) {
 		return scene_geometry::IsStateValid(this->scene, s, g, q);
 	};
+	if (this->params.ik_solver != "kdl" && this->params.ik_solver != "closest")
+		RCLCPP_WARN(this->node->get_logger(), "unknown ik_solver '%s' -- using kdl", this->params.ik_solver.c_str());
+	if (this->params.ignore_camera_roll && this->params.ik_solver != "closest")
+		RCLCPP_WARN(this->node->get_logger(), "ignore_camera_roll needs ik_solver: closest -- roll stays fixed");
 	this->can_plan = this->params.real_cost_planning_time > 0.0;
 	this->use_planned_travel_in_cost = this->params.planned_travel_in_cost && this->can_plan;
 
@@ -746,8 +750,8 @@ void ObjectPlacementOptimizer::OptimizeTourAndPlacement()
 			for (size_t j = 0; j < seed.size(); ++j)
 				seed[j] = std::clamp(seed[j], limits.joint_min[j], limits.joint_max[j]);
 			this->robot_state.setJointGroupPositions(this->joint_group, seed);
-			const geometry_msgs::msg::Pose target = scene_geometry::ToPoseMsg(scene_geometry::Translation(next_position) * this->viewpoints[static_cast<size_t>(order[k])]);
-			if (!ik_sampling::ExactIk(this->robot_state, this->joint_group, target, 1, this->params.ik_timeout, this->state_validity))
+			const Eigen::Isometry3d target = scene_geometry::Translation(next_position) * this->viewpoints[static_cast<size_t>(order[k])];
+			if (!this->SolveExactIk(this->robot_state, target, 1, this->params, ik_sampling::SeededRng()))
 				break;
 			Joints projected;
 			this->robot_state.copyJointGroupPositions(this->joint_group, projected);
@@ -803,6 +807,45 @@ void ObjectPlacementOptimizer::OptimizeTourAndPlacement()
 // Solving and scoring
 // ---------------------------------------------------------------------------------------------
 
+// closest_ik settings from the params; with the kdl solver the closest pass stays as before (no exact stage, roll fixed).
+closest_ik::Options ObjectPlacementOptimizer::GetClosestIkOptions(const ObjectPlacementParams& p, bool exact_only) const
+{
+	const bool use_closest_solver = p.ik_solver == "closest";
+	closest_ik::Options options;
+	options.iters = p.closest_ik_iters;
+	options.margin = p.closest_ik_margin;
+	options.rot_scale = p.rot_metric_scale;
+	options.limit_sharpness = p.manipulability_limit_sharpness;
+	options.ignore_roll = use_closest_solver && p.ignore_camera_roll;
+	options.try_exact_first = use_closest_solver;
+	options.exact_only = exact_only;
+	options.exact_margin = p.exact_ik_margin;
+	return options;
+}
+
+// Exact IK from the state's pose, then from random poses (attempts in all). On success the state holds the solution.
+bool ObjectPlacementOptimizer::SolveExactIk(moveit::core::RobotState& state, const Eigen::Isometry3d& target, int attempts, const ObjectPlacementParams& p, random_numbers::RandomNumberGenerator& rng)
+{
+	if (p.ik_solver != "closest")
+		return ik_sampling::ExactIk(state, this->joint_group, scene_geometry::ToPoseMsg(target), attempts, p.ik_timeout, this->state_validity, rng);
+	const closest_ik::Options options = this->GetClosestIkOptions(p, true);
+	for (int attempt = 0; attempt < std::max(1, attempts); ++attempt)
+	{
+		if (attempt > 0)
+			state.setToRandomPositions(this->joint_group, rng);
+		Joints start;
+		state.copyJointGroupPositions(this->joint_group, start);
+		const closest_ik::Result result = closest_ik::Solve(this->scene, state, this->joint_group, this->tool_link, target, start, options);
+		if (result.exact)
+		{
+			state.setJointGroupPositions(this->joint_group, result.q);
+			state.update();
+			return true;
+		}
+	}
+	return false;
+}
+
 // IK solutions per viewpoint: one from its seed (stays near it), the rest from random starts. Tracking: one attempt
 // from the seed; random ones only if it fails.
 std::vector<std::vector<Joints>> ObjectPlacementOptimizer::CollectIkPoses(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed_q, int max_solutions)
@@ -821,11 +864,11 @@ std::vector<std::vector<Joints>> ObjectPlacementOptimizer::CollectIkPoses(const 
 	const uint32_t base_seed = static_cast<uint32_t>(ik_sampling::SeededRng().uniformInteger(1, 1 << 30));
 	RunInParallel(this->robot_state, this->viewpoints.size(), base_seed, [&](size_t v, moveit::core::RobotState& state, random_numbers::RandomNumberGenerator& rng)
 	{
-		const geometry_msgs::msg::Pose target = scene_geometry::ToPoseMsg(xform * this->viewpoints[v]);
+		const Eigen::Isometry3d target = xform * this->viewpoints[v];
 		std::vector<Joints>& sols = ik[v];
 		Joints q;
 		state.setJointGroupPositions(this->joint_group, seed_q[v]);
-		if (ik_sampling::ExactIk(state, this->joint_group, target, p.tracking ? 1 : p.ik_attempts, p.ik_timeout, this->state_validity, rng))
+		if (this->SolveExactIk(state, target, p.tracking ? 1 : p.ik_attempts, p, rng))
 		{
 			state.copyJointGroupPositions(this->joint_group, q);
 			sols.push_back(q);
@@ -835,7 +878,7 @@ std::vector<std::vector<Joints>> ObjectPlacementOptimizer::CollectIkPoses(const 
 			if (sols.empty() && attempt >= 4)
 				break;	// out of reach: every miss costs a full IK call
 			state.setToRandomPositions(this->joint_group, rng);
-			if (!ik_sampling::ExactIk(state, this->joint_group, target, p.ik_attempts, p.ik_timeout, this->state_validity, rng))
+			if (!this->SolveExactIk(state, target, p.ik_attempts, p, rng))
 				continue;
 			state.copyJointGroupPositions(this->joint_group, q);
 			const bool dup = std::any_of(sols.begin(), sols.end(), [&](const Joints& s) { return joint_travel::JointDistance(s, q, this->counted_joint_indices) < 0.1; });
@@ -885,6 +928,7 @@ std::vector<MissedViewpoint> ObjectPlacementOptimizer::FindClosestPosesForMissed
 	}
 
 	const Eigen::Isometry3d xform = scene_geometry::Translation(at);
+	const closest_ik::Options closest_options = this->GetClosestIkOptions(p, false);
 	std::vector<closest_ik::Result> closest_poses(misses.size());
 	const auto closest_start = std::chrono::steady_clock::now();
 	const uint32_t base_seed = static_cast<uint32_t>(ik_sampling::SeededRng().uniformInteger(1, 1 << 30));
@@ -916,7 +960,7 @@ std::vector<MissedViewpoint> ObjectPlacementOptimizer::FindClosestPosesForMissed
 				state.setToRandomPositions(this->joint_group, rng);
 				state.copyJointGroupPositions(this->joint_group, start);
 			}
-			const closest_ik::Result r = closest_ik::Solve(this->scene, state, this->joint_group, this->tool_link, target, start, p.closest_ik_iters, p.closest_ik_margin, p.rot_metric_scale, p.manipulability_limit_sharpness);
+			const closest_ik::Result r = closest_ik::Solve(this->scene, state, this->joint_group, this->tool_link, target, start, closest_options);
 			if (r.found && r.gap < closest.gap)
 				closest = r;
 		}
@@ -1277,13 +1321,12 @@ std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(int v, const Pos
 			raise = m.joint_slope;
 		}
 	scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
-	const geometry_msgs::msg::Pose target = scene_geometry::ToPoseMsg(scene_geometry::Translation(at) * this->viewpoints[static_cast<size_t>(v)]);
+	const Eigen::Isometry3d target = scene_geometry::Translation(at) * this->viewpoints[static_cast<size_t>(v)];
 	std::vector<std::pair<Joints, std::string>> candidate_poses;  // pose and how it was found
 	for (int i = 0; i < resamples; ++i)
 	{
 		this->robot_state.setToRandomPositions(this->joint_group, ik_sampling::SeededRng());
-		if (!ik_sampling::ExactIk(
-				this->robot_state, this->joint_group, target, 1, this->params.ik_timeout, this->state_validity))
+		if (!this->SolveExactIk(this->robot_state, target, 1, this->params, ik_sampling::SeededRng()))
 			continue;
 		Joints q;
 		this->robot_state.copyJointGroupPositions(this->joint_group, q);
@@ -1300,8 +1343,7 @@ std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(int v, const Pos
 			q[j] += dq(static_cast<Eigen::Index>(j));
 		// Back onto the viewpoint: one IK attempt from the nudged pose stays near it (collision-free, within limits).
 		this->robot_state.setJointGroupPositions(this->joint_group, q);
-		if (!ik_sampling::ExactIk(
-				this->robot_state, this->joint_group, target, 1, this->params.ik_timeout, this->state_validity))
+		if (!this->SolveExactIk(this->robot_state, target, 1, this->params, ik_sampling::SeededRng()))
 			continue;
 		Joints exact;
 		this->robot_state.copyJointGroupPositions(this->joint_group, exact);
@@ -1361,10 +1403,15 @@ void ObjectPlacementOptimizer::PublishProgressMarkers(const Eigen::Vector3d& neg
 	const rclcpp::Time stamp = this->node->now();
 	const Eigen::Isometry3d xform = scene_geometry::Translation(this->current_position);
 	const Eigen::Vector3d object_at = (xform * this->object_pose).translation();
+	// Markers update in place (same ns and id) instead of after a DELETEALL each time, which made RViz reload meshes and
+	// flash. The first publish still clears what an earlier run left.
 	visualization_msgs::msg::MarkerArray markers;
-	visualization_msgs::msg::Marker clear;
-	clear.action = visualization_msgs::msg::Marker::DELETEALL;
-	markers.markers.push_back(clear);
+	if (this->progress_marker_keys.empty())
+	{
+		visualization_msgs::msg::Marker clear;
+		clear.action = visualization_msgs::msg::Marker::DELETEALL;
+		markers.markers.push_back(clear);
+	}
 
 	if (!this->params.progress_mesh_path.empty())
 	{
@@ -1379,6 +1426,7 @@ void ObjectPlacementOptimizer::PublishProgressMarkers(const Eigen::Vector3d& neg
 
 	visualization_msgs::msg::Marker vps = marker_utils::MakeMarker("object_placement_viewpoints", visualization_msgs::msg::Marker::SPHERE_LIST, stamp);
 	vps.scale.x = vps.scale.y = vps.scale.z = 0.01;
+	vps.color = marker_utils::Rgba(1.0f, 1.0f, 1.0f, 1.0f);
 	for (size_t v = 0; v < this->viewpoints.size(); ++v)
 	{
 		const bool missed = std::any_of(
@@ -1391,22 +1439,32 @@ void ObjectPlacementOptimizer::PublishProgressMarkers(const Eigen::Vector3d& neg
 
 	if (!this->move_history.empty())
 	{
-		visualization_msgs::msg::Marker lines = marker_utils::MakeMarker("object_placement_trail", visualization_msgs::msg::Marker::LINE_LIST, stamp);
-		lines.scale.x = 0.004;
+		// One cylinder per move: line markers vanished from some viewing angles.
 		visualization_msgs::msg::Marker crumbs = marker_utils::MakeMarker("object_placement_history", visualization_msgs::msg::Marker::SPHERE_LIST, stamp);
 		crumbs.scale.x = crumbs.scale.y = crumbs.scale.z = 0.012;
-		for (const MoveSegment& m : this->move_history)
+		crumbs.color = marker_utils::Rgba(1.0f, 1.0f, 1.0f, 1.0f);
+		for (size_t k = 0; k < this->move_history.size(); ++k)
 		{
-			const std_msgs::msg::ColorRGBA c = m.type == MoveType::KinematicRoomMove ? marker_utils::Rgba(1.0f, 0.4f, 0.1f, 0.9f) : marker_utils::Rgba(1.0f, 1.0f, 1.0f, 0.9f);
-			for (const Position& p : {m.from, m.to})
+			const MoveSegment& m = this->move_history[k];
+			const std_msgs::msg::ColorRGBA c = m.type == MoveType::KinematicRoomMove ? marker_utils::Rgba(1.0f, 0.4f, 0.1f, 1.0f) : marker_utils::Rgba(1.0f, 1.0f, 1.0f, 1.0f);
+			const Eigen::Vector3d from = (scene_geometry::Translation(m.from) * this->object_pose).translation();
+			const Eigen::Vector3d to = (scene_geometry::Translation(m.to) * this->object_pose).translation();
+			const double length = (to - from).norm();
+			if (length > 1e-6)
 			{
-				lines.points.push_back(scene_geometry::ToPoint((scene_geometry::Translation(p) * this->object_pose).translation()));
-				lines.colors.push_back(c);
+				visualization_msgs::msg::Marker segment = marker_utils::MakeMarker("object_placement_trail", visualization_msgs::msg::Marker::CYLINDER, stamp, static_cast<int>(k));
+				Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+				pose.translation() = 0.5 * (from + to);
+				pose.linear() = Eigen::Quaterniond::FromTwoVectors(Eigen::Vector3d::UnitZ(), to - from).toRotationMatrix();
+				segment.pose = scene_geometry::ToPoseMsg(pose);
+				segment.scale.x = segment.scale.y = 0.005;
+				segment.scale.z = length;
+				segment.color = c;
+				markers.markers.push_back(segment);
 			}
-			crumbs.points.push_back(lines.points.back());
+			crumbs.points.push_back(scene_geometry::ToPoint(to));
 			crumbs.colors.push_back(c);
 		}
-		markers.markers.push_back(lines);
 		markers.markers.push_back(crumbs);
 	}
 
@@ -1445,6 +1503,18 @@ void ObjectPlacementOptimizer::PublishProgressMarkers(const Eigen::Vector3d& neg
 		m.header.stamp = stamp;
 		markers.markers.push_back(m);
 	}
+	std::set<std::pair<std::string, int>> keys;
+	for (const visualization_msgs::msg::Marker& m : markers.markers)
+		if (m.action == visualization_msgs::msg::Marker::ADD)
+			keys.insert({m.ns, m.id});
+	for (const std::pair<std::string, int>& key : this->progress_marker_keys)
+		if (keys.count(key) == 0)
+		{
+			visualization_msgs::msg::Marker stale = marker_utils::MakeMarker(key.first, visualization_msgs::msg::Marker::SPHERE, stamp, key.second);
+			stale.action = visualization_msgs::msg::Marker::DELETE;
+			markers.markers.push_back(stale);
+		}
+	this->progress_marker_keys = std::move(keys);
 	this->params.progress_pub->publish(markers);
 	if (this->params.visualize_progress_delay_sec > 0.0)
 		std::this_thread::sleep_for(std::chrono::duration<double>(this->params.visualize_progress_delay_sec));

@@ -49,6 +49,12 @@ struct ObjectPlacementParams
 	double closest_ik_margin = 0.02;
 	int closest_ik_iters = 60;
 	int closest_ik_starts = 5;
+	// IK for reached viewpoints: "kdl" (MoveIt's KDL plugin) or "closest" (closest_ik's exact stage, same solver as the
+	// misses' closest poses). With "closest": ignore_camera_roll frees the camera's spin about its axis (also in the
+	// misses' gaps), and an exact pose must keep exact_ik_margin (m) clearance (0 = collision-free only).
+	std::string ik_solver = "kdl";
+	bool ignore_camera_roll = false;
+	double exact_ik_margin = 0.0;
 
 	double unreachable_penalty = 50.0;
 

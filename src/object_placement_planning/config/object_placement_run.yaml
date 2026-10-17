@@ -47,3 +47,6 @@
     manipulability_limit_sharpness: 20.0  # joints near a limit count less in manipulability; 0 = plain
     miss_gap_weight: 200.0
     closest_ik_starts: 5                  # closest-IK starts per missed viewpoint (only runs while viewpoints are missed)
+    ik_solver: closest                    # kdl, or closest: one solver for exact and closest IK
+    ignore_camera_roll: true              # closest solver only: the camera's spin about its axis is free
+    exact_ik_margin: 0.0                  # closest solver only: m clearance an exact IK pose keeps; 0 = collision-free only

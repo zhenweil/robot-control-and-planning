@@ -54,19 +54,39 @@ bool ClearPathToTarget(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state,
 	const moveit::core::LinkModel* tool, const Eigen::Vector3d& target, const std::set<std::string>& tool_side);
 
+struct Options
+{
+	int iters = 60;					 // closest stage
+	double margin = 0.02;			 // m: clearance the closest stage keeps
+	double rot_scale = 0.1;			 // m per rad in the gap
+	double limit_sharpness = 20.0;	 // manipulability's joint-limit falloff
+	bool ignore_roll = false;		 // the tool's spin about its z axis (the camera axis) is free
+	bool try_exact_first = true;	 // exact stage first: plain damped Newton steps, one validity check at the end
+	bool exact_only = false;		 // skip the closest stage
+	int exact_iters = 100;
+	double exact_margin = 0.0;				 // m: clearance an exact pose must keep; 0 = collision-free only
+	double exact_position_tolerance = 1e-4;	 // m
+	double exact_rotation_tolerance = 1e-3;	 // rad
+};
+
 struct Result
 {
 	bool found = false;
+	bool exact = false;	 // within the exact tolerances
 	scene_geometry::Vector6d pose_error = scene_geometry::Vector6d::Zero();
 	double gap = std::numeric_limits<double>::max();
 	std::vector<double> q;	// the best collision-free pose; empty if none
 };
 
-// Damped steps toward the target that keep close pairs out to `margin` (first priority) and climb manipulability in
-// the target's null space. Joints at a limit that the step pushes further are frozen and the step re-solved.
+// [position; rotation] error from tool to target; with ignore_roll the rotation only aligns the tool's z axis.
+scene_geometry::Vector6d GetPoseError(const Eigen::Isometry3d& target, const Eigen::Isometry3d& tool, bool ignore_roll);
+
+// Exact IK if the target is reachable (exact stage), else the closest collision-free pose: damped steps toward the
+// target that keep close pairs out to `margin` (first priority) and climb manipulability in the target's null space.
+// Joints at a limit that the step pushes further are frozen and the step re-solved.
 Result Solve(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state,
 	const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target,
-	const std::vector<double>& start, int iters, double margin, double rot_scale, double limit_sharpness);
+	const std::vector<double>& start, const Options& options);
 
 }  // namespace closest_ik

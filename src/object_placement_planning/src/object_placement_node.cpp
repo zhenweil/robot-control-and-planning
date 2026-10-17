@@ -57,6 +57,9 @@ struct Params
 	double closest_ik_margin = 0.02;
 	int closest_ik_iters = 60;
 	int closest_ik_starts = 5;
+	std::string ik_solver = "kdl";
+	bool ignore_camera_roll = false;
+	double exact_ik_margin = 0.0;
 	double unreachable_penalty = 50.0;
 
 	int max_solutions_per_candidate = 4;
@@ -266,6 +269,9 @@ private:
 		this->declareIfNeeded("closest_ik_margin", this->params.closest_ik_margin);
 		this->declareIfNeeded("closest_ik_iters", this->params.closest_ik_iters);
 		this->declareIfNeeded("closest_ik_starts", this->params.closest_ik_starts);
+		this->declareIfNeeded("ik_solver", this->params.ik_solver);
+		this->declareIfNeeded("ignore_camera_roll", this->params.ignore_camera_roll);
+		this->declareIfNeeded("exact_ik_margin", this->params.exact_ik_margin);
 		this->declareIfNeeded("unreachable_penalty", this->params.unreachable_penalty);
 		this->declareIfNeeded("max_solutions_per_candidate", this->params.max_solutions_per_candidate);
 		this->declareIfNeeded("ik_retries_per_point", this->params.ik_retries_per_point);
@@ -341,6 +347,9 @@ private:
 		this->get_parameter("closest_ik_margin", this->params.closest_ik_margin);
 		this->get_parameter("closest_ik_iters", this->params.closest_ik_iters);
 		this->get_parameter("closest_ik_starts", this->params.closest_ik_starts);
+		this->get_parameter("ik_solver", this->params.ik_solver);
+		this->get_parameter("ignore_camera_roll", this->params.ignore_camera_roll);
+		this->get_parameter("exact_ik_margin", this->params.exact_ik_margin);
 		this->get_parameter("unreachable_penalty", this->params.unreachable_penalty);
 		this->get_parameter("max_solutions_per_candidate", this->params.max_solutions_per_candidate);
 		this->get_parameter("ik_retries_per_point", this->params.ik_retries_per_point);
@@ -438,6 +447,9 @@ private:
 		bg.closest_ik_margin = this->params.closest_ik_margin;
 		bg.closest_ik_iters = this->params.closest_ik_iters;
 		bg.closest_ik_starts = this->params.closest_ik_starts;
+		bg.ik_solver = this->params.ik_solver;
+		bg.ignore_camera_roll = this->params.ignore_camera_roll;
+		bg.exact_ik_margin = this->params.exact_ik_margin;
 		bg.unreachable_penalty = this->params.unreachable_penalty;
 		bg.max_solutions_per_candidate = this->params.max_solutions_per_candidate;
 		bg.ik_timeout = this->params.ik_timeout;

@@ -4,6 +4,8 @@
 // jump before each new reach attempt; GTSP restarts and tour-placement once every viewpoint is reached.
 
 #include <chrono>
+#include <set>
+#include <utility>
 #include <limits>
 #include <string>
 #include <vector>
@@ -15,6 +17,7 @@
 #include <moveit/robot_state/robot_state.h>
 #include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 
+#include "object_placement_planning/closest_ik.hpp"
 #include "object_placement_planning/joint_travel.hpp"
 #include "object_placement_planning/room_margins.hpp"
 #include "object_placement_planning/scene_geometry.hpp"
@@ -125,6 +128,8 @@ private:
 	TourSolution TestCandidateMove(const TourSolution& from_tour, const Position& at);
 	TourSolution FindMostManipulablePoses(const Position& at, const ObjectPlacementParams& p);
 	TourSolution RunGtspRestartsAndEvaluate(const Position& at, TourSolution best_sol, int num_restarts, bool warm_start, const std::vector<int>* fixed_order);
+	closest_ik::Options GetClosestIkOptions(const ObjectPlacementParams& p, bool exact_only) const;
+	bool SolveExactIk(moveit::core::RobotState& state, const Eigen::Isometry3d& target, int attempts, const ObjectPlacementParams& p, random_numbers::RandomNumberGenerator& rng);
 	std::vector<std::vector<Joints>> CollectIkPoses(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, int max_solutions);
 	std::vector<MissedViewpoint> FindClosestPosesForMissedViewpoints(const Position& at, const ObjectPlacementParams& p, const TourSolution& tour, const std::vector<Joints>& seed_q);
 	TourSolution EvaluateObjectPosition(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
@@ -176,6 +181,7 @@ private:
 	// --- Whole run ---
 	ObjectPlacementResult run_result;		 // history and solve count; Optimize fills in the rest
 	std::vector<MoveSegment> move_history;	 // every move, kept for RViz
+	std::set<std::pair<std::string, int>> progress_marker_keys;	 // (ns, id) published last time, so stale ones get deleted
 
 	// --- Per reach attempt ---
 	int stall_count = 0;
