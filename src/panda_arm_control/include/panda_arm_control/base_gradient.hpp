@@ -30,16 +30,11 @@ struct BaseGradientParams
 	// Tour edge cost: joint distance and largest single-joint turn
 	joint_travel::EdgeWeights edge_weights;
 
-	// Comfort: cost -= weight * sum of manipulability sqrt(det(J J^T))
-	double manipulability_weight = 0.0;
-	// Missed viewpoints add their closest-IK pose's manipulability too (cost and gradient).
-	bool manipulability_include_missed = false;
+	// Manipulability sqrt(det(J J^T)) is not in the cost; only the manipulability jump climbs it.
 	// Range-aware manipulability: each joint's Jacobian column is scaled by 1 - exp(-k (q-lo)(hi-q)/range^2),
 	// so joints near a limit count less. k = this; 0 = plain manipulability.
 	double manipulability_limit_sharpness = 0.0;
-	// Soft-min manipulability: cost -= weight * (-tau log sum exp(-w / tau)), ~ the worst poses' w. Their
-	// shares of the push add up to 1, so one bad pose can't take over (unlike log). 0 = off.
-	double softmin_manipulability_weight = 0.0;
+	// Soft-min manipulability -tau log sum exp(-w / tau), ~ the worst poses' w; the jump weighs it by jump_softmin_weight.
 	double softmin_tau = 0.01;
 	// A missed viewpoint costs unreachable_penalty + miss_gap_weight * min(gap, miss_gap_cap), where gap
 	// is its closest-IK pose gap (m, rotation scaled by rot_metric_scale): gives misses a gradient.
@@ -100,7 +95,6 @@ struct BaseGradientParams
 	// Reconfiguration: a move turning any joint (joint 7 aside) more than this; refine logs how many are left.
 	double reconfig_threshold = 1.0;
 	bool travel_gradient = true;  // false: the descent direction ignores tour travel
-	bool manipulability_gradient = true;  // false: the descent direction ignores the comfort terms
 	bool freeze_order = false;  // once all viewpoints are reached, keep the viewpoint order fixed
 	bool lock_input_order = false;  // visit viewpoints in the input order throughout (no GTSP reordering)
 	// > 0: OMPL-planned joint travel can be computed; seconds per planning attempt.

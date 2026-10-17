@@ -180,6 +180,7 @@ public:
 		// true: positions drawn in proportion to the robot-only reachability score (needs the reachability map); false: uniform.
 		const bool weighted_by_reachability = param<bool>("rp_weighted_by_reachability", false);
 		const double reachability_ball_radius = param<double>("rp_reachability_ball_radius", 0.1);  // m, about the object's size
+		const bool stop_when_all_reached = param<bool>("rp_stop_when_all_reached", false);  // true: refine the first position reaching all, then stop
 
 		if (mesh_path.empty())
 			mesh_path = ament_index_cpp::get_package_share_directory("panda_arm_control") + "/meshes/bunny_holding_eggs.stl";
@@ -356,6 +357,8 @@ public:
 			best = sample_tour;
 			RCLCPP_INFO(get_logger(), "sample %d (%.1f s): abs (%.4f, %.4f, %.4f) m reaches %d/%d, planned travel %.2f rad  <-- best",
 				samples, elapsed(), at.x(), at.y(), at.z(), best.num_reachable, n, best.planned_travel);
+			if (stop_when_all_reached && best.num_reachable == n)
+				break;
 		}
 		const double sampling_secs = elapsed();
 		RCLCPP_INFO(get_logger(), "%d samples in %.1f s, %d reach all viewpoints", samples, sampling_secs, samples_reaching_all);

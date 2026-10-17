@@ -113,11 +113,6 @@ def generate_launch_description():
         description="false: the descent direction ignores tour travel (the cost still includes it).",
     )
     travel_gradient = ParameterValue(LaunchConfiguration("travel_gradient"), value_type=bool)
-    manipulability_gradient_arg = DeclareLaunchArgument(
-        "manipulability_gradient", default_value="true",
-        description="false: the descent direction ignores the manipulability terms (the cost still includes them).",
-    )
-    manipulability_gradient = ParameterValue(LaunchConfiguration("manipulability_gradient"), value_type=bool)
     miss_gap_weight_arg = DeclareLaunchArgument(
         "miss_gap_weight", default_value="5000.0", description="Weight on missed viewpoints' closest-IK gap (0 = no miss gradient)."
     )
@@ -221,9 +216,6 @@ def generate_launch_description():
         # inner-GTSP ordering parity with the rest of the pipeline.
         "bg_joint_distance_weight": 1.0,
         "bg_max_joint_deviation_weight": 1.0,
-        # Objective = travel cost - this * sum of manipulability (sum is ~2.8 for 38 viewpoints).
-        "bg_manipulability_weight": 0.0,
-        # Reach-margin barrier: objective also subtracts this * sum of log(manipulability).
         # A missed viewpoint costs the penalty + this * its closest-IK pose gap (m), capped at the cap.
         "bg_miss_gap_weight": miss_gap_weight,
         "bg_miss_gap_cap": 0.15,
@@ -253,7 +245,6 @@ def generate_launch_description():
         "bg_stop_when_all_reached": stop_when_all_reached,
         "bg_refine_solves": refine_solves,
         "bg_travel_gradient": travel_gradient,
-        "bg_manipulability_gradient": manipulability_gradient,
         "bg_freeze_order": freeze_order,
         "bg_lock_input_order": lock_input_order,
         "bg_real_cost_planning_time": real_cost_planning_time,
@@ -369,7 +360,6 @@ def generate_launch_description():
             stop_when_all_reached_arg,
             refine_solves_arg,
             travel_gradient_arg,
-            manipulability_gradient_arg,
             miss_gap_weight_arg,
             freeze_order_arg,
             lock_input_order_arg,

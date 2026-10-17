@@ -48,11 +48,8 @@ struct Params
 
 	double bg_joint_distance_weight = 1.0;
 	double bg_max_joint_deviation_weight = 1.0;
-	double bg_manipulability_weight = 0.0;
 	double bg_miss_gap_weight = 5000.0;
-	bool bg_manipulability_include_missed = false;
 	double bg_manipulability_limit_sharpness = 0.0;
-	double bg_softmin_manipulability_weight = 0.0;
 	double bg_softmin_tau = 0.01;
 	double bg_miss_gap_cap = 0.15;
 	double bg_closest_ik_margin = 0.02;
@@ -94,7 +91,6 @@ struct Params
 	int bg_refine_ik_solutions = 8;
 	double bg_reconfig_threshold = 1.0;
 	bool bg_travel_gradient = true;
-	bool bg_manipulability_gradient = true;
 	bool bg_freeze_order = false;
 	bool bg_lock_input_order = false;
 	double bg_real_cost_planning_time = 0.0;
@@ -265,11 +261,8 @@ private:
 		this->declareIfNeeded("bg_rot_metric_scale", this->params.bg_rot_metric_scale);
 		this->declareIfNeeded("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->declareIfNeeded("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
-		this->declareIfNeeded("bg_manipulability_weight", this->params.bg_manipulability_weight);
 		this->declareIfNeeded("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
-		this->declareIfNeeded("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
 		this->declareIfNeeded("bg_manipulability_limit_sharpness", this->params.bg_manipulability_limit_sharpness);
-		this->declareIfNeeded("bg_softmin_manipulability_weight", this->params.bg_softmin_manipulability_weight);
 		this->declareIfNeeded("bg_softmin_tau", this->params.bg_softmin_tau);
 		this->declareIfNeeded("bg_miss_gap_cap", this->params.bg_miss_gap_cap);
 		this->declareIfNeeded("bg_closest_ik_margin", this->params.bg_closest_ik_margin);
@@ -308,7 +301,6 @@ private:
 		this->declareIfNeeded("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
 		this->declareIfNeeded("bg_reconfig_threshold", this->params.bg_reconfig_threshold);
 		this->declareIfNeeded("bg_travel_gradient", this->params.bg_travel_gradient);
-		this->declareIfNeeded("bg_manipulability_gradient", this->params.bg_manipulability_gradient);
 		this->declareIfNeeded("bg_freeze_order", this->params.bg_freeze_order);
 		this->declareIfNeeded("bg_lock_input_order", this->params.bg_lock_input_order);
 		this->declareIfNeeded("bg_real_cost_planning_time", this->params.bg_real_cost_planning_time);
@@ -351,11 +343,8 @@ private:
 		this->get_parameter("bg_rot_metric_scale", this->params.bg_rot_metric_scale);
 		this->get_parameter("bg_joint_distance_weight", this->params.bg_joint_distance_weight);
 		this->get_parameter("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
-		this->get_parameter("bg_manipulability_weight", this->params.bg_manipulability_weight);
 		this->get_parameter("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
-		this->get_parameter("bg_manipulability_include_missed", this->params.bg_manipulability_include_missed);
 		this->get_parameter("bg_manipulability_limit_sharpness", this->params.bg_manipulability_limit_sharpness);
-		this->get_parameter("bg_softmin_manipulability_weight", this->params.bg_softmin_manipulability_weight);
 		this->get_parameter("bg_softmin_tau", this->params.bg_softmin_tau);
 		this->get_parameter("bg_miss_gap_cap", this->params.bg_miss_gap_cap);
 		this->get_parameter("bg_closest_ik_margin", this->params.bg_closest_ik_margin);
@@ -394,7 +383,6 @@ private:
 		this->get_parameter("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
 		this->get_parameter("bg_reconfig_threshold", this->params.bg_reconfig_threshold);
 		this->get_parameter("bg_travel_gradient", this->params.bg_travel_gradient);
-		this->get_parameter("bg_manipulability_gradient", this->params.bg_manipulability_gradient);
 		this->get_parameter("bg_freeze_order", this->params.bg_freeze_order);
 		this->get_parameter("bg_lock_input_order", this->params.bg_lock_input_order);
 		this->get_parameter("bg_real_cost_planning_time", this->params.bg_real_cost_planning_time);
@@ -459,11 +447,8 @@ private:
 		bg.rot_metric_scale = this->params.bg_rot_metric_scale;
 		bg.edge_weights.joint_distance = this->params.bg_joint_distance_weight;
 		bg.edge_weights.max_turn = this->params.bg_max_joint_deviation_weight;
-		bg.manipulability_weight = this->params.bg_manipulability_weight;
 		bg.miss_gap_weight = this->params.bg_miss_gap_weight;
-		bg.manipulability_include_missed = this->params.bg_manipulability_include_missed;
 		bg.manipulability_limit_sharpness = this->params.bg_manipulability_limit_sharpness;
-		bg.softmin_manipulability_weight = this->params.bg_softmin_manipulability_weight;
 		bg.softmin_tau = this->params.bg_softmin_tau;
 		bg.miss_gap_cap = this->params.bg_miss_gap_cap;
 		bg.closest_ik_margin = this->params.bg_closest_ik_margin;
@@ -504,7 +489,6 @@ private:
 		bg.refine_ik_solutions = this->params.bg_refine_ik_solutions;
 		bg.reconfig_threshold = this->params.bg_reconfig_threshold;
 		bg.travel_gradient = this->params.bg_travel_gradient;
-		bg.manipulability_gradient = this->params.bg_manipulability_gradient;
 		bg.freeze_order = this->params.bg_freeze_order;
 		bg.lock_input_order = this->params.bg_lock_input_order;
 		bg.real_cost_planning_time = this->params.bg_real_cost_planning_time;

@@ -654,16 +654,11 @@ std::optional<Position> ObjectPlacementOptimizer::GetReachabilityMapStep(const P
 
 Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, const TourSolution& warm, int restart_in)
 {
-	BaseGradientParams p = this->params;	// reached viewpoints' comfort only; misses need no closest pose
-	p.manipulability_weight = 1.0;
-	p.softmin_manipulability_weight = this->params.jump_softmin_weight;
-	p.manipulability_include_missed = false;
-	p.travel_gradient = false;
-	p.miss_gap_weight = 0.0;
+	BaseGradientParams p = this->params;	// reached viewpoints' manipulability only; misses need no closest pose
 	p.gaps_min_reached = std::numeric_limits<int>::max();
 	p.max_solutions_per_candidate = 2;  // fewer IK poses per viewpoint: the jump only needs a manipulable one
 	auto score = [&](const TourSolution& s)
-	{ return s.manipulability_sum + p.softmin_manipulability_weight * s.softmin_manipulability; };
+	{ return s.manipulability_sum + this->params.jump_softmin_weight * s.softmin_manipulability; };
 	auto log_step = [&](int iter, double step)
 	{
 		RCLCPP_INFO(
@@ -686,7 +681,7 @@ Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, c
 	this->stall_count = 0;
 	for (int iter = 0; iter < this->params.jump_max_moves && rclcpp::ok(); ++iter)
 	{
-		const Eigen::Vector3d g = this->RemoveMotionOnLockedAxes(this->ComputeCostGradient(this->current_tour, p));
+		const Eigen::Vector3d g = this->RemoveMotionOnLockedAxes(this->ComputeManipulabilityGradient(this->current_tour));
 		if (g.norm() < 1e-9)
 			break;
 		this->ik_start_poses = GetIkStartPoses(this->current_tour, this->home_pose, this->num_viewpoint);
@@ -927,31 +922,20 @@ TourSolution ObjectPlacementOptimizer::SolveTour(
 	out.straight_line_travel =
 		joint_travel::TravelCost(PrependHomePose(this->home_pose, out.ik_poses), p.edge_weights, this->counted_joint_indices);
 
-	// Comfort: manipulability over the tour poses (and the misses' closest poses, if included).
+	// Manipulability of the tour poses: not in the cost, only the manipulability jump's score and the logs.
 	std::vector<double> ws;
-	double sum_tour = 0.0, sum_missed = 0.0;
 	for (const Joints& q : out.ik_poses)
 	{
 		ws.push_back(manipulability::Value(this->robot_state, this->joint_group, this->tool_link, q, k));
-		sum_tour += ws.back();
+		out.manipulability_sum += ws.back();
 	}
-	for (const MissedViewpoint& m : missed)
-		if (p.manipulability_include_missed && !m.closest_pose.empty())
-		{
-			ws.push_back(manipulability::Value(this->robot_state, this->joint_group, this->tool_link, m.closest_pose, k));
-			sum_missed += ws.back();
-		}
-	out.manipulability_sum = p.manipulability_include_missed ? sum_tour + sum_missed : sum_tour;
-	if (p.softmin_manipulability_weight > 0.0)
-		out.softmin_manipulability = manipulability::SoftMin(ws, p.softmin_tau);
+	out.softmin_manipulability = manipulability::SoftMin(ws, p.softmin_tau);
 
 	out.missed_viewpoints = std::move(missed);
 	for (const MissedViewpoint& m : out.missed_viewpoints)
 		out.miss_gap_sum += std::min(p.miss_gap_cap, scene_geometry::PoseGap(m.pose_error, p.rot_metric_scale));
 	out.miss_cost = p.miss_gap_weight * out.miss_gap_sum;
-	out.weighted_cost_sum = -p.manipulability_weight * out.manipulability_sum -
-		p.softmin_manipulability_weight * out.softmin_manipulability +
-		p.unreachable_penalty * (this->num_viewpoint - out.num_reachable) + out.miss_cost;
+	out.weighted_cost_sum = p.unreachable_penalty * (this->num_viewpoint - out.num_reachable) + out.miss_cost;
 	return out;
 }
 
@@ -984,8 +968,7 @@ TourSolution ObjectPlacementOptimizer::SolveMostManipulablePoses(const Position&
 	}
 	out.num_reachable = static_cast<int>(out.viewpoint_order.size());
 	out.all_reachable = out.num_reachable == this->num_viewpoint;
-	if (p.softmin_manipulability_weight > 0.0)
-		out.softmin_manipulability = manipulability::SoftMin(manipulabilities, p.softmin_tau);
+	out.softmin_manipulability = manipulability::SoftMin(manipulabilities, p.softmin_tau);
 	return out;
 }
 
@@ -1035,6 +1018,7 @@ TourSolution ObjectPlacementOptimizer::RefineTour(const Position& at, TourSoluti
 	if (this->can_plan && best_sol.planned_cost < 0.0)
 		best_sol.planned_cost = this->ComputePlannedTravel(at, best_sol);
 	best_sol.weighted_cost_sum = this->ComputeWeightedCost(best_sol);
+	RCLCPP_INFO(this->node->get_logger(), "  refine start: reachable %d/%d, straight-line travel %.2f, planned travel %.2f rad", best_sol.num_reachable, this->num_viewpoint, best_sol.straight_line_travel, best_sol.planned_cost);
 	for (int i = 0; i < num_solves && rclcpp::ok(); ++i)
 	{
 		const std::vector<int>* lock = this->params.lock_input_order ? &this->input_order
@@ -1045,11 +1029,16 @@ TourSolution ObjectPlacementOptimizer::RefineTour(const Position& at, TourSoluti
 			this->params.refine_ik_solutions, lock);
 		this->run_result.num_inner_solves += 1;
 		if (s.num_reachable < best_sol.num_reachable)
+		{
+			RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: reachable %d/%d, fewer than the best -- skipped", i + 1, num_solves, s.num_reachable, this->num_viewpoint);
 			continue;
+		}
 		if (this->can_plan)
 			s.planned_cost = this->ComputePlannedTravel(at, s);
 		s.weighted_cost_sum = this->ComputeWeightedCost(s);
-		if (s.weighted_cost_sum < best_sol.weighted_cost_sum)
+		const bool better = s.weighted_cost_sum < best_sol.weighted_cost_sum;
+		RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: straight-line travel %.2f, planned travel %.2f rad vs %.2f best%s", i + 1, num_solves, s.straight_line_travel, s.planned_cost, best_sol.planned_cost, better ? "  <-- new best" : "");
+		if (better)
 			best_sol = std::move(s);
 	}
 	return best_sol;
@@ -1087,8 +1076,7 @@ TourSolution ObjectPlacementOptimizer::AddPlannedTravel(const Position& at, Tour
 double ObjectPlacementOptimizer::ComputeWeightedCost(const TourSolution& sol) const
 {
 	const double travel = this->use_planned_travel_in_cost && sol.planned_cost >= 0.0 ? sol.planned_cost : 0.0;
-	return travel - this->params.manipulability_weight * sol.manipulability_sum -
-		this->params.softmin_manipulability_weight * sol.softmin_manipulability +
+	return travel +
 		this->params.unreachable_penalty * (this->num_viewpoint - sol.num_reachable) + sol.miss_cost;
 }
 
@@ -1134,9 +1122,31 @@ void ObjectPlacementOptimizer::RememberLastPoses(const TourSolution& sol)
 
 // Cost gradient w.r.t. the object position. Each pose follows its viewpoint as dq/dp = J^+ (the home pose doesn't
 // move); travel edges, comfort terms and miss gaps chain through that.
+// Slope of the manipulability jump's score (sum + jump_softmin_weight x soft-min of the tour poses' manipulability)
+// w.r.t. the object position, as the arm follows the viewpoints. Negated, like a cost gradient.
+Eigen::Vector3d ObjectPlacementOptimizer::ComputeManipulabilityGradient(const TourSolution& sol)
+{
+	const double k = this->params.manipulability_limit_sharpness;
+	std::vector<double> ws;
+	std::vector<Eigen::Vector3d> dw;
+	Eigen::Vector3d g = Eigen::Vector3d::Zero();
+	for (const Joints& q : sol.ik_poses)
+	{
+		const Eigen::MatrixXd dq_dp = scene_geometry::DampedPinv(manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, q), this->params.jacobian_damping).leftCols<3>();
+		ws.push_back(std::max(1e-6, manipulability::Value(this->robot_state, this->joint_group, this->tool_link, q, k)));
+		dw.push_back(dq_dp.transpose() * manipulability::Gradient(this->robot_state, this->joint_group, this->tool_link, q, k));
+		g -= dw.back();
+	}
+	if (ws.empty())
+		return g;
+	const std::vector<double> shares = manipulability::SoftMinShares(ws, this->params.softmin_tau);
+	for (size_t i = 0; i < shares.size(); ++i)
+		g -= this->params.jump_softmin_weight * shares[i] * dw[i];
+	return g;
+}
+
 Eigen::Vector3d ObjectPlacementOptimizer::ComputeCostGradient(const TourSolution& sol, const BaseGradientParams& p)
 {
-	const double k = p.manipulability_limit_sharpness;
 	const size_t n = sol.viewpoint_order.size();
 	auto dq_dp = [&](const Joints& q) { return Eigen::MatrixXd(scene_geometry::DampedPinv(manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, q), p.jacobian_damping).leftCols<3>()); };
 	std::vector<Eigen::MatrixXd> dq(n);
@@ -1144,32 +1154,6 @@ Eigen::Vector3d ObjectPlacementOptimizer::ComputeCostGradient(const TourSolution
 		dq[i] = dq_dp(sol.ik_poses[i]);
 
 	Eigen::Vector3d g = Eigen::Vector3d::Zero();
-	std::vector<double> ws;
-	std::vector<Eigen::Vector3d> dw;
-	auto add_comfort = [&](const Joints& q, const Eigen::MatrixXd& dq_q) {
-		const double w = std::max(1e-6, manipulability::Value(this->robot_state, this->joint_group, this->tool_link, q, k));
-		const Eigen::Vector3d dw_dp =
-			dq_q.transpose() * manipulability::Gradient(this->robot_state, this->joint_group, this->tool_link, q, k);
-		g -= p.manipulability_weight * dw_dp;
-		ws.push_back(w);
-		dw.push_back(dw_dp);
-	};
-	for (size_t i = 0; i < n && p.manipulability_gradient; ++i)
-		add_comfort(sol.ik_poses[i], dq[i]);
-	for (const MissedViewpoint& m :
-		 sol.missed_viewpoints)  // the misses' closest poses, as if the arm followed the viewpoint
-		if (p.manipulability_include_missed && !m.closest_pose.empty())
-		{
-			const Eigen::MatrixXd dq_m = dq_dp(m.closest_pose);
-			if (p.manipulability_gradient)
-				add_comfort(m.closest_pose, dq_m);
-		}
-	if (p.softmin_manipulability_weight > 0.0 && !ws.empty())
-	{
-		const std::vector<double> shares = manipulability::SoftMinShares(ws, p.softmin_tau);
-		for (size_t i = 0; i < shares.size(); ++i)
-			g -= p.softmin_manipulability_weight * shares[i] * dw[i];
-	}
 	// MissedViewpoint gaps: the viewpoint moves with the object; no slope past the cap.
 	for (const MissedViewpoint& m : sol.missed_viewpoints)
 	{
@@ -1204,7 +1188,6 @@ Eigen::Vector3d ObjectPlacementOptimizer::ComputeCostGradient(const TourSolution
 // Debug: central-difference gradient by re-tracking the tour's poses (one IK per viewpoint) at +-epsilon.
 Eigen::Vector3d ObjectPlacementOptimizer::ComputeNumericCostGradient()
 {
-	const double k = this->params.manipulability_limit_sharpness;
 	auto tracked_cost = [&](const Position& at, bool* all) {
 		const Eigen::Isometry3d xform = scene_geometry::Translation(at);
 		scene_geometry::MoveObject(this->scene, xform * this->object_pose);
@@ -1225,8 +1208,6 @@ Eigen::Vector3d ObjectPlacementOptimizer::ComputeNumericCostGradient()
 				continue;
 			}
 			this->robot_state.copyJointGroupPositions(this->joint_group, qs[i]);
-			cost -= this->params.manipulability_weight *
-				manipulability::Value(this->robot_state, this->joint_group, this->tool_link, qs[i], k);
 			if (prev_ok)
 				cost += joint_travel::EdgeCost(*prev, qs[i], this->params.edge_weights, this->counted_joint_indices);
 			prev = &qs[i];
