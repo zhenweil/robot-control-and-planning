@@ -39,7 +39,7 @@ struct ViewpointCandidate
 	std::vector<double> joint_solution;
 
 	// Several distinct valid (collision-free) IK solutions for tcp_pose, found via randomized
-	// re-seeding (see ComputeReachabilityWithCollisionCheck in rkga_scp.cpp) -- since the arm is
+	// re-seeding (see ComputeReachabilityWithCollisionCheck in real_cost_planning.cpp) -- since the arm is
 	// redundant, the same TCP pose can be reached via different elbow/wrist configurations. Having
 	// several options lets the RKGA-SCP cost model pick whichever pairing between two candidates
 	// is actually cheapest, instead of being stuck with one arbitrarily-seeded solution per

@@ -49,15 +49,6 @@ ament_target_dependencies(panda_arm_control
 	visualization_msgs
 	)
 
-add_executable(viewpoint_planner_rkga
-	src/mesh_utils.cpp
-	src/potential_field_sampler.cpp
-	src/real_cost_planning.cpp
-	src/rkga_scp.cpp
-	src/viewpoint_io.cpp
-	src/viewpoint_planner_rkga_node.cpp
-	)
-
 add_executable(viewpoint_planner_nn2opt
 	src/mesh_utils.cpp
 	src/potential_field_sampler.cpp
@@ -135,7 +126,7 @@ add_executable(random_placement
 	src/random_placement_node.cpp
 	)
 
-foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement reachability_climb viewpoint_generator)
+foreach(viewpoint_planner_target viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement reachability_climb viewpoint_generator)
 	target_include_directories(${viewpoint_planner_target} PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		)
@@ -174,7 +165,7 @@ install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement build_reachability_map reachability_climb viewpoint_generator
+install(TARGETS panda_arm_control viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement build_reachability_map reachability_climb viewpoint_generator
 	DESTINATION lib/${PROJECT_NAME}
 	)
 
