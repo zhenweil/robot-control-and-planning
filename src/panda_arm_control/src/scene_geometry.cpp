@@ -56,12 +56,12 @@ bool IsStateValid(
 
 void MoveObject(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, const Eigen::Isometry3d& pose)
 {
+	planning_scene_monitor::LockedPlanningSceneRW locked(scene);
 	moveit_msgs::msg::CollisionObject obj;
-	obj.header.frame_id = "panda_link0";
+	obj.header.frame_id = locked->getRobotModel()->getRootLinkName();  // the robot's base link
 	obj.id = "object";
 	obj.pose = ToPoseMsg(pose);
 	obj.operation = obj.MOVE;
-	planning_scene_monitor::LockedPlanningSceneRW locked(scene);
 	locked->processCollisionObjectMsg(obj);
 }
 

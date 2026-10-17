@@ -1,4 +1,5 @@
 import os
+import sys
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
@@ -8,10 +9,14 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from launch.substitutions import PathJoinSubstitution
-from moveit_configs_utils import MoveItConfigsBuilder
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import robots  # noqa: E402
 
 
 def generate_launch_description():
+    robot_arg = DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda or iiwa14 (see robots.py).")
+
     use_rviz_arg = DeclareLaunchArgument(
         "use_rviz",
         default_value="false",
@@ -187,21 +192,9 @@ def generate_launch_description():
     )
     tour_input_dir = LaunchConfiguration("tour_input_dir")
 
-    moveit_config = (
-        MoveItConfigsBuilder("panda", package_name="panda_arm_moveit")
-        .robot_description(file_path="config/panda.urdf.xacro")
-        .robot_description_semantic(file_path="config/panda.srdf")
-        .robot_description_kinematics(file_path="config/kinematics.yaml")
-        .joint_limits(file_path="config/joint_limits.yaml")
-        .trajectory_execution(file_path="config/gripper_moveit_controllers.yaml")
-        .planning_pipelines(pipelines=["ompl"])
-        .to_moveit_configs()
-    )
-
     base_gradient_params = {
         "mesh_path": "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl",
         "mesh_scale": 0.01,
-        "group_name": "panda_arm",
         # Where a prior viewpoint_planner_* run exported the ordered tour's
         # selected_robot_poses.json -- this node's input.
         "tour_input_dir": tour_input_dir,
@@ -273,22 +266,6 @@ def generate_launch_description():
         description="Optional YAML of bg_* node parameters; loaded last, so it overrides the launch arguments.",
     )
 
-    def make_base_gradient_node(context):
-        params_file = LaunchConfiguration("params_file").perform(context)
-        extra = [os.path.expanduser(params_file)] if params_file else []
-        return [Node(
-            package="panda_arm_control",
-            executable="base_gradient",
-            name="base_gradient",
-            output="screen",
-            parameters=[moveit_config.to_dict(), base_gradient_params, object_pose_config, *extra],
-            # Makes MoveIt's IK (KDL) deterministic -- it otherwise re-seeds from /dev/urandom on
-            # retries, which is the main run-to-run inconsistency in the result.
-            additional_env={"RANDOM_SEED": random_seed},
-        )]
-
-    base_gradient_node = OpaqueFunction(function=make_base_gradient_node)
-
     rviz_config = PathJoinSubstitution(
         [FindPackageShare("panda_arm_control"), "config", "viewpoint_planner.rviz"]
     )
@@ -302,42 +279,46 @@ def generate_launch_description():
         condition=IfCondition(use_rviz),
     )
 
-    # With use_rviz, publish the robot itself so RViz shows it without the MoveIt launch. Don't
-    # combine with panda_arm.launch.py, which already publishes these.
-    robot_state_publisher_node = Node(
-        package="robot_state_publisher",
-        executable="robot_state_publisher",
-        output="log",
-        parameters=[moveit_config.robot_description],
-        condition=IfCondition(use_rviz),
-    )
-    # Holds the arm at initial_joints (object_pose.yaml), the tour's start pose.
-    joint_state_publisher_node = Node(
-        package="joint_state_publisher",
-        executable="joint_state_publisher",
-        output="log",
-        parameters=[
-            {
-                "zeros": {
-                    "panda_joint1": 0.0,
-                    "panda_joint2": -0.8745,
-                    "panda_joint3": 0.0,
-                    "panda_joint4": -2.356,
-                    "panda_joint5": 0.0,
-                    "panda_joint6": 1.571,
-                    "panda_joint7": 0.785,
-                }
-            }
-        ],
-        condition=IfCondition(use_rviz),
-    )
-    world_tf_node = Node(
-        package="tf2_ros",
-        executable="static_transform_publisher",
-        output="log",
-        arguments=["0", "0", "0", "0", "0", "0", "world", "panda_link0"],
-        condition=IfCondition(use_rviz),
-    )
+    # The robot-dependent nodes: base_gradient, and with use_rviz the robot itself so RViz shows it without the MoveIt
+    # launch (don't combine with panda_arm.launch.py, which already publishes these).
+    def make_robot_nodes(context):
+        robot = robots.GetRobot(LaunchConfiguration("robot").perform(context))
+        moveit_config = robots.GetMoveItConfig(robot)
+        params_file = LaunchConfiguration("params_file").perform(context)
+        extra = [os.path.expanduser(params_file)] if params_file else []
+        base_gradient_node = Node(
+            package="panda_arm_control",
+            executable="base_gradient",
+            name="base_gradient",
+            output="screen",
+            parameters=[moveit_config.to_dict(), base_gradient_params, object_pose_config, robots.GetRobotParameters(robot), *extra],
+            # Makes MoveIt's IK (KDL) deterministic -- it otherwise re-seeds from /dev/urandom on
+            # retries, which is the main run-to-run inconsistency in the result.
+            additional_env={"RANDOM_SEED": random_seed},
+        )
+        robot_state_publisher_node = Node(
+            package="robot_state_publisher",
+            executable="robot_state_publisher",
+            output="log",
+            parameters=[moveit_config.robot_description],
+            condition=IfCondition(use_rviz),
+        )
+        # Holds the arm at its home pose, the tour's start pose.
+        joint_state_publisher_node = Node(
+            package="joint_state_publisher",
+            executable="joint_state_publisher",
+            output="log",
+            parameters=[{"zeros": robot["home"]}],
+            condition=IfCondition(use_rviz),
+        )
+        world_tf_node = Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            output="log",
+            arguments=["0", "0", "0", "0", "0", "0", "world", robot["base_link"]],
+            condition=IfCondition(use_rviz),
+        )
+        return [base_gradient_node, robot_state_publisher_node, joint_state_publisher_node, world_tf_node]
 
     return LaunchDescription(
         [
@@ -368,10 +349,8 @@ def generate_launch_description():
             output_dir_arg,
             tour_input_dir_arg,
             params_file_arg,
-            base_gradient_node,
-            robot_state_publisher_node,
-            joint_state_publisher_node,
-            world_tf_node,
+            robot_arg,
+            OpaqueFunction(function=make_robot_nodes),
             rviz_node,
         ]
     )

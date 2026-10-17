@@ -51,9 +51,9 @@ planning_scene_monitor::PlanningSceneMonitorPtr BuildLocalCollisionScene(
 	mesh_pose.orientation.w = q.w();
 
 	// "world" isn't a real robot link and this local scene has no external TF sync -- use
-	// panda_link0 instead (identity transform from world, per panda_arm.launch.py).
+	// the robot's base link instead (identity transform from world, via the SRDF's virtual joint).
 	moveit_msgs::msg::CollisionObject obj;
-	obj.header.frame_id = "panda_link0";
+	obj.header.frame_id = planning_scene_monitor->getRobotModel()->getRootLinkName();
 	obj.id = "object";
 	obj.meshes.push_back(mesh_msg);
 	obj.mesh_poses.push_back(mesh_pose);

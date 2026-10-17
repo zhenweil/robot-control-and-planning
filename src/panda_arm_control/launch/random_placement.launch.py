@@ -1,17 +1,21 @@
 import os
+import sys
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
-from moveit_configs_utils import MoveItConfigsBuilder
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import robots  # noqa: E402
 
 
 # Random-sampling placement baseline. Pass the same params_file as base_gradient so both use one
 # search box (bg_x/y/z_min/max), IK budget (ik_attempts) and random_seed.
 def generate_launch_description():
     args = [
+        DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda or iiwa14 (see robots.py)."),
         DeclareLaunchArgument("random_seed", default_value="42", description="Seeds the sampler and the IK restarts."),
         DeclareLaunchArgument("time_budget_sec", default_value="90.0", description="Stop after this many seconds."),
         DeclareLaunchArgument("max_samples", default_value="0", description="Stop after this many samples (0 = no limit)."),
@@ -22,27 +26,18 @@ def generate_launch_description():
         DeclareLaunchArgument("params_file", default_value="", description="Optional YAML loaded last (e.g. base_gradient_run.yaml)."),
     ]
 
-    moveit_config = (
-        MoveItConfigsBuilder("panda", package_name="panda_arm_moveit")
-        .robot_description(file_path="config/panda.urdf.xacro")
-        .robot_description_semantic(file_path="config/panda.srdf")
-        .robot_description_kinematics(file_path="config/kinematics.yaml")
-        .joint_limits(file_path="config/joint_limits.yaml")
-        .trajectory_execution(file_path="config/gripper_moveit_controllers.yaml")
-        .planning_pipelines(pipelines=["ompl"])
-        .to_moveit_configs()
-    )
     object_pose_config = PathJoinSubstitution([FindPackageShare("panda_arm_control"), "config", "object_pose.yaml"])
     reachability_map_config = PathJoinSubstitution([FindPackageShare("panda_arm_control"), "config", "reachability_map.yaml"])
 
     def make_node(context):
+        robot = robots.GetRobot(LaunchConfiguration("robot").perform(context))
+        moveit_config = robots.GetMoveItConfig(robot)
         params_file = LaunchConfiguration("params_file").perform(context)
         extra = [os.path.expanduser(params_file)] if params_file else []
         seed = LaunchConfiguration("random_seed").perform(context)
         node_params = {
             "mesh_path": "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl",
             "mesh_scale": 0.01,
-            "group_name": "panda_arm",
             "tour_input_dir": LaunchConfiguration("tour_input_dir").perform(context),
             "output_dir": LaunchConfiguration("output_dir").perform(context),
             "random_seed": int(seed),
@@ -57,7 +52,7 @@ def generate_launch_description():
             name="random_placement",
             output="screen",
             # params_file comes before the node params so random_seed / budget launch args win.
-            parameters=[moveit_config.to_dict(), object_pose_config, reachability_map_config, *extra, node_params],
+            parameters=[moveit_config.to_dict(), object_pose_config, robots.GetRobotParameters(robot), reachability_map_config, *extra, node_params],
             additional_env={"RANDOM_SEED": seed},
         )]
 

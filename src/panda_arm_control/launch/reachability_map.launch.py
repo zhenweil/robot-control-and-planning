@@ -1,27 +1,26 @@
 """Builds the reachability map used by random_placement's weighted sampling; settings in config/reachability_map.yaml."""
+import os
+import sys
+
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
-from launch.substitutions import PathJoinSubstitution
-from moveit_configs_utils import MoveItConfigsBuilder
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import robots  # noqa: E402
 
 
 def generate_launch_description():
-    moveit_config = (
-        MoveItConfigsBuilder("panda", package_name="panda_arm_moveit")
-        .robot_description(file_path="config/panda.urdf.xacro")
-        .robot_description_semantic(file_path="config/panda.srdf")
-        .robot_description_kinematics(file_path="config/kinematics.yaml")
-        .joint_limits(file_path="config/joint_limits.yaml")
-        .trajectory_execution(file_path="config/gripper_moveit_controllers.yaml")
-        .planning_pipelines(pipelines=["ompl"])
-        .to_moveit_configs()
-    )
     reachability_map_config = PathJoinSubstitution(
         [FindPackageShare("panda_arm_control"), "config", "reachability_map.yaml"]
     )
-    return LaunchDescription([
-        Node(
+
+    def make_node(context):
+        robot = robots.GetRobot(LaunchConfiguration("robot").perform(context))
+        moveit_config = robots.GetMoveItConfig(robot)
+        return [Node(
             package="panda_arm_control",
             executable="build_reachability_map",
             output="screen",
@@ -29,8 +28,12 @@ def generate_launch_description():
                 moveit_config.robot_description,
                 moveit_config.robot_description_semantic,
                 moveit_config.joint_limits,
-                {"group_name": "panda_arm", "tip_link": "tool0"},
+                {"group_name": robot["group"], "tip_link": "tool0"},
                 reachability_map_config,
             ],
-        ),
+        )]
+
+    return LaunchDescription([
+        DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda or iiwa14 (see robots.py)."),
+        OpaqueFunction(function=make_node),
     ])
