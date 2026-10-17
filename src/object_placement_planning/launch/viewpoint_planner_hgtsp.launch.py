@@ -33,11 +33,9 @@ def generate_launch_description():
         default_value="true",
         description="After the final tour is selected/ordered, re-plan its legs at higher "
         "fidelity and drive the real robot through them directly via MoveGroupInterface, instead "
-        "of just publishing poses on /cartesian_waypoints for a separate node (waypoint_follower) "
-        "to re-plan. Requires move_group (e.g. panda_arm.launch.py) to already be running. Do not "
-        "also run panda_arm_control.launch.py (waypoint_follower) at the same time -- both would "
-        "independently try to drive the same robot with no coordination between them. Defaults to "
-        "true; set to false to only publish waypoints instead of moving the robot.",
+        "of just publishing poses on /cartesian_waypoints. Requires move_group (e.g. "
+        "panda_arm.launch.py) to already be running. Defaults to true; set to false to only "
+        "publish waypoints instead of moving the robot.",
     )
     execute_on_robot = ParameterValue(LaunchConfiguration("execute_on_robot"), value_type=bool)
 
@@ -93,8 +91,8 @@ def generate_launch_description():
         "output_dir": "/tmp/viewpoint_planner_output",
     }
 
-    # Shared with panda_arm_control.launch.py so both nodes agree on where the object actually
-    # is -- see object_pose.yaml.
+    # Shared by the planner nodes so they agree on where the object actually is -- see
+    # object_pose.yaml.
     object_pose_config = PathJoinSubstitution(
         [FindPackageShare("object_placement_planning"), "config", "object_pose.yaml"]
     )

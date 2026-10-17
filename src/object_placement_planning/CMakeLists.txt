@@ -36,19 +36,6 @@ find_package(VTK 9.1 REQUIRED COMPONENTS
 	IOGeometry
 	)
 
-add_executable(panda_arm_control src/panda_arm_control.cpp)
-
-ament_target_dependencies(panda_arm_control
-	rclcpp
-	moveit_ros_planning_interface
-	moveit_ros_planning
-	moveit_msgs
-	geometry_msgs
-	shape_msgs
-	geometric_shapes
-	visualization_msgs
-	)
-
 add_executable(viewpoint_planner_nn2opt
 	src/mesh_utils.cpp
 	src/potential_field_sampler.cpp
@@ -165,7 +152,7 @@ install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS panda_arm_control viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement build_reachability_map reachability_climb viewpoint_generator
+install(TARGETS viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement build_reachability_map reachability_climb viewpoint_generator
 	DESTINATION lib/${PROJECT_NAME}
 	)
 

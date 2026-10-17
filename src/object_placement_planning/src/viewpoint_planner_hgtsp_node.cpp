@@ -50,7 +50,7 @@ struct Params
 	std::string group_name = "panda_arm";
 	std::vector<double> object_translation_world = {0.2, 0.2, 0.38};
 	std::vector<double> object_rotation_rpy_deg = {0.0, 0.0, 0.0};
-	// Shared with WaypointFollower via config/object_pose.yaml -- proven-safe "ready" config.
+	// From config/object_pose.yaml -- proven-safe "ready" config.
 	// Used as the tour's home reference, and (if execute_on_robot) where the robot returns to.
 	std::vector<double> initial_joints = {0.0, -0.8745, 0.0, -2.356, 0.0, 1.571, 0.785};
 	std::vector<double> t_tcp_camera_xyz = {0.0, 0.0, 0.0};
@@ -84,7 +84,7 @@ struct Params
 	// combined L2 norm -- targets "one joint does a big twist" specifically.
 	double hgtsp_max_joint_deviation_weight = 1.0;
 	// When true, re-plans the tour's legs and drives the robot directly via move_group, instead
-	// of publishing waypoints. Don't also run waypoint_follower -- uncoordinated with this.
+	// of publishing waypoints.
 	bool execute_on_robot = true;
 	// Planning time/attempts for PlanFinalTourTrajectories -- affordable to be more generous than
 	// hgtsp_cluster_planning_time since this only runs once per tour leg (selected.size() calls),

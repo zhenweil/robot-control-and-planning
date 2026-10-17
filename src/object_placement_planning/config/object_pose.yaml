@@ -1,7 +1,6 @@
 /**:
   ros__parameters:
-    # The robot's "ready" home configuration -- shared so panda_arm_control (WaypointFollower) and
-    # viewpoint_planner agree on where the robot actually returns to/starts from. Must stay
+    # The robot's "ready" home configuration -- shared so the planner nodes agree on where the robot actually returns to/starts from. Must stay
     # collision-free: viewpoint_planner's executeTourOnRobot() drives the real robot here before
     # executing the planned tour, not just using it as an abstract cost-reference point.
     initial_joints: [0.0, -0.8745, 0.0, -2.356, 0.0, 1.571, 0.785]
