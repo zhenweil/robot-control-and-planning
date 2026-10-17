@@ -162,12 +162,10 @@ ReachAttemptResult ObjectPlacementOptimizer::ReachAllViewpoints(const Position& 
 			int no_gain = 0;  // Moves since a viewpoint was last gained
 			for (; moves_used < this->params.max_kinematic_moves && !this->current_tour.all_reachable && rclcpp::ok(); ++moves_used)
 			{
-				if (std::chrono::steady_clock::now() > this->reach_deadline || no_gain >= this->params.reach_patience)
+				if (no_gain >= this->params.reach_patience)
 				{
 					RCLCPP_WARN(
-						this->node->get_logger(), "  reach attempt %d: %s with %d/%d reachable -- stuck", r + 1,
-						no_gain >= this->params.reach_patience ? "no viewpoint gained for reach_patience iterations"
-															   : "reach time limit hit",
+						this->node->get_logger(), "  reach attempt %d: no viewpoint gained for reach_patience iterations with %d/%d reachable -- stuck", r + 1,
 						this->current_tour.num_reachable, this->num_viewpoint);
 					break;
 				}
@@ -216,12 +214,8 @@ bool ObjectPlacementOptimizer::ResetAndSolveAtStart(const Position& start, int r
 	this->stall_count = 0;
 	this->last_reached_poses.assign(static_cast<size_t>(this->num_viewpoint), {});
 	this->last_closest_poses.assign(static_cast<size_t>(this->num_viewpoint), {});
-	this->track_current_poses = true;
+	this->quick_solve_start_from_current_ik = true;
 	this->logged_gtsp_restarts_at_first_reach = false;
-	this->reach_deadline = this->params.reach_time_limit > 0.0
-		? std::chrono::steady_clock::now()
-		+ std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(this->params.reach_time_limit))
-		: std::chrono::steady_clock::time_point::max();
 	this->best_in_attempt = ReachAttemptResult{};
 	this->best_in_attempt.position = this->current_position;
 
@@ -251,7 +245,7 @@ bool ObjectPlacementOptimizer::ResetAndSolveAtStart(const Position& start, int r
 void ObjectPlacementOptimizer::RefineGtspAndPlacement(int iter)
 {
 	this->LogGtspRestartsAtFirstReach();
-	this->track_current_poses = false;  // a dragged-along tour looks worse than the spot really is
+	this->quick_solve_start_from_current_ik = false;  // a dragged-along tour looks worse than the spot really is
 	if (this->params.stop_when_all_reached)
 		RCLCPP_INFO(
 			this->node->get_logger(), "  reach attempt %d: all viewpoints reached -- stopping",
@@ -405,7 +399,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 		const int target = miss.viewpoint_index;
 		Position at = this->current_position;
 		TourSolution here_at = this->quick_solve_tour;
-		for (int round = 0; round < kMaxRounds && std::chrono::steady_clock::now() < this->reach_deadline; ++round)
+		for (int round = 0; round < kMaxRounds; ++round)
 		{
 			// Aim: a full step at the target.
 			const Eigen::Vector3d aim = this->GetMoveDirectionToCloseGap(target, here_at, round == 0);
@@ -613,7 +607,7 @@ Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, c
 	this->attempt_index = restart_in;
 	this->attempt_seed = this->params.random_seed + this->attempt_index;
 	this->current_position = from;
-	this->track_current_poses = true;
+	this->quick_solve_start_from_current_ik = true;
 	this->ik_start_poses = GetIkStartPoses(warm, this->home_pose, this->num_viewpoint);
 	ik_sampling::ReseedRng(this->attempt_seed);
 	this->current_tour = this->SolveMostManipulablePoses(this->current_position, p);
@@ -1038,7 +1032,7 @@ TourSolution ObjectPlacementOptimizer::QuickSolveTour(const Position& at, int ga
 TourSolution ObjectPlacementOptimizer::QuickSolveTour(const Position& at, ObjectPlacementParams p)
 {
 	ik_sampling::ReseedRng(this->attempt_seed);
-	if (!this->track_current_poses)
+	if (!this->quick_solve_start_from_current_ik)
 		return this->SampleIkAndSolveGtsp(
 			at, p, this->ik_start_poses, &this->current_tour.viewpoint_order, this->params.max_solutions_per_candidate,
 			this->fixed_order);

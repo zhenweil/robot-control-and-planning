@@ -94,7 +94,6 @@ struct Params
 	int real_cost_attempts = 3;
 	bool planned_travel_in_cost = false;
 	bool room_then_reach = false;
-	double reach_time_limit = 0.0;
 	bool trace_line_search = false;
 	int gtsp_restarts_at_reach = 0;
 
@@ -304,7 +303,6 @@ private:
 		this->declareIfNeeded("real_cost_attempts", this->params.real_cost_attempts);
 		this->declareIfNeeded("planned_travel_in_cost", this->params.planned_travel_in_cost);
 		this->declareIfNeeded("room_then_reach", this->params.room_then_reach);
-		this->declareIfNeeded("reach_time_limit", this->params.reach_time_limit);
 		this->declareIfNeeded("trace_line_search", this->params.trace_line_search);
 		this->declareIfNeeded("gtsp_restarts_at_reach", this->params.gtsp_restarts_at_reach);
 		this->declareIfNeeded("fd_gradient_check", this->params.fd_gradient_check);
@@ -383,7 +381,6 @@ private:
 		this->get_parameter("real_cost_attempts", this->params.real_cost_attempts);
 		this->get_parameter("planned_travel_in_cost", this->params.planned_travel_in_cost);
 		this->get_parameter("room_then_reach", this->params.room_then_reach);
-		this->get_parameter("reach_time_limit", this->params.reach_time_limit);
 		this->get_parameter("trace_line_search", this->params.trace_line_search);
 		this->get_parameter("gtsp_restarts_at_reach", this->params.gtsp_restarts_at_reach);
 		this->get_parameter("fd_gradient_check", this->params.fd_gradient_check);
@@ -486,7 +483,6 @@ private:
 		bg.real_cost_attempts = this->params.real_cost_attempts;
 		bg.planned_travel_in_cost = this->params.planned_travel_in_cost;
 		bg.room_then_reach = this->params.room_then_reach;
-		bg.reach_time_limit = this->params.reach_time_limit;
 		bg.trace_line_search = this->params.trace_line_search;
 		bg.gtsp_restarts_at_reach = this->params.gtsp_restarts_at_reach;
 		bg.random_seed = this->params.random_seed;

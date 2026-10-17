@@ -83,16 +83,10 @@ struct MoveSegment
 	Position from, to;
 };
 
-// The position moved inside the bounds, axis by axis.
-Position ClampToBounds(Position p, const ObjectPlacementBounds& b);
 
-// Viewpoints reached in `from` but not in `to`.
-std::vector<int> GetLostViewpoints(const TourSolution& from, const TourSolution& to);
-
-// Where IK starts for each viewpoint: its pose in `sol`, else fallback (home).
+Position ClampToBounds(Position p, const ObjectPlacementBounds& b); // The position moved inside the bounds, axis by axis.
+std::vector<int> GetLostViewpoints(const TourSolution& from, const TourSolution& to); // Viewpoints reached initially but lost after move.
 std::vector<Joints> GetIkStartPoses(const TourSolution& sol, const Joints& fallback, int num_viewpoint);
-
-// home, then the tour poses in visiting order.
 std::vector<Joints> PrependHomePose(const Joints& home, const std::vector<Joints>& tour);
 
 class ObjectPlacementOptimizer
@@ -111,8 +105,6 @@ public:
 	ObjectPlacementResult Optimize();
 
 private:
-	Position RunManipulabilityJump(const Position& from, const TourSolution& warm, int restart_in);
-
 	// --- Reach and improve ---
 	bool ResetAndSolveAtStart(const Position& start, int restart_in, const TourSolution* warm);
 	ReachAttemptResult ReachAllViewpoints(const Position& from);
@@ -120,11 +112,11 @@ private:
 
 	void PrepareReachViewpoints();
 	bool TryReachViewpoints(int iter);
-	
 	std::optional<MoveCandidate> TryKinematicRoomMove();
 	std::optional<MoveCandidate> LineSearch(const Eigen::Vector3d& dir);
 	std::optional<TourSolution> ConfirmWithFullSolve(const MoveCandidate& step);
 	bool CommitMove(const MoveCandidate& step, TourSolution committed, int iter, const Eigen::Vector3d& g);
+	Position RunManipulabilityJump(const Position& from, const TourSolution& warm, int restart_in);
 	void OptimizeTourAndPlacement();
 	void RestartGtsp();
 
@@ -185,27 +177,26 @@ private:
 	std::vector<MoveSegment> move_history;	 // every move, kept for RViz
 
 	// --- Per reach attempt ---
-	int attempt_index = 0;
-	int attempt_seed = 0;
-	Position current_position;	  // current object position
-	TourSolution current_tour;  // full solve at current_position
-	ReachAttemptResult best_in_attempt;	  // best of this reach attempt
-	std::vector<Joints> ik_start_poses;
 	int stall_count = 0;
-	std::chrono::steady_clock::time_point move_start;  // for the move log
+	int attempt_seed = 0;
+	int attempt_index = 0;
 	double ik_seconds = 0.0;  // exact IK time since the move began
 	double closest_ik_seconds = 0.0;  // closest-IK time since the move began
-	std::vector<Joints> last_reached_poses;  // each viewpoint's joints when last reached
-	std::vector<Joints> last_closest_poses;  // each missed viewpoint's last closest pose: keeps its gap continuous
-	bool track_current_poses = true;  // quick solves follow the current poses (reach phase) or re-solve fresh (after)
-	bool logged_gtsp_restarts_at_first_reach = false;
-	std::chrono::steady_clock::time_point reach_deadline;
+	std::chrono::steady_clock::time_point move_start;  // for the move log
 
-	// --- Per kinematic move ---
+	Position current_position;	  // current object position
+	TourSolution current_tour;  // full solve at current_position
 	TourSolution quick_solve_tour;  // quick solve at current_position: what line-search tries compare against
 	std::vector<int> locked_order;
+	ReachAttemptResult best_in_attempt;	  // best of this reach attempt
+	std::vector<Joints> ik_start_poses;
+	std::vector<Joints> last_reached_poses;  // each viewpoint's joints when last reached
+	std::vector<Joints> last_closest_poses;  // each missed viewpoint's last closest pose: keeps its gap continuous
 	const std::vector<int>* fixed_order = nullptr;  // order the GTSP must keep; null = it reorders
-
+	bool quick_solve_start_from_current_ik = true;  // quick solves follow the current poses (reach phase) or re-solve fresh (after)
+	bool logged_gtsp_restarts_at_first_reach = false;
+	
+	// Log and visualization
 	void LogGtspRestartsAtFirstReach();
 	void PublishProgressMarkers(const Eigen::Vector3d& neg_grad);
 };

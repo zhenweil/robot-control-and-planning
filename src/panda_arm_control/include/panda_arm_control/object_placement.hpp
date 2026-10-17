@@ -77,7 +77,6 @@ struct ObjectPlacementParams
 	double convergence_tolerance_cost = 1e-3;	  // stop optimization when cost improvement < 0.1%
 	int patience = 3; // stop optimization if no improvement after this many iterations
 	bool stop_when_all_reached = false;  // end each descent as soon as every viewpoint is reached
-	double reach_time_limit = 0.0;  // s per descent to reach every viewpoint; then it counts as stuck. 0 = none
 	int reach_patience = 3;  // reach-phase iterations without gaining a viewpoint before the descent counts as stuck
 	int gtsp_restarts = 0;  // extra full solves at each descent's result, warm-started from the best so far
 	// After GTSP restarts: QP steps moving the object and each tour pose along its self-motion (order and IK branches fixed) to
