@@ -1,5 +1,5 @@
 // Random-sampling baseline for object placement: draws object positions in a box (uniformly, or weighted by the robot-only
-// reachability score) until the time / sample budget runs out. At each, the tour is solved like base_gradient (IK poses,
+// reachability score) until the time / sample budget runs out. At each, the tour is solved like object_placement (IK poses,
 // GTSP, OMPL-planned travel); keeps the one reaching the most viewpoints, then the least planned travel, and runs GTSP restarts there.
 
 #include <algorithm>
@@ -112,7 +112,7 @@ geometry_msgs::msg::Pose ToPoseMsg(const Eigen::Isometry3d& t)
 	return p;
 }
 
-// The surface the robot stands on (top face at the base plane), as in base_gradient, so both see the same world.
+// The surface the robot stands on (top face at the base plane), as in object_placement, so both see the same world.
 void AddMountingSurface(const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor)
 {
 	const double size = 4.0, thickness = 0.05;  // m
@@ -173,9 +173,9 @@ public:
 			ToVector3(param<std::vector<double>>("object_translation_world", {0.5, 0.0, 0.15}), Eigen::Vector3d(0.5, 0.0, 0.15));
 		const Eigen::Matrix3d rotation =
 			RotationFromRpyDeg(param<std::vector<double>>("object_rotation_rpy_deg", {0.0, 0.0, 0.0}));
-		// Same bounds and IK budget names as base_gradient's YAML, so one params file serves both.
-		const Eigen::Vector3d lo(param<double>("bg_x_min", -0.6), param<double>("bg_y_min", -0.6), param<double>("bg_z_min", -0.2));
-		const Eigen::Vector3d hi(param<double>("bg_x_max", 0.6), param<double>("bg_y_max", 0.6), param<double>("bg_z_max", 0.2));
+		// Same bounds and IK budget names as object_placement's YAML, so one params file serves both.
+		const Eigen::Vector3d lo(param<double>("x_min", -0.6), param<double>("y_min", -0.6), param<double>("z_min", -0.2));
+		const Eigen::Vector3d hi(param<double>("x_max", 0.6), param<double>("y_max", 0.6), param<double>("z_max", 0.2));
 		const int ik_attempts = std::max(1, static_cast<int>(param<int64_t>("ik_attempts", 30)));
 		const int seed = static_cast<int>(param<int64_t>("random_seed", 42));
 		const double time_budget = param<double>("rp_time_budget_sec", 90.0);
@@ -207,23 +207,23 @@ public:
 			planning_scene_monitor::LockedPlanningSceneRO scene(psm);
 			return scene->isStateValid(*s, g->getName());
 		};
-		// Tour solve settings: base_gradient's parameter names and defaults, so one params file serves both.
-		const int max_ik_solutions = std::max(1, static_cast<int>(param<int64_t>("bg_max_solutions_per_candidate", 4)));
-		const int ik_retries_per_point = static_cast<int>(param<int64_t>("bg_ik_retries_per_point", 14));
-		const int num_tour_solves = std::max(1, static_cast<int>(param<int64_t>("bg_gtsp_num_restart", 2)));
-		const int two_opt_rounds = static_cast<int>(param<int64_t>("bg_gtsp_two_opt_rounds", 5));
-		const int gtsp_restarts = static_cast<int>(param<int64_t>("bg_gtsp_restarts", 0));
-		const int gtsp_restart_ik_solutions = static_cast<int>(param<int64_t>("bg_gtsp_restart_ik_solutions", 8));
-		const double planning_time = param<double>("bg_real_cost_planning_time", 0.5);
-		const int planning_attempts = static_cast<int>(param<int64_t>("bg_real_cost_attempts", 3));
-		const double unreachable_penalty = param<double>("bg_unreachable_penalty", 50.0);
+		// Tour solve settings: object_placement's parameter names and defaults, so one params file serves both.
+		const int max_ik_solutions = std::max(1, static_cast<int>(param<int64_t>("max_solutions_per_candidate", 4)));
+		const int ik_retries_per_point = static_cast<int>(param<int64_t>("ik_retries_per_point", 14));
+		const int num_tour_solves = std::max(1, static_cast<int>(param<int64_t>("gtsp_num_restart", 2)));
+		const int two_opt_rounds = static_cast<int>(param<int64_t>("gtsp_two_opt_rounds", 5));
+		const int gtsp_restarts = static_cast<int>(param<int64_t>("gtsp_restarts", 0));
+		const int gtsp_restart_ik_solutions = static_cast<int>(param<int64_t>("gtsp_restart_ik_solutions", 8));
+		const double planning_time = param<double>("real_cost_planning_time", 0.5);
+		const int planning_attempts = static_cast<int>(param<int64_t>("real_cost_attempts", 3));
+		const double unreachable_penalty = param<double>("unreachable_penalty", 50.0);
 		joint_travel::EdgeWeights edge_weights;
-		edge_weights.joint_distance = param<double>("bg_joint_distance_weight", 1.0);
-		edge_weights.max_turn = param<double>("bg_max_joint_deviation_weight", 1.0);
+		edge_weights.joint_distance = param<double>("joint_distance_weight", 1.0);
+		edge_weights.max_turn = param<double>("max_joint_deviation_weight", 1.0);
 		// All joints but the last, which only spins the camera.
 		const std::vector<int> travel_joints = joint_travel::AllJoints(static_cast<int>(home.size()) - 1);
 
-		// IK poses per viewpoint, collected like base_gradient: one from the seed, the rest from random starts.
+		// IK poses per viewpoint, collected like object_placement: one from the seed, the rest from random starts.
 		auto collect_ik_poses = [&](const Eigen::Vector3d& position, const std::vector<Joints>& seeds, int max_solutions)
 		{
 			const Eigen::Isometry3d shift(Eigen::Translation3d(position - nominal));
@@ -302,19 +302,19 @@ public:
 				(a.num_reachable == b.num_reachable && a.planned_travel < b.planned_travel);
 		};
 
-		// Weighted sampling: score grid from the reachability map (same file and settings as base_gradient's), computed before the clock starts.
+		// Weighted sampling: score grid from the reachability map (same file and settings as object_placement's), computed before the clock starts.
 		ReachabilityGrid reachability_grid;
 		std::discrete_distribution<size_t> pick_grid_point;
 		if (weighted_by_reachability)
 		{
 			ReachabilityMap::Options map_options;
-			map_options.samples = static_cast<int>(param<int64_t>("bg_reach_map_samples", map_options.samples));
-			map_options.self_collision = param<bool>("bg_reach_map_self_collision", map_options.self_collision);
-			map_options.voxel = param<double>("bg_reach_map_voxel", map_options.voxel);
-			map_options.directions = static_cast<int>(param<int64_t>("bg_reach_map_directions", map_options.directions));
-			map_options.limit_sharpness = param<double>("bg_reach_map_limit_sharpness", map_options.limit_sharpness);
-			map_options.seed = static_cast<int>(param<int64_t>("bg_reach_map_seed", map_options.seed));
-			std::string map_path = param<std::string>("bg_reach_map_file", "");
+			map_options.samples = static_cast<int>(param<int64_t>("reach_map_samples", map_options.samples));
+			map_options.self_collision = param<bool>("reach_map_self_collision", map_options.self_collision);
+			map_options.voxel = param<double>("reach_map_voxel", map_options.voxel);
+			map_options.directions = static_cast<int>(param<int64_t>("reach_map_directions", map_options.directions));
+			map_options.limit_sharpness = param<double>("reach_map_limit_sharpness", map_options.limit_sharpness);
+			map_options.seed = static_cast<int>(param<int64_t>("reach_map_seed", map_options.seed));
+			std::string map_path = param<std::string>("reach_map_file", "");
 			if (map_path.empty())
 				map_path = ReachabilityMap::DefaultPath(group_name);
 			const std::optional<ReachabilityMap> reachability_map = ReachabilityMap::Load(map_path, model, group_name, "tool0", map_options);
@@ -366,7 +366,7 @@ public:
 		const double sampling_secs = elapsed();
 		RCLCPP_INFO(get_logger(), "%d samples in %.1f s, %d reach all viewpoints", samples, sampling_secs, samples_reaching_all);
 
-		// GTSP restarts at the best, like base_gradient: more full solves there, seeded from its poses, with more IK choices.
+		// GTSP restarts at the best, like object_placement: more full solves there, seeded from its poses, with more IK choices.
 		const double travel_before_restarts = best.planned_travel;
 		for (int i = 0; i < gtsp_restarts && best.num_reachable == n && rclcpp::ok(); ++i)
 		{

@@ -82,8 +82,8 @@ add_executable(bstar_placement
 	src/bstar_placement_node.cpp
 	)
 
-add_executable(base_gradient
-	src/base_gradient.cpp
+add_executable(object_placement
+	src/object_placement.cpp
 	src/closest_ik.cpp
 	src/gtsp.cpp
 	src/ik_sampling.cpp
@@ -96,7 +96,7 @@ add_executable(base_gradient
 	src/tour_placement.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
-	src/base_gradient_node.cpp
+	src/object_placement_node.cpp
 	)
 
 # Builds the reachability map that random_placement's weighted sampling loads.
@@ -114,7 +114,7 @@ add_executable(reachability_climb
 	src/reachability_climb.cpp
 	)
 
-# Viewpoints with no robot reachability check, for base_gradient's tour_input_dir.
+# Viewpoints with no robot reachability check, for object_placement's tour_input_dir.
 add_executable(viewpoint_generator
 	src/mesh_utils.cpp
 	src/potential_field_sampler.cpp
@@ -124,7 +124,7 @@ add_executable(viewpoint_generator
 	src/viewpoint_generator_node.cpp
 	)
 
-# Random-sampling placement baseline (separate from base_gradient).
+# Random-sampling placement baseline (separate from object_placement).
 add_executable(random_placement
 	src/gtsp.cpp
 	src/ik_sampling.cpp
@@ -135,7 +135,7 @@ add_executable(random_placement
 	src/random_placement_node.cpp
 	)
 
-foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement reachability_climb viewpoint_generator)
+foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement reachability_climb viewpoint_generator)
 	target_include_directories(${viewpoint_planner_target} PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		)
@@ -167,14 +167,14 @@ endforeach()
 # bstar_placement's B* implementation solves a sequence of linear programs with OSQP.
 target_link_libraries(bstar_placement osqp::osqp)
 
-# base_gradient seeds OMPL (planned travel) from RANDOM_SEED so runs repeat.
-target_link_libraries(base_gradient ompl::ompl osqp::osqp)
+# object_placement seeds OMPL (planned travel) from RANDOM_SEED so runs repeat.
+target_link_libraries(object_placement ompl::ompl osqp::osqp)
 
 install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement build_reachability_map reachability_climb viewpoint_generator
+install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement build_reachability_map reachability_climb viewpoint_generator
 	DESTINATION lib/${PROJECT_NAME}
 	)
 

@@ -40,7 +40,7 @@ def generate_launch_description():
         "visualize_progress_delay_sec",
         default_value="0.0",
         description="Seconds to pause after each descent iteration's progress publish "
-        "(topic /base_gradient_progress_markers), so the base's descent can actually be "
+        "(topic /object_placement_progress_markers), so the base's descent can actually be "
         "watched in RViz instead of flashing by. 0.0 (default) adds no delay; try e.g. 0.5.",
     )
     visualize_progress_delay_sec = ParameterValue(
@@ -165,7 +165,7 @@ def generate_launch_description():
         position_bound_args.append(DeclareLaunchArgument(
             _name, default_value=str(_default), description=f"Object position {_name} bound (m, abs).",
         ))
-        position_bounds[f"bg_{_name}"] = ParameterValue(LaunchConfiguration(_name), value_type=float)
+        position_bounds[_name] = ParameterValue(LaunchConfiguration(_name), value_type=float)
 
     # Descent start position, abs (m, base frame). Defaults to the nominal object position.
     initial_position_args = []
@@ -175,12 +175,12 @@ def generate_launch_description():
         initial_position_args.append(DeclareLaunchArgument(
             _name, default_value=str(_default), description=f"Descent start position {_axis} (m, abs).",
         ))
-        initial_position[f"bg_{_name}"] = ParameterValue(LaunchConfiguration(_name), value_type=float)
+        initial_position[_name] = ParameterValue(LaunchConfiguration(_name), value_type=float)
 
     output_dir_arg = DeclareLaunchArgument(
         "output_dir",
-        default_value="/tmp/base_gradient_output",
-        description="Where base_gradient_result.json is written.",
+        default_value="/tmp/object_placement_output",
+        description="Where object_placement_result.json is written.",
     )
     output_dir = LaunchConfiguration("output_dir")
 
@@ -192,7 +192,7 @@ def generate_launch_description():
     )
     tour_input_dir = LaunchConfiguration("tour_input_dir")
 
-    base_gradient_params = {
+    object_placement_params = {
         "mesh_path": "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl",
         "mesh_scale": 0.01,
         # Where a prior viewpoint_planner_* run exported the ordered tour's
@@ -204,49 +204,49 @@ def generate_launch_description():
         # Where the descent starts (abs position).
         **initial_position,
         # Meters per radian: weighs a missed viewpoint's angle gap against its distance gap.
-        "bg_rot_metric_scale": 0.3,
-        # Objective weights (see base_gradient.hpp). Cartesian term has no gradient; kept for
+        "rot_metric_scale": 0.3,
+        # Objective weights (see object_placement.hpp). Cartesian term has no gradient; kept for
         # inner-GTSP ordering parity with the rest of the pipeline.
-        "bg_joint_distance_weight": 1.0,
-        "bg_max_joint_deviation_weight": 1.0,
+        "joint_distance_weight": 1.0,
+        "max_joint_deviation_weight": 1.0,
         # A missed viewpoint costs the penalty + this * its closest-IK pose gap (m), capped at the cap.
-        "bg_miss_gap_weight": miss_gap_weight,
-        "bg_miss_gap_cap": 0.15,
+        "miss_gap_weight": miss_gap_weight,
+        "miss_gap_cap": 0.15,
         # Collision-aware closest IK for missed viewpoints: clearance margin (m), iterations, starts.
-        "bg_closest_ik_margin": 0.02,
-        "bg_closest_ik_iters": 60,
-        "bg_closest_ik_starts": 5,
+        "closest_ik_margin": 0.02,
+        "closest_ik_iters": 60,
+        "closest_ik_starts": 5,
         # Cost added per viewpoint left unreachable -- keeps a partial solution from looking cheap.
-        "bg_unreachable_penalty": 50.0,
+        "unreachable_penalty": 50.0,
         # Raised from 2/8/0.1 + min-of-N committed solves: thin IK branch coverage made the tour
         # cost at a fixed offset swing ~5% on the seed alone. All four are launch args.
-        "bg_max_solutions_per_candidate": max_solutions_per_candidate,
-        "bg_ik_retries_per_point": ik_retries_per_point,
-        "bg_gtsp_num_restart": gtsp_num_restart,
-        "bg_gtsp_two_opt_rounds": 5,
+        "max_solutions_per_candidate": max_solutions_per_candidate,
+        "ik_retries_per_point": ik_retries_per_point,
+        "gtsp_num_restart": gtsp_num_restart,
+        "gtsp_two_opt_rounds": 5,
         # Descents (1 = single). Each restart starts from the best position so far with a new IK seed.
-        "bg_descent_num_restart": descent_num_restart,
-        "bg_max_kinematic_moves": max_kinematic_moves,
-        "bg_initial_step": 0.02,
-        "bg_step_shrink": 0.25,
-        "bg_max_line_search_iters": 4,
-        "bg_jacobian_damping": 1e-3,
-        "bg_convergence_tolerance_offset": 0.002,
-        "bg_convergence_tolerance_cost": 1e-3,
-        # Stop after this many consecutive iterations that each gain < bg_convergence_tolerance_cost.
-        "bg_patience": 3,
-        "bg_stop_when_all_reached": stop_when_all_reached,
-        "bg_gtsp_restarts": gtsp_restarts,
-        "bg_travel_gradient": travel_gradient,
-        "bg_freeze_order": freeze_order,
-        "bg_lock_input_order": lock_input_order,
-        "bg_real_cost_planning_time": real_cost_planning_time,
-        "bg_real_cost_attempts": real_cost_attempts,
-        "bg_planned_travel_in_cost": planned_travel_in_cost,
-        "bg_trace_line_search": trace_line_search,
-        "bg_gtsp_restarts_at_reach": gtsp_restarts_at_reach,
-        "bg_fd_gradient_check": fd_gradient_check,
-        "bg_fd_epsilon": 1e-4,
+        "descent_num_restart": descent_num_restart,
+        "max_kinematic_moves": max_kinematic_moves,
+        "initial_step": 0.02,
+        "step_shrink": 0.25,
+        "max_line_search_iters": 4,
+        "jacobian_damping": 1e-3,
+        "convergence_tolerance_offset": 0.002,
+        "convergence_tolerance_cost": 1e-3,
+        # Stop after this many consecutive iterations that each gain < convergence_tolerance_cost.
+        "patience": 3,
+        "stop_when_all_reached": stop_when_all_reached,
+        "gtsp_restarts": gtsp_restarts,
+        "travel_gradient": travel_gradient,
+        "freeze_order": freeze_order,
+        "lock_input_order": lock_input_order,
+        "real_cost_planning_time": real_cost_planning_time,
+        "real_cost_attempts": real_cost_attempts,
+        "planned_travel_in_cost": planned_travel_in_cost,
+        "trace_line_search": trace_line_search,
+        "gtsp_restarts_at_reach": gtsp_restarts_at_reach,
+        "fd_gradient_check": fd_gradient_check,
+        "fd_epsilon": 1e-4,
         "ik_timeout": ik_timeout,
         "random_seed": ParameterValue(random_seed, value_type=int),
         "visualize_progress_delay_sec": visualize_progress_delay_sec,
@@ -263,7 +263,7 @@ def generate_launch_description():
 
     params_file_arg = DeclareLaunchArgument(
         "params_file", default_value="",
-        description="Optional YAML of bg_* node parameters; loaded last, so it overrides the launch arguments.",
+        description="Optional YAML of node parameters; loaded last, so it overrides the launch arguments.",
     )
 
     rviz_config = PathJoinSubstitution(
@@ -279,19 +279,19 @@ def generate_launch_description():
         condition=IfCondition(use_rviz),
     )
 
-    # The robot-dependent nodes: base_gradient, and with use_rviz the robot itself so RViz shows it without the MoveIt
+    # The robot-dependent nodes: object_placement, and with use_rviz the robot itself so RViz shows it without the MoveIt
     # launch (don't combine with panda_arm.launch.py, which already publishes these).
     def make_robot_nodes(context):
         robot = robots.GetRobot(LaunchConfiguration("robot").perform(context))
         moveit_config = robots.GetMoveItConfig(robot)
         params_file = LaunchConfiguration("params_file").perform(context)
         extra = [os.path.expanduser(params_file)] if params_file else []
-        base_gradient_node = Node(
+        object_placement_node = Node(
             package="panda_arm_control",
-            executable="base_gradient",
-            name="base_gradient",
+            executable="object_placement",
+            name="object_placement",
             output="screen",
-            parameters=[moveit_config.to_dict(), base_gradient_params, object_pose_config, robots.GetRobotParameters(robot), *extra],
+            parameters=[moveit_config.to_dict(), object_placement_params, object_pose_config, robots.GetRobotParameters(robot), *extra],
             # Makes MoveIt's IK (KDL) deterministic -- it otherwise re-seeds from /dev/urandom on
             # retries, which is the main run-to-run inconsistency in the result.
             additional_env={"RANDOM_SEED": random_seed},
@@ -311,7 +311,7 @@ def generate_launch_description():
             parameters=[{"zeros": robot["home"]}],
             condition=IfCondition(use_rviz),
         )
-        nodes = [base_gradient_node, robot_state_publisher_node, joint_state_publisher_node]
+        nodes = [object_placement_node, robot_state_publisher_node, joint_state_publisher_node]
         if robot["base_link"]:  # a URDF without its own world link
             nodes.append(Node(
                 package="tf2_ros",

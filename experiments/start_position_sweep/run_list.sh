@@ -3,15 +3,15 @@
 # ROS domain and log folder. Appends one CSV row per start to OUT; a start already in OUT is skipped (resumable).
 #
 # Usage: run_list.sh LIST OUT [NW=6] [SEED=42]
-# Env:   METHOD=base_gradient|random_placement   (default base_gradient)
-#        BASEYAML=<params yaml>                  (default: the package's config/base_gradient_run.yaml)
+# Env:   METHOD=object_placement|random_placement   (default object_placement)
+#        BASEYAML=<params yaml>                  (default: the package's config/object_placement_run.yaml)
 #        TIME_BUDGET=<s>                         (random_placement only, default 90)
 #        TIMEOUT=<s>                             (per start, default 900)
 set -u
 LIST=$1; OUT=$2; NW=${3:-6}; SEED=${4:-42}
-METHOD=${METHOD:-base_gradient}
+METHOD=${METHOD:-object_placement}
 WS=$(cd "$(dirname "$0")/../.." && pwd)  # workspace root
-BASE=${BASEYAML:-$WS/src/panda_arm_control/config/base_gradient_run.yaml}
+BASE=${BASEYAML:-$WS/src/panda_arm_control/config/object_placement_run.yaml}
 TIME_BUDGET=${TIME_BUDGET:-90}
 TIMEOUT=${TIMEOUT:-900}
 WORK=$(dirname "$OUT")/work
@@ -31,8 +31,8 @@ worker() {
     n=$((n + 1)); [ $(( (n - 1) % NW )) -ne "$W" ] && continue
     grep -q "^$x,$y,$z," "$OUT" && continue
     local yaml=$WORK/start_w$W.yaml
-    sed -e "s/bg_initial_x: .*/bg_initial_x: $x/" -e "s/bg_initial_y: .*/bg_initial_y: $y/" \
-        -e "s/bg_initial_z: .*/bg_initial_z: $z/" "$BASE" > "$yaml"
+    sed -e "s/initial_x: .*/initial_x: $x/" -e "s/initial_y: .*/initial_y: $y/" \
+        -e "s/initial_z: .*/initial_z: $z/" "$BASE" > "$yaml"
     local args="params_file:=$yaml random_seed:=$SEED"
     [ "$METHOD" = random_placement ] && args="$args time_budget_sec:=$TIME_BUDGET"
     local before; before=$(ls -t "$ROS_LOG_DIR"/${METHOD}_*.log 2>/dev/null | head -1)

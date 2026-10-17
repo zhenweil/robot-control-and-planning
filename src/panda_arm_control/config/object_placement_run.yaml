@@ -1,0 +1,51 @@
+# Example run settings for object_placement.launch.py params_file:=...
+# Node parameter names; loaded last, so these override the launch arguments.
+# Positions and bounds are abs (m, base frame).
+/**:
+  ros__parameters:
+    # Start position and bounds
+    initial_x: 0.2
+    initial_y: 0.0
+    initial_z: 0.0
+    x_min: 0.2
+    x_max: 0.6
+    y_min: -0.6
+    y_max: 0.6
+    z_min: -0.7
+    z_max: 0.7
+
+    # Descent
+    descent_num_restart: 3                # descents; each restart first jumps up the reached viewpoints' manipulability
+    jump_softmin_weight: 100.0            # jump score: sum of manipulability + this x soft-min
+    jump_max_moves: 10                    # moves per manipulability jump
+    stop_when_all_reached: true
+    reach_time_limit: 120.0              # s per descent to reach every viewpoint, then stuck; 0 = none
+    reach_patience: 3                     # reach iterations without gaining a viewpoint, then stuck (jump + restart)
+    gtsp_restarts: 3                      # after all reached: full solves, kept by lowest cost (planned travel, comfort)
+    gtsp_restart_ik_solutions: 8          # IK solutions per viewpoint in those solves
+    tour_placement_iterations: 30         # after GTSP restarts: QP steps moving the object + each pose's self-motion; 0 = off
+    tour_placement_rounds: 3              # GTSP restarts then tour-placement, repeated this many times
+    tour_placement_object_step: 0.02      # m per axis per step, halved on a rejected step
+    tour_placement_self_motion_step: 0.3  # rad along each pose's self-motion per step
+    tour_placement_joint_margin: 0.05     # rad kept from joint limits
+    reconfig_threshold: 1.0               # rad: a move turning any joint (joint 7 aside) more than this is a reconfiguration
+    room_then_reach: true                 # when stuck: aim at a missed viewpoint; if reached ones are lost, back off for what ran out
+    room_max_targets: 3                   # missed viewpoints room-then-reach tries per call, closest first; 0 = all
+    trace_line_search: false
+    initial_step: 0.05                    # m: largest object move per iteration (first probe)
+    step_shrink: 0.5                     # each failed probe tries step * this
+    max_line_search_iters: 4              # probes per iteration before giving up
+
+    # IK: a fixed number of attempts instead of a time limit, so the same random_seed repeats the run
+    ik_attempts: 30
+
+    # Cost
+    travel_gradient: true
+    planned_travel_in_cost: true
+    real_cost_planning_time: 0.5
+    manipulability_weight: 1.0            # while viewpoints are missed: cost -= this * sum of manipulability
+    softmin_manipulability_weight: 1000.0 # while viewpoints are missed: cost -= this * soft-min manipulability (worst poses)
+    softmin_tau: 0.01                     # soft-min: small = only the worst pose, large = closer to the average
+    manipulability_limit_sharpness: 20.0  # joints near a limit count less in manipulability; 0 = plain
+    miss_gap_weight: 200.0
+    closest_ik_starts: 5                  # closest-IK starts per missed viewpoint (only runs while viewpoints are missed)

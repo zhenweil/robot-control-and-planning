@@ -11,8 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import robots  # noqa: E402
 
 
-# Random-sampling placement baseline. Pass the same params_file as base_gradient so both use one
-# search box (bg_x/y/z_min/max), IK budget (ik_attempts) and random_seed.
+# Random-sampling placement baseline. Pass the same params_file as object_placement so both use one
+# search box (x/y/z_min/max), IK budget (ik_attempts) and random_seed.
 def generate_launch_description():
     args = [
         DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda, kinova or xarm7 (see robots.py)."),
@@ -23,7 +23,7 @@ def generate_launch_description():
         DeclareLaunchArgument("weighted_by_reachability", default_value="false", description="Sample in proportion to the robot-only reachability score (needs the reachability map)."),
         DeclareLaunchArgument("output_dir", default_value="/tmp/random_placement_output"),
         DeclareLaunchArgument("tour_input_dir", default_value="/tmp/viewpoint_planner_output"),
-        DeclareLaunchArgument("params_file", default_value="", description="Optional YAML loaded last (e.g. base_gradient_run.yaml)."),
+        DeclareLaunchArgument("params_file", default_value="", description="Optional YAML loaded last (e.g. object_placement_run.yaml)."),
     ]
 
     object_pose_config = PathJoinSubstitution([FindPackageShare("panda_arm_control"), "config", "object_pose.yaml"])

@@ -196,7 +196,7 @@ Visualization Manager:
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
-      Name: BaseGradient
+      Name: ObjectPlacement
       Namespaces:
         {}
       Topic:
@@ -204,11 +204,11 @@ Visualization Manager:
         Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /base_gradient_markers
+        Value: /object_placement_markers
       Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
-      Name: BaseGradientProgress
+      Name: ObjectPlacementProgress
       Namespaces:
         {}
       Topic:
@@ -216,7 +216,7 @@ Visualization Manager:
         Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /base_gradient_progress_markers
+        Value: /object_placement_progress_markers
       Value: true
   Enabled: true
   Global Options:

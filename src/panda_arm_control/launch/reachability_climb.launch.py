@@ -1,5 +1,5 @@
 """Sanity check: climb the reachability-map score from a start object position (no IK); prints each step and shows it in
-RViz (/base_gradient_progress_markers: object, trail, viewpoints colored by map value, the worst one larger).
+RViz (/object_placement_progress_markers: object, trail, viewpoints colored by map value, the worst one larger).
 
 ros2 launch panda_arm_control reachability_climb.launch.py start:="[0.1, 0.0, 0.1]"
 """

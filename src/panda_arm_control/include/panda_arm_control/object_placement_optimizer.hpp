@@ -17,7 +17,7 @@
 
 #include "panda_arm_control/joint_travel.hpp"
 #include "panda_arm_control/room_margins.hpp"
-#include "panda_arm_control/base_gradient.hpp"
+#include "panda_arm_control/object_placement.hpp"
 #include "panda_arm_control/scene_geometry.hpp"
 
 namespace object_placement
@@ -84,7 +84,7 @@ struct MoveSegment
 };
 
 // The position moved inside the bounds, axis by axis.
-Position ClampToBounds(Position p, const BaseGradientBounds& b);
+Position ClampToBounds(Position p, const ObjectPlacementBounds& b);
 
 // Viewpoints reached in `from` but not in `to`.
 std::vector<int> GetLostViewpoints(const TourSolution& from, const TourSolution& to);
@@ -103,12 +103,12 @@ public:
 		const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
 		const planning_scene_monitor::PlanningSceneMonitorPtr& scene, const std::string& group_name,
 		const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
-		const std::vector<Eigen::Isometry3d>& viewpoints_nominal, const Joints& home, const BaseGradientParams& params);
+		const std::vector<Eigen::Isometry3d>& viewpoints_nominal, const Joints& home, const ObjectPlacementParams& params);
 	ObjectPlacementOptimizer(const ObjectPlacementOptimizer&) = delete;
 	ObjectPlacementOptimizer& operator=(const ObjectPlacementOptimizer&) = delete;
 
 	// Runs the whole search from params' start position; restores the object's scene pose before returning.
-	BaseGradientResult Optimize();
+	ObjectPlacementResult Optimize();
 
 private:
 	Position RunManipulabilityJump(const Position& from, const TourSolution& warm, int restart_in);
@@ -121,40 +121,32 @@ private:
 	void PrepareReachViewpoints();
 	bool TryReachViewpoints(int iter);
 	
-	std::optional<MoveCandidate> LineSearch(const Eigen::Vector3d& dir);
 	std::optional<MoveCandidate> TryKinematicRoomMove();
+	std::optional<MoveCandidate> LineSearch(const Eigen::Vector3d& dir);
 	std::optional<TourSolution> ConfirmWithFullSolve(const MoveCandidate& step);
 	bool CommitMove(const MoveCandidate& step, TourSolution committed, int iter, const Eigen::Vector3d& g);
-	void LogGtspRestartsAtFirstReach();
-	void RestartGtsp();
 	void OptimizeTourAndPlacement();
+	void RestartGtsp();
 
 	// --- Solving and scoring ---
-	TourSolution QuickSolveTour(const Position& at, BaseGradientParams p);
+	TourSolution QuickSolveTour(const Position& at, ObjectPlacementParams p);
 	TourSolution QuickSolveTour(const Position& at, int gaps_min_reached = 0);
-	TourSolution RunGtspRestarts(const Position& at, TourSolution best_sol, int num_restarts);
-	std::vector<std::vector<Joints>> CollectIkPoses(
-		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed, int max_solutions);
-	TourSolution SolveMostManipulablePoses(const Position& at, const BaseGradientParams& p);
-	TourSolution SolveTourBestOf(
-		const Position& at, const BaseGradientParams& p, const std::vector<int>* initial_order,
-		const std::vector<int>* fixed_order);
-	TourSolution SolveTour(
-		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed,
-		const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
+	TourSolution SolveMostManipulablePoses(const Position& at, const ObjectPlacementParams& p);
+	TourSolution RunGtspRestarts(const Position& at, TourSolution best_sol, int num_restarts, bool warm_start, const std::vector<int>* fixed_order);
+	std::vector<std::vector<Joints>> CollectIkPoses(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, int max_solutions);
+	TourSolution SampleIkAndSolveGtsp(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
 
 	// Compute gradient
 	Eigen::Vector3d ComputeNumericCostGradient();
-	Eigen::Vector3d ComputeCostGradient(const TourSolution& sol, const BaseGradientParams& p);
+	Eigen::Vector3d ComputeCostGradient(const TourSolution& sol, const ObjectPlacementParams& p);
 	Eigen::Vector3d ComputeManipulabilityGradient(const std::vector<Joints>& poses, double sum_weight, double softmin_weight);
 
 	void RememberLastPoses(const TourSolution& sol);
 	double ComputeWeightedCost(const TourSolution& sol) const;
-	TourSolution AddPlannedTravel(const Position& at, TourSolution sol);
-	double ComputePlannedTravel(const Position& at, const TourSolution& sol);
-
 	bool IsBetter(const TourSolution& a, const TourSolution& b) const;
+	TourSolution AddPlannedTravel(const Position& at, TourSolution sol);
 	void RecordHistoryAndBest(const Position& at, const TourSolution& sol);
+	double ComputePlannedTravel(const Position& at, const TourSolution& sol);
 
 	// --- Room-then-reach ---
 	Eigen::Vector3d RemoveMotionOnLockedAxes(Eigen::Vector3d v) const;
@@ -162,13 +154,12 @@ private:
 	room_margins::ArmModel BuildRoomMarginArmModel(const Position& at, const TourSolution& sol);
 	Eigen::Vector3d GetMoveDirectionToCloseGap(int target, const TourSolution& here_at, bool first);
 	std::optional<Joints> FindRoomierPose(int v, const Position& at, const room_margins::ArmModel& model, int tries);
-	room_margins::Shortage GetMarginsThatRunOut(
-		int v, const room_margins::ArmModel& model, const Position& at, const Eigen::Vector3d& d);
+	room_margins::Shortage GetMarginsThatRunOut(int v, const room_margins::ArmModel& model, const Position& at, const Eigen::Vector3d& d);
 
 	// --- Fixed for the whole run ---
 	std::string group_name;
 	rclcpp::Node::SharedPtr node;
-	const BaseGradientParams params;
+	const ObjectPlacementParams params;
 	moveit::core::RobotModelConstPtr robot_model;
 	planning_scene_monitor::PlanningSceneMonitorPtr scene;
 
@@ -189,9 +180,8 @@ private:
 	std::vector<int> counted_joint_indices;  // joints that count as travel: all but joint 7, which only spins the camera
 	moveit::core::GroupStateValidityCallbackFn state_validity;
 
-
 	// --- Whole run ---
-	BaseGradientResult run_result;		 // history and solve count; Optimize fills in the rest
+	ObjectPlacementResult run_result;		 // history and solve count; Optimize fills in the rest
 	std::vector<MoveSegment> move_history;	 // every move, kept for RViz
 
 	// --- Per reach attempt ---
@@ -216,7 +206,7 @@ private:
 	std::vector<int> locked_order;
 	const std::vector<int>* fixed_order = nullptr;  // order the GTSP must keep; null = it reorders
 
-	// --- Scene and markers ---
+	void LogGtspRestartsAtFirstReach();
 	void PublishProgressMarkers(const Eigen::Vector3d& neg_grad);
 };
 

@@ -1,6 +1,6 @@
 # Start-position sweep
 
-Runs a placement node (`base_gradient` or the `random_placement` baseline) from every start on an x/y/z grid
+Runs a placement node (`object_placement` or the `random_placement` baseline) from every start on an x/y/z grid
 (abs, base frame) and reports how often it reaches every viewpoint.
 
 ## Run

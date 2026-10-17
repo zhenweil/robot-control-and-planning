@@ -1,6 +1,6 @@
 # Viewpoint generation with no robot reachability check:
 #   ros2 run panda_arm_control viewpoint_generator --ros-args --params-file src/panda_arm_control/config/viewpoint_generator.yaml
-# Then point base_gradient's tour_input_dir at output_dir.
+# Then point object_placement's tour_input_dir at output_dir.
 /**:
   ros__parameters:
     mesh_path: /home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl  # empty = the package's bunny mesh

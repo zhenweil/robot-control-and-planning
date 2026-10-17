@@ -1,5 +1,5 @@
 // Generates viewpoints with no robot reachability check (viewpoint_generation.hpp) and writes
-// selected_robot_poses.json / selected_viewpoints.json to output_dir, for base_gradient's tour_input_dir.
+// selected_robot_poses.json / selected_viewpoints.json to output_dir, for object_placement's tour_input_dir.
 
 #include <filesystem>
 #include <memory>

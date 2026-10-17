@@ -4,11 +4,11 @@
 
 #include <json/json.h>
 
-#include "panda_arm_control/base_gradient.hpp"
+#include "panda_arm_control/object_placement.hpp"
 #include "panda_arm_control/marker_utils.hpp"
 #include "panda_arm_control/scene_geometry.hpp"
 
-void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientResult& result)
+void ExportObjectPlacementResult(const std::string& output_dir, const ObjectPlacementResult& result)
 {
 	std::filesystem::create_directories(output_dir);
 	Json::Value root;
@@ -46,12 +46,12 @@ void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientR
 	}
 	root["history"] = history;
 
-	const std::string path = output_dir + "/base_gradient_result.json";
+	const std::string path = output_dir + "/object_placement_result.json";
 	std::ofstream file(path);
 	Json::StreamWriterBuilder builder;
 	builder["indentation"] = "    ";
 	std::unique_ptr<Json::StreamWriter>(builder.newStreamWriter())->write(root, &file);
-	printf("Saved base gradient result JSON: %s\n", path.c_str());
+	printf("Saved object placement result JSON: %s\n", path.c_str());
 }
 
 Eigen::Isometry3d PlacementTransform(const Eigen::Vector3d& object_translation_nominal, double x, double y, double z)
@@ -67,17 +67,17 @@ void ApplyObjectPlacementToScene(
 		planning_scene_monitor, scene_geometry::MakeIsometry(Eigen::Vector3d(x, y, z), object_rotation_nominal));
 }
 
-visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
+visualization_msgs::msg::MarkerArray BuildObjectPlacementMarkerArray(
 	const rclcpp::Time& stamp, const std::string& resolved_mesh_path, double mesh_scale,
 	const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const BaseGradientResult& result)
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const ObjectPlacementResult& result)
 {
 	visualization_msgs::msg::MarkerArray markers;
 	int id = 0;
 	const Eigen::Isometry3d xform = PlacementTransform(object_translation_nominal, result.x, result.y, result.z);
 
 	visualization_msgs::msg::Marker mesh =
-		marker_utils::MakeMarker("base_gradient_object", visualization_msgs::msg::Marker::MESH_RESOURCE, stamp, id++);
+		marker_utils::MakeMarker("object_placement_object", visualization_msgs::msg::Marker::MESH_RESOURCE, stamp, id++);
 	mesh.mesh_resource = "file://" + resolved_mesh_path;
 	mesh.mesh_use_embedded_materials = false;
 	mesh.pose = scene_geometry::ToPoseMsg(
@@ -87,13 +87,13 @@ visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
 	markers.markers.push_back(mesh);
 
 	visualization_msgs::msg::Marker line =
-		marker_utils::MakeMarker("base_gradient_tour", visualization_msgs::msg::Marker::LINE_STRIP, stamp, id++);
+		marker_utils::MakeMarker("object_placement_tour", visualization_msgs::msg::Marker::LINE_STRIP, stamp, id++);
 	line.scale.x = 0.002;
 	line.color = marker_utils::Rgba(0.1f, 0.9f, 0.1f, 0.9f);
 	for (size_t k = 0; k < result.tour_order.size(); ++k)
 	{
 		visualization_msgs::msg::Marker sphere =
-			marker_utils::MakeMarker("base_gradient_waypoints", visualization_msgs::msg::Marker::SPHERE, stamp, id++);
+			marker_utils::MakeMarker("object_placement_waypoints", visualization_msgs::msg::Marker::SPHERE, stamp, id++);
 		sphere.pose.position = scene_geometry::ToPoint(
 			(xform * tour_tcp_poses_nominal[static_cast<size_t>(result.tour_order[k])]).translation());
 		sphere.scale.x = sphere.scale.y = sphere.scale.z = 0.008;

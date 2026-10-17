@@ -1,6 +1,6 @@
 // Sanity check of the reachability map: from a start object position, climb the map score of all viewpoints (no IK)
 // and print every step. Uses the saved map (config/reachability_map.yaml settings) and the selected viewpoints.
-// Markers on /base_gradient_progress_markers: the object, its trail, and the viewpoints colored by their map value
+// Markers on /object_placement_progress_markers: the object, its trail, and the viewpoints colored by their map value
 // (red 0 .. green 1).
 #include <chrono>
 #include <cmath>
@@ -23,16 +23,16 @@ int main(int argc, char** argv)
 	const std::string group = node->get_parameter_or<std::string>("group_name", "panda_arm");
 	const std::string tip = node->get_parameter_or<std::string>("tip_link", "tool0");
 	ReachabilityMap::Options options;
-	options.samples = node->get_parameter_or<int>("bg_reach_map_samples", options.samples);
-	options.self_collision = node->get_parameter_or<bool>("bg_reach_map_self_collision", options.self_collision);
-	options.voxel = node->get_parameter_or<double>("bg_reach_map_voxel", options.voxel);
-	options.directions = node->get_parameter_or<int>("bg_reach_map_directions", options.directions);
-	options.limit_sharpness = node->get_parameter_or<double>("bg_reach_map_limit_sharpness", options.limit_sharpness);
-	options.seed = node->get_parameter_or<int>("bg_reach_map_seed", options.seed);
-	std::string path = node->get_parameter_or<std::string>("bg_reach_map_file", "");
+	options.samples = node->get_parameter_or<int>("reach_map_samples", options.samples);
+	options.self_collision = node->get_parameter_or<bool>("reach_map_self_collision", options.self_collision);
+	options.voxel = node->get_parameter_or<double>("reach_map_voxel", options.voxel);
+	options.directions = node->get_parameter_or<int>("reach_map_directions", options.directions);
+	options.limit_sharpness = node->get_parameter_or<double>("reach_map_limit_sharpness", options.limit_sharpness);
+	options.seed = node->get_parameter_or<int>("reach_map_seed", options.seed);
+	std::string path = node->get_parameter_or<std::string>("reach_map_file", "");
 	if (path.empty())
 		path = ReachabilityMap::DefaultPath(group);
-	const double tau = node->get_parameter_or<double>("bg_reach_map_tau", 0.05);
+	const double tau = node->get_parameter_or<double>("reach_map_tau", 0.05);
 	const double max_step = node->get_parameter_or<double>("step", 0.05);
 	const std::vector<double> nominal =
 		node->get_parameter_or<std::vector<double>>("object_translation_world", {0.5, 0.0, 0.15});
@@ -43,7 +43,7 @@ int main(int argc, char** argv)
 	const double step_delay = node->get_parameter_or<double>("step_delay", 0.3);  // s between published steps
 	const std::vector<double> rpy = node->get_parameter_or<std::vector<double>>("object_rotation_rpy_deg", {0.0, 0.0, 0.0});
 	auto markers_pub =
-		node->create_publisher<visualization_msgs::msg::MarkerArray>("/base_gradient_progress_markers", rclcpp::QoS(1).transient_local());
+		node->create_publisher<visualization_msgs::msg::MarkerArray>("/object_placement_progress_markers", rclcpp::QoS(1).transient_local());
 
 	robot_model_loader::RobotModelLoader loader(node, "robot_description");
 	const std::optional<ReachabilityMap> map = ReachabilityMap::Load(path, loader.getModel(), group, tip, options);

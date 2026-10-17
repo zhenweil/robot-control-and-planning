@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Summarizes a start-position sweep's results.csv: success rate, misses, timing, viewpoints reached at the start,
-and (for base_gradient) how many successes needed a restart."""
+and (for object_placement) how many successes needed a restart."""
 import csv
 import re
 import statistics
@@ -35,7 +35,7 @@ def main(path):
     secs = sorted(int(r["seconds"]) for r in rows)
     print(f"seconds per start: median {statistics.median(secs):.0f}, max {secs[-1]}")
 
-    # base_gradient logs "iter 0: ... reachable N/M" at each descent's start and "restart K/..." per restart.
+    # object_placement logs "iter 0: ... reachable N/M" at each descent's start and "restart K/..." per restart.
     at_start = []
     after_restart = 0
     for r in rows:

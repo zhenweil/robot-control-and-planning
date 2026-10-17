@@ -14,16 +14,16 @@
 #include "panda_arm_control/joint_travel.hpp"
 
 // Absolute object position bounds (m, base frame). The object keeps its nominal orientation.
-struct BaseGradientBounds
+struct ObjectPlacementBounds
 {
 	double x_min = -0.1, x_max = 1.1;
 	double y_min = -0.6, y_max = 0.6;
 	double z_min = -0.05, z_max = 0.35;
 };
 
-struct BaseGradientParams
+struct ObjectPlacementParams
 {
-	BaseGradientBounds bounds;
+	ObjectPlacementBounds bounds;
 	// Absolute start position (m, base frame).
 	double initial_x = 0.5, initial_y = 0.0, initial_z = 0.15;
 
@@ -61,7 +61,7 @@ struct BaseGradientParams
 	int gtsp_two_opt_rounds = 5;
 	int gtsp_num_restart = 2;
 
-	// Base gradient parameters
+	// Object placement parameters
 	int descent_num_restart = 3;
 	// Before each restart: climb the reached viewpoints' manipulability (sum + this x soft-min) from the stuck spot.
 	double jump_softmin_weight = 100.0;
@@ -122,7 +122,7 @@ struct BaseGradientParams
 	double visualize_progress_delay_sec = 0.0;
 };
 
-struct BaseGradientResult
+struct ObjectPlacementResult
 {
 	bool ok = false;  // true iff every input pose is reachable at the returned placement
 	int num_reachable = 0;
@@ -147,8 +147,8 @@ struct BaseGradientResult
 
 // The search itself is object_placement::ObjectPlacementOptimizer (object_placement_optimizer.hpp).
 
-// Writes base_gradient_result.json to output_dir.
-void ExportBaseGradientResult(const std::string& output_dir, const BaseGradientResult& result);
+// Writes object_placement_result.json to output_dir.
+void ExportObjectPlacementResult(const std::string& output_dir, const ObjectPlacementResult& result);
 
 // Rigid transform taking nominal (abs) object/viewpoint poses to the placement at abs (x, y, z).
 Eigen::Isometry3d PlacementTransform(const Eigen::Vector3d& object_translation_nominal, double x, double y, double z);
@@ -163,11 +163,11 @@ void ApplyObjectPlacementToScene(
 
 // Object mesh + tour polyline/waypoints re-expressed in the recommended base's frame (same idea
 // as BuildBstarPlacementMarkerArray). frame_id is "world".
-visualization_msgs::msg::MarkerArray BuildBaseGradientMarkerArray(
+visualization_msgs::msg::MarkerArray BuildObjectPlacementMarkerArray(
 	const rclcpp::Time& stamp,
 	const std::string& resolved_mesh_path,
 	double mesh_scale,
 	const Eigen::Vector3d& object_translation_nominal,
 	const Eigen::Matrix3d& object_rotation_nominal,
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal,
-	const BaseGradientResult& result);
+	const ObjectPlacementResult& result);
