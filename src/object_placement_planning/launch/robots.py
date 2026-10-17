@@ -1,4 +1,4 @@
-"""Per-robot settings shared by the launch files: robot:=panda (default), kinova (Kinova Gen3 7-DOF), xarm7 (UFactory xArm7) or ur5e (Universal Robots UR5e, 6-DOF)."""
+"""Per-robot settings shared by the launch files: robot:=panda (default), kinova (Kinova Gen3 7-DOF), xarm7 (UFactory xArm7), ur5e or ur3e (Universal Robots, 6-DOF)."""
 from moveit_configs_utils import MoveItConfigsBuilder
 
 # home: the tour's start pose (overrides object_pose.yaml's initial_joints). The other robots' homes put tool0 at the
@@ -44,6 +44,17 @@ ROBOTS = {
         "group": "ur_manipulator",
         "base_link": "base_link",
         "home": {"shoulder_pan_joint": -0.5083, "shoulder_lift_joint": -2.0888, "elbow_joint": 1.6225, "wrist_1_joint": -1.1827, "wrist_2_joint": -1.5273, "wrist_3_joint": -2.0778},
+    },
+    # 500 mm reach: its home keeps the Panda home's camera orientation and x/y but sits lower (z = 0.30 m).
+    "ur3e": {
+        "name": "ur3e",
+        "package": "ur_arm_moveit",
+        "urdf": "urdf/ur3e.urdf",
+        "srdf": "config/ur3e.srdf",
+        "controllers": "config/moveit_controllers.yaml",
+        "group": "ur_manipulator",
+        "base_link": "base_link",
+        "home": {"shoulder_pan_joint": -0.4976, "shoulder_lift_joint": -1.7135, "elbow_joint": 1.2512, "wrist_1_joint": -1.1872, "wrist_2_joint": -1.5281, "wrist_3_joint": -2.0671},
     },
 }
 

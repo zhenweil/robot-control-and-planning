@@ -15,7 +15,7 @@ import robots  # noqa: E402
 
 
 def generate_launch_description():
-    robot_arg = DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda, kinova, xarm7 or ur5e (see robots.py).")
+    robot_arg = DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda, kinova, xarm7, ur5e or ur3e (see robots.py).")
 
     use_rviz_arg = DeclareLaunchArgument(
         "use_rviz",

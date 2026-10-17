@@ -15,7 +15,7 @@ import robots  # noqa: E402
 # search box (x/y/z_min/max), IK budget (ik_attempts) and random_seed.
 def generate_launch_description():
     args = [
-        DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda, kinova, xarm7 or ur5e (see robots.py)."),
+        DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda, kinova, xarm7, ur5e or ur3e (see robots.py)."),
         DeclareLaunchArgument("random_seed", default_value="42", description="Seeds the sampler and the IK restarts."),
         DeclareLaunchArgument("time_budget_sec", default_value="90.0", description="Stop after this many seconds."),
         DeclareLaunchArgument("max_samples", default_value="0", description="Stop after this many samples (0 = no limit)."),

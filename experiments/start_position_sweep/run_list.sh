@@ -7,7 +7,7 @@
 #        BASEYAML=<params yaml>                  (default: the package's config/object_placement_run.yaml)
 #        TIME_BUDGET=<s>                         (random_placement only, default 90)
 #        TIMEOUT=<s>                             (per start, default 900)
-#        ROBOT=panda|kinova|xarm7|ur5e           (default panda)
+#        ROBOT=panda|kinova|xarm7|ur5e|ur3e      (default panda)
 set -u
 LIST=$1; OUT=$2; NW=${3:-6}; SEED=${4:-42}
 METHOD=${METHOD:-object_placement}

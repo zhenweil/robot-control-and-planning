@@ -3,7 +3,7 @@
 <package format="3">
   <name>ur_arm_moveit</name>
   <version>0.0.0</version>
-  <description>Universal Robots UR5e (from Universal_Robots_ROS2_Description) with the same camera and tool0 as panda_arm_moveit, for object_placement on another robot.</description>
+  <description>Universal Robots UR5e and UR3e (from Universal_Robots_ROS2_Description) with the same camera and tool0 as panda_arm_moveit, for object_placement on another robot.</description>
   <maintainer email="zhenweil@todo.todo">zhenweil</maintainer>
   <license>BSD-3-Clause</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
