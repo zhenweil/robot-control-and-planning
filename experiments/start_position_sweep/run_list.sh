@@ -7,6 +7,7 @@
 #        BASEYAML=<params yaml>                  (default: the package's config/object_placement_run.yaml)
 #        TIME_BUDGET=<s>                         (random_placement only, default 90)
 #        TIMEOUT=<s>                             (per start, default 900)
+#        ROBOT=panda|kinova|xarm7                (default panda)
 set -u
 LIST=$1; OUT=$2; NW=${3:-6}; SEED=${4:-42}
 METHOD=${METHOD:-object_placement}
@@ -14,6 +15,7 @@ WS=$(cd "$(dirname "$0")/../.." && pwd)  # workspace root
 BASE=${BASEYAML:-$WS/src/panda_arm_control/config/object_placement_run.yaml}
 TIME_BUDGET=${TIME_BUDGET:-90}
 TIMEOUT=${TIMEOUT:-900}
+ROBOT=${ROBOT:-panda}
 WORK=$(dirname "$OUT")/work
 mkdir -p "$WORK"
 [ -f "$OUT" ] || echo "x,y,z,reached,final_x,final_y,final_z,seconds,log" > "$OUT"
@@ -33,7 +35,7 @@ worker() {
     local yaml=$WORK/start_w$W.yaml
     sed -e "s/initial_x: .*/initial_x: $x/" -e "s/initial_y: .*/initial_y: $y/" \
         -e "s/initial_z: .*/initial_z: $z/" "$BASE" > "$yaml"
-    local args="params_file:=$yaml random_seed:=$SEED"
+    local args="params_file:=$yaml random_seed:=$SEED robot:=$ROBOT"
     [ "$METHOD" = random_placement ] && args="$args time_budget_sec:=$TIME_BUDGET"
     local before; before=$(ls -t "$ROS_LOG_DIR"/${METHOD}_*.log 2>/dev/null | head -1)
     local t0; t0=$(date +%s)

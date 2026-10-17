@@ -2,7 +2,7 @@
 # Start-position sweep: runs the placement node from every start on an x/y/z grid and summarizes the results.
 #
 # Usage: sweep.sh NAME [NW=6] [SEED=42]
-# Env:   METHOD, BASEYAML, TIME_BUDGET, TIMEOUT (see run_list.sh)
+# Env:   METHOD, BASEYAML, TIME_BUDGET, TIMEOUT, ROBOT (see run_list.sh)
 #        X="-0.5 -0.3 -0.1 0.1 0.3 0.5"  Y="0.0 0.2 0.4"  Z="0.0 0.1 0.2 0.3 0.4 0.5"   (abs m)
 # Output: experiments/start_position_sweep/runs/NAME/{starts.txt,params.yaml,run_info.txt,results.csv,summary.txt}
 set -u
@@ -19,7 +19,7 @@ mkdir -p "$DIR"
 cp "${BASEYAML:-$WS/src/panda_arm_control/config/object_placement_run.yaml}" "$DIR/params.yaml"
 export BASEYAML=$DIR/params.yaml
 for x in $X; do for y in $Y; do for z in $Z; do echo "$x $y $z"; done; done; done > "$DIR/starts.txt"
-echo "method=${METHOD:-object_placement} seed=$SEED workers=$NW starts=$(wc -l < "$DIR/starts.txt") git=$(git -C "$WS" rev-parse --short HEAD)" \
+echo "method=${METHOD:-object_placement} robot=${ROBOT:-panda} seed=$SEED workers=$NW starts=$(wc -l < "$DIR/starts.txt") git=$(git -C "$WS" rev-parse --short HEAD)" \
 	> "$DIR/run_info.txt"
 
 "$HERE/run_list.sh" "$DIR/starts.txt" "$DIR/results.csv" "$NW" "$SEED"
