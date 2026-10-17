@@ -805,13 +805,6 @@ void ObjectPlacementOptimizer::OptimizeTourAndPlacement()
 {
 	if (this->params.tour_placement_iterations <= 0 || !this->best_in_attempt.all_reachable)
 		return;
-	// Comparison only: more refine solves from the same refined tour, logged and not used.
-	if (this->params.compare_extra_refine_solves > 0)
-	{
-		const auto refine_start = std::chrono::steady_clock::now();
-		const TourSolution extra = this->RefineTour(this->best_in_attempt.position, this->best_in_attempt.tour_solution, this->params.compare_extra_refine_solves, false);
-		RCLCPP_INFO(this->node->get_logger(), "  extra refine (%d solves, %.1f s): planned travel %.2f -> %.2f rad", this->params.compare_extra_refine_solves, std::chrono::duration<double>(std::chrono::steady_clock::now() - refine_start).count(), this->best_in_attempt.tour_solution.planned_cost, extra.planned_cost);
-	}
 	const auto tour_placement_start = std::chrono::steady_clock::now();
 	const std::vector<int>& order = this->best_in_attempt.tour_solution.viewpoint_order;
 	tour_placement::StepLimits limits;
@@ -1143,13 +1136,12 @@ TourSolution ObjectPlacementOptimizer::QuickSolveTour(const Position& at, BaseGr
 
 // More full solves at a fixed spot, each warm-started from the best so far, with more IK choices. Keeps the lowest
 // cost; never fewer viewpoints reached.
-TourSolution ObjectPlacementOptimizer::RefineTour(const Position& at, TourSolution best_sol, int num_solves, bool log_progress)
+TourSolution ObjectPlacementOptimizer::RefineTour(const Position& at, TourSolution best_sol, int num_solves)
 {
 	if (this->can_plan && best_sol.planned_cost < 0.0)
 		best_sol.planned_cost = this->ComputePlannedTravel(at, best_sol);
 	best_sol.weighted_cost_sum = this->ComputeWeightedCost(best_sol);
-	if (log_progress)
-		RCLCPP_INFO(this->node->get_logger(), "  refine start: reachable %d/%d, joint dist + largest turn %.2f, planned travel %.2f rad", best_sol.num_reachable, this->num_viewpoint, best_sol.joint_distance_plus_turn, best_sol.planned_cost);
+	RCLCPP_INFO(this->node->get_logger(), "  refine start: reachable %d/%d, joint dist + largest turn %.2f, planned travel %.2f rad", best_sol.num_reachable, this->num_viewpoint, best_sol.joint_distance_plus_turn, best_sol.planned_cost);
 	for (int i = 0; i < num_solves && rclcpp::ok(); ++i)
 	{
 		const std::vector<int>* lock = this->params.lock_input_order ? &this->input_order
@@ -1161,16 +1153,14 @@ TourSolution ObjectPlacementOptimizer::RefineTour(const Position& at, TourSoluti
 		this->run_result.num_inner_solves += 1;
 		if (s.num_reachable < best_sol.num_reachable)
 		{
-			if (log_progress)
-				RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: reachable %d/%d, fewer than the best -- skipped", i + 1, num_solves, s.num_reachable, this->num_viewpoint);
+			RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: reachable %d/%d, fewer than the best -- skipped", i + 1, num_solves, s.num_reachable, this->num_viewpoint);
 			continue;
 		}
 		if (this->can_plan)
 			s.planned_cost = this->ComputePlannedTravel(at, s);
 		s.weighted_cost_sum = this->ComputeWeightedCost(s);
 		const bool better = s.weighted_cost_sum < best_sol.weighted_cost_sum;
-		if (log_progress)
-			RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: joint dist + largest turn %.2f, planned travel %.2f rad vs %.2f best%s", i + 1, num_solves, s.joint_distance_plus_turn, s.planned_cost, best_sol.planned_cost, better ? "  <-- new best" : "");
+		RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: joint dist + largest turn %.2f, planned travel %.2f rad vs %.2f best%s", i + 1, num_solves, s.joint_distance_plus_turn, s.planned_cost, best_sol.planned_cost, better ? "  <-- new best" : "");
 		if (better)
 			best_sol = std::move(s);
 	}

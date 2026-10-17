@@ -138,7 +138,7 @@ private:
 	// --- Solving and scoring ---
 	TourSolution QuickSolveTour(const Position& at, BaseGradientParams p);
 	TourSolution QuickSolveTour(const Position& at, int gaps_min_reached = 0);
-	TourSolution RefineTour(const Position& at, TourSolution best_sol, int num_solves, bool log_progress = true);
+	TourSolution RefineTour(const Position& at, TourSolution best_sol, int num_solves);
 	std::vector<std::vector<Joints>> CollectIkPoses(
 		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed, int max_solutions);
 	TourSolution SolveMostManipulablePoses(const Position& at, const BaseGradientParams& p);

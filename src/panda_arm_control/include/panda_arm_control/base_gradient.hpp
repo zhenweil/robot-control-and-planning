@@ -100,7 +100,6 @@ struct BaseGradientParams
 	double tour_placement_object_step = 0.02;  // m per axis, halved when a step is rejected
 	double tour_placement_self_motion_step = 0.3;  // rad per pose, halved with the object step
 	double tour_placement_joint_margin = 0.05;  // rad kept from each joint limit
-	int compare_extra_refine_solves = 0;  // comparison: also run this many more refine solves from the same refined tour and log it (not used)
 	int refine_ik_solutions = 8;  // IK solutions per viewpoint in refine solves: more same-branch choices for GTSP
 	// Reconfiguration: a move turning any joint (joint 7 aside) more than this; refine logs how many are left.
 	double reconfig_threshold = 1.0;

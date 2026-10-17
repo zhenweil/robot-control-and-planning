@@ -29,7 +29,6 @@
     bg_tour_placement_object_step: 0.02      # m per axis per step, halved on a rejected step
     bg_tour_placement_self_motion_step: 0.3  # rad along each pose's self-motion per step
     bg_tour_placement_joint_margin: 0.05     # rad kept from joint limits
-    bg_compare_extra_refine_solves: 3        # comparison: also log this many more refine solves from the same refined tour; 0 = off
     bg_reconfig_threshold: 1.0               # rad: a move turning any joint (joint 7 aside) more than this is a reconfiguration
     bg_room_then_reach: true                 # when stuck: aim at a missed viewpoint; if reached ones are lost, back off for what ran out
     bg_room_max_targets: 3                   # missed viewpoints room-then-reach tries per call, closest first; 0 = all
