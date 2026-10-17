@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- kinova_gen3_7dof_robotiq_2f_85_moveit_config's SRDF without the gripper, with the chain ending at tool0, the home pose,
+     and the camera's collision pairs. The URDF's world link is the root, so no virtual joint. -->
+<robot name="gen3">
+    <group name="manipulator">
+        <chain base_link="base_link" tip_link="tool0"/>
+    </group>
+    <!-- tool0 at the Panda home's tool0 pose (object_pose.yaml initial_joints). -->
+    <group_state name="home" group="manipulator">
+        <joint name="joint_1" value="-0.0394"/>
+        <joint name="joint_2" value="-0.0876"/>
+        <joint name="joint_3" value="-0.0461"/>
+        <joint name="joint_4" value="1.4027"/>
+        <joint name="joint_5" value="0.0037"/>
+        <joint name="joint_6" value="1.7371"/>
+        <joint name="joint_7" value="-3.226"/>
+    </group_state>
+    <disable_collisions link1="base_link" link2="forearm_link" reason="Never"/>
+    <disable_collisions link1="base_link" link2="half_arm_1_link" reason="Never"/>
+    <disable_collisions link1="base_link" link2="half_arm_2_link" reason="Never"/>
+    <disable_collisions link1="base_link" link2="shoulder_link" reason="Adjacent"/>
+    <disable_collisions link1="bracelet_link" link2="forearm_link" reason="Never"/>
+    <disable_collisions link1="bracelet_link" link2="half_arm_2_link" reason="Never"/>
+    <disable_collisions link1="bracelet_link" link2="spherical_wrist_1_link" reason="Never"/>
+    <disable_collisions link1="bracelet_link" link2="spherical_wrist_2_link" reason="Adjacent"/>
+    <disable_collisions link1="forearm_link" link2="half_arm_1_link" reason="Never"/>
+    <disable_collisions link1="forearm_link" link2="half_arm_2_link" reason="Adjacent"/>
+    <disable_collisions link1="forearm_link" link2="shoulder_link" reason="Never"/>
+    <disable_collisions link1="forearm_link" link2="spherical_wrist_1_link" reason="Adjacent"/>
+    <disable_collisions link1="forearm_link" link2="spherical_wrist_2_link" reason="Never"/>
+    <disable_collisions link1="half_arm_1_link" link2="half_arm_2_link" reason="Adjacent"/>
+    <disable_collisions link1="half_arm_1_link" link2="shoulder_link" reason="Adjacent"/>
+    <disable_collisions link1="half_arm_1_link" link2="spherical_wrist_1_link" reason="Never"/>
+    <disable_collisions link1="half_arm_2_link" link2="shoulder_link" reason="Never"/>
+    <disable_collisions link1="half_arm_2_link" link2="spherical_wrist_1_link" reason="Never"/>
+    <disable_collisions link1="half_arm_2_link" link2="spherical_wrist_2_link" reason="Never"/>
+    <disable_collisions link1="shoulder_link" link2="spherical_wrist_1_link" reason="Never"/>
+    <disable_collisions link1="spherical_wrist_1_link" link2="spherical_wrist_2_link" reason="Adjacent"/>
+    <disable_collisions link1="camera" link2="bracelet_link" reason="Adjacent"/>
+    <disable_collisions link1="camera" link2="spherical_wrist_2_link" reason="Never"/>
+</robot>

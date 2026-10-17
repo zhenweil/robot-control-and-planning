@@ -115,7 +115,7 @@ struct Params
 };
 
 // The surface the robot is mounted on: a wide slab just under the base, so no arm pose (IK or closest IK) can reach
-// below it. The base link rests on it, so that pair is allowed to touch.
+// below it. The base rests on it, so those pairs are allowed to touch.
 constexpr double kSurfaceSize = 4.0;       // m
 constexpr double kSurfaceThickness = 0.05;  // m
 
@@ -137,7 +137,10 @@ void AddMountingSurface(const planning_scene_monitor::PlanningSceneMonitorPtr& p
 	surface.primitive_poses.push_back(pose);
 	surface.operation = surface.ADD;
 	locked_scene->processCollisionObjectMsg(surface);
-	locked_scene->getAllowedCollisionMatrixNonConst().setEntry(surface.id, base_link, true);
+	// The base rests on it: allow every link fixed to the root (a URDF's world link has no geometry of its own).
+	for (const moveit::core::LinkModel* link : locked_scene->getRobotModel()->getLinkModels())
+		if (moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(link) == locked_scene->getRobotModel()->getRootLink())
+			locked_scene->getAllowedCollisionMatrixNonConst().setEntry(surface.id, link->getName(), true);
 }
 
 // RViz marker for the mounting surface, in the robot's base frame.

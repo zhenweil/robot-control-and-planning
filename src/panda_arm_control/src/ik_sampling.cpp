@@ -24,13 +24,20 @@ bool ExactIk(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const geometry_msgs::msg::Pose& target,
 	int attempts, double timeout, const moveit::core::GroupStateValidityCallbackFn& validity)
 {
+	return ExactIk(state, group, target, attempts, timeout, validity, SeededRng());
+}
+
+bool ExactIk(
+	moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const geometry_msgs::msg::Pose& target,
+	int attempts, double timeout, const moveit::core::GroupStateValidityCallbackFn& validity, random_numbers::RandomNumberGenerator& rng)
+{
 	if (attempts <= 0)
 		return state.setFromIK(group, target, "tool0", timeout, validity);
 	const double single_attempt = 1e-9;  // s: KDL stops after its first attempt (0 means the default timeout)
 	for (int a = 0; a < attempts; ++a)
 	{
 		if (a > 0)
-			state.setToRandomPositions(group, SeededRng());
+			state.setToRandomPositions(group, rng);
 		if (state.setFromIK(group, target, "tool0", single_attempt, validity))
 			return true;
 	}

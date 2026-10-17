@@ -19,4 +19,9 @@ bool ExactIk(
 	moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const geometry_msgs::msg::Pose& target,
 	int attempts, double timeout, const moveit::core::GroupStateValidityCallbackFn& validity);
 
+// The same with its own RNG for the random starts, so threads don't share one.
+bool ExactIk(
+	moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const geometry_msgs::msg::Pose& target,
+	int attempts, double timeout, const moveit::core::GroupStateValidityCallbackFn& validity, random_numbers::RandomNumberGenerator& rng);
+
 }  // namespace ik_sampling

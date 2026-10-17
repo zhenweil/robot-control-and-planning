@@ -15,7 +15,7 @@ import robots  # noqa: E402
 
 
 def generate_launch_description():
-    robot_arg = DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda or iiwa14 (see robots.py).")
+    robot_arg = DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda or kinova (see robots.py).")
 
     use_rviz_arg = DeclareLaunchArgument(
         "use_rviz",
@@ -311,14 +311,16 @@ def generate_launch_description():
             parameters=[{"zeros": robot["home"]}],
             condition=IfCondition(use_rviz),
         )
-        world_tf_node = Node(
-            package="tf2_ros",
-            executable="static_transform_publisher",
-            output="log",
-            arguments=["0", "0", "0", "0", "0", "0", "world", robot["base_link"]],
-            condition=IfCondition(use_rviz),
-        )
-        return [base_gradient_node, robot_state_publisher_node, joint_state_publisher_node, world_tf_node]
+        nodes = [base_gradient_node, robot_state_publisher_node, joint_state_publisher_node]
+        if robot["base_link"]:  # a URDF without its own world link
+            nodes.append(Node(
+                package="tf2_ros",
+                executable="static_transform_publisher",
+                output="log",
+                arguments=["0", "0", "0", "0", "0", "0", "world", robot["base_link"]],
+                condition=IfCondition(use_rviz),
+            ))
+        return nodes
 
     return LaunchDescription(
         [

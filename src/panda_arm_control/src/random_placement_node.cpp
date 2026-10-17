@@ -131,7 +131,10 @@ void AddMountingSurface(const planning_scene_monitor::PlanningSceneMonitorPtr& p
 	surface.primitive_poses.push_back(pose);
 	surface.operation = surface.ADD;
 	scene->processCollisionObjectMsg(surface);
-	scene->getAllowedCollisionMatrixNonConst().setEntry(surface.id, base_link, true);
+	// The base rests on it: allow every link fixed to the root (a URDF's world link has no geometry of its own).
+	for (const moveit::core::LinkModel* link : scene->getRobotModel()->getLinkModels())
+		if (moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(link) == scene->getRobotModel()->getRootLink())
+			scene->getAllowedCollisionMatrixNonConst().setEntry(surface.id, link->getName(), true);
 }
 
 void MoveObject(

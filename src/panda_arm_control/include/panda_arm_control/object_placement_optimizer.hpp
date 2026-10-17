@@ -205,6 +205,9 @@ private:
 	ReachAttemptResult best_in_attempt;	  // best of this reach attempt
 	std::vector<Joints> ik_start_poses;
 	int stall_count = 0;
+	std::chrono::steady_clock::time_point move_start;  // for the move log
+	double ik_seconds = 0.0;  // exact IK time since the move began
+	double closest_ik_seconds = 0.0;  // closest-IK time since the move began
 	std::vector<Joints> last_reached_poses;  // each viewpoint's joints when last reached
 	std::vector<Joints> last_closest_poses;  // each missed viewpoint's last closest pose: keeps its gap continuous
 	bool track_current_poses = true;  // quick solves follow the current poses (reach phase) or re-solve fresh (after)

@@ -34,6 +34,6 @@ def generate_launch_description():
         )]
 
     return LaunchDescription([
-        DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda or iiwa14 (see robots.py)."),
+        DeclareLaunchArgument("robot", default_value="panda", description="Robot: panda or kinova (see robots.py)."),
         OpaqueFunction(function=make_node),
     ])

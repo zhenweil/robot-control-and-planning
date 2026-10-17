@@ -1,7 +1,7 @@
-"""Per-robot settings shared by the launch files: robot:=panda (default) or robot:=iiwa14."""
+"""Per-robot settings shared by the launch files: robot:=panda (default) or robot:=kinova (Kinova Gen3 7-DOF)."""
 from moveit_configs_utils import MoveItConfigsBuilder
 
-# home: the tour's start pose (overrides object_pose.yaml's initial_joints). The iiwa14 home puts tool0 at the Panda
+# home: the tour's start pose (overrides object_pose.yaml's initial_joints). The kinova home puts tool0 at the Panda
 # home's tool0 pose, so both robots start the tour from the same camera pose.
 ROBOTS = {
     "panda": {
@@ -14,15 +14,15 @@ ROBOTS = {
         "base_link": "panda_link0",
         "home": {"panda_joint1": 0.0, "panda_joint2": -0.8745, "panda_joint3": 0.0, "panda_joint4": -2.356, "panda_joint5": 0.0, "panda_joint6": 1.571, "panda_joint7": 0.785},
     },
-    "iiwa14": {
-        "name": "iiwa14",
-        "package": "iiwa_arm_moveit",
-        "urdf": "urdf/iiwa14.urdf.xacro",
-        "srdf": "config/iiwa14.srdf",
+    "kinova": {
+        "name": "gen3",
+        "package": "kinova_arm_moveit",
+        "urdf": "urdf/gen3.urdf.xacro",
+        "srdf": "config/gen3.srdf",
         "controllers": "config/moveit_controllers.yaml",
-        "group": "arm",
-        "base_link": "lbr_link_0",
-        "home": {"lbr_A1": 0.0, "lbr_A2": -0.3099, "lbr_A3": 0.0, "lbr_A4": -1.9252, "lbr_A5": 0.0, "lbr_A6": 1.4367, "lbr_A7": 0.0},
+        "group": "manipulator",
+        "base_link": None,  # the URDF has its own world link
+        "home": {"joint_1": -0.0394, "joint_2": -0.0876, "joint_3": -0.0461, "joint_4": 1.4027, "joint_5": 0.0037, "joint_6": 1.7371, "joint_7": -3.226},
     },
 }
 

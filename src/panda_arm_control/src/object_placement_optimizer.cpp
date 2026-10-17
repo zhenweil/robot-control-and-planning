@@ -1,8 +1,10 @@
 #include "panda_arm_control/object_placement_optimizer.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <numeric>
 #include <thread>
 
@@ -55,6 +57,29 @@ std::vector<Joints> GetIkStartPoses(const TourSolution& sol, const Joints& fallb
 		if (!sol.ik_poses[k].empty())
 			seeds[static_cast<size_t>(sol.viewpoint_order[k])] = sol.ik_poses[k];
 	return seeds;
+}
+
+// Runs work(index, state, rng) for every index on all cores. Each thread has its own robot state; each index its own
+// RNG, seeded from base_seed and the index, so the result doesn't depend on which thread took it.
+void RunInParallel(const moveit::core::RobotState& state_template, size_t count, uint32_t base_seed, const std::function<void(size_t, moveit::core::RobotState&, random_numbers::RandomNumberGenerator&)>& work)
+{
+	std::atomic<size_t> next_index{0};
+	auto worker = [&]()
+	{
+		moveit::core::RobotState state(state_template);
+		for (size_t i = next_index.fetch_add(1); i < count; i = next_index.fetch_add(1))
+		{
+			random_numbers::RandomNumberGenerator rng(static_cast<boost::uint32_t>(base_seed + 7919u * static_cast<uint32_t>(i)));
+			work(i, state, rng);
+		}
+	};
+	const size_t num_threads = std::min<size_t>(std::max(1u, std::thread::hardware_concurrency()), count);
+	std::vector<std::thread> threads;
+	for (size_t t = 1; t < num_threads; ++t)
+		threads.emplace_back(worker);
+	worker();
+	for (std::thread& thread : threads)
+		thread.join();
 }
 
 std::vector<Joints> PrependHomePose(const Joints& home, const std::vector<Joints>& tour)
@@ -117,8 +142,7 @@ BaseGradientResult ObjectPlacementOptimizer::Optimize()
 	this->run_result.num_reachable = final_tour.num_reachable;
 	this->run_result.ok = best_result.all_reachable;
 
-	scene_geometry::MoveObject(
-		this->scene, scene_geometry::MakeIsometry(this->object_translation_nominal, this->object_rotation_nominal));
+	scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(this->object_translation_nominal, this->object_rotation_nominal));
 	if (this->run_result.ok)
 		RCLCPP_INFO(
 			this->node->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned travel %.2f rad.",
@@ -253,6 +277,9 @@ void ObjectPlacementOptimizer::ImproveCost(int iter)
 // missed, then a full solve at the new spot. False when no move helps (converged or stuck).
 bool ObjectPlacementOptimizer::TryReachViewpoints(int iter)
 {
+	this->move_start = std::chrono::steady_clock::now();
+	this->ik_seconds = 0.0;
+	this->closest_ik_seconds = 0.0;
 	const Eigen::Vector3d g = this->ComputeCostGradient(this->current_tour, this->params);
 	if (this->params.fd_gradient_check)
 	{
@@ -548,9 +575,9 @@ bool ObjectPlacementOptimizer::CommitMove(
 	this->RememberLastPoses(this->current_tour);
 	this->RecordHistoryAndBest(this->current_position, this->current_tour);
 	RCLCPP_INFO(
-		this->node->get_logger(), "reach attempt %d/%d kinematic move %d/%d: reachable %d/%d", this->attempt_index + 1,
+		this->node->get_logger(), "reach attempt %d/%d kinematic move %d/%d: reachable %d/%d  (%.1f s: IK %.1f s, closest IK %.1f s)", this->attempt_index + 1,
 		std::max(1, this->params.descent_num_restart), iter + 1, this->params.max_kinematic_moves,
-		this->current_tour.num_reachable, this->num_viewpoint);
+		this->current_tour.num_reachable, this->num_viewpoint, std::chrono::duration<double>(std::chrono::steady_clock::now() - this->move_start).count(), this->ik_seconds, this->closest_ik_seconds);
 	this->PublishProgressMarkers(-g);
 
 	if (gained || rel_gain >= this->params.convergence_tolerance_cost)
@@ -839,40 +866,43 @@ void ObjectPlacementOptimizer::OptimizeTourAndPlacement()
 std::vector<std::vector<Joints>> ObjectPlacementOptimizer::CollectIkPoses(
 	const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed_q, int max_solutions)
 {
+	const auto ik_start = std::chrono::steady_clock::now();
 	const Eigen::Isometry3d xform = scene_geometry::Translation(at);
 	scene_geometry::MoveObject(this->scene, xform * this->object_pose);
 	std::vector<std::vector<Joints>> ik(this->viewpoints.size());
 	const int max_sol = std::max(1, max_solutions);
-	for (size_t v = 0; v < this->viewpoints.size(); ++v)
+	// Tracking: a viewpoint missed at the current spot tries only its seed (its closest pose); random starts rarely
+	// reach it after a small move, and the committed solve still tries them.
+	std::vector<bool> missed_now(this->viewpoints.size(), false);
+	if (p.tracking)
+		for (const MissedViewpoint& m : this->current_tour.missed_viewpoints)
+			missed_now[static_cast<size_t>(m.viewpoint_index)] = true;
+	const uint32_t base_seed = static_cast<uint32_t>(ik_sampling::SeededRng().uniformInteger(1, 1 << 30));
+	RunInParallel(this->robot_state, this->viewpoints.size(), base_seed, [&](size_t v, moveit::core::RobotState& state, random_numbers::RandomNumberGenerator& rng)
 	{
 		const geometry_msgs::msg::Pose target = scene_geometry::ToPoseMsg(xform * this->viewpoints[v]);
 		std::vector<Joints>& sols = ik[v];
 		Joints q;
-		this->robot_state.setJointGroupPositions(this->joint_group, seed_q[v]);
-		if (ik_sampling::ExactIk(
-				this->robot_state, this->joint_group, target, p.tracking ? 1 : p.ik_attempts, p.ik_timeout, this->state_validity))
+		state.setJointGroupPositions(this->joint_group, seed_q[v]);
+		if (ik_sampling::ExactIk(state, this->joint_group, target, p.tracking ? 1 : p.ik_attempts, p.ik_timeout, this->state_validity, rng))
 		{
-			this->robot_state.copyJointGroupPositions(this->joint_group, q);
+			state.copyJointGroupPositions(this->joint_group, q);
 			sols.push_back(q);
 		}
-		for (int attempt = 0; (!p.tracking || sols.empty()) && attempt < max_sol * 3 + p.ik_retries_per_point &&
-			 static_cast<int>(sols.size()) < max_sol;
-			 ++attempt)
+		for (int attempt = 0; (!p.tracking || (sols.empty() && !missed_now[v])) && attempt < max_sol * 3 + p.ik_retries_per_point && static_cast<int>(sols.size()) < max_sol; ++attempt)
 		{
 			if (sols.empty() && attempt >= 4)
 				break;	// out of reach: every miss costs a full IK call
-			this->robot_state.setToRandomPositions(this->joint_group, ik_sampling::SeededRng());
-			if (!ik_sampling::ExactIk(
-					this->robot_state, this->joint_group, target, p.ik_attempts, p.ik_timeout, this->state_validity))
+			state.setToRandomPositions(this->joint_group, rng);
+			if (!ik_sampling::ExactIk(state, this->joint_group, target, p.ik_attempts, p.ik_timeout, this->state_validity, rng))
 				continue;
-			this->robot_state.copyJointGroupPositions(this->joint_group, q);
-			const bool dup = std::any_of(sols.begin(), sols.end(), [&](const Joints& s) {
-				return joint_travel::JointDistance(s, q, this->counted_joint_indices) < 0.1;
-			});
+			state.copyJointGroupPositions(this->joint_group, q);
+			const bool dup = std::any_of(sols.begin(), sols.end(), [&](const Joints& s) { return joint_travel::JointDistance(s, q, this->counted_joint_indices) < 0.1; });
 			if (!dup)
 				sols.push_back(q);
 		}
-	}
+	});
+	this->ik_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - ik_start).count();
 	return ik;
 }
 
@@ -888,55 +918,62 @@ TourSolution ObjectPlacementOptimizer::SolveTour(
 	const Eigen::Isometry3d xform = scene_geometry::Translation(at);
 	const int num_found = static_cast<int>(std::count_if(ik.begin(), ik.end(), [](const auto& s) { return !s.empty(); }));
 	const bool skip_gaps = num_found < p.gaps_min_reached;	// rejected on count anyway
-	std::vector<MissedViewpoint> missed;
+	std::vector<size_t> misses;
 	for (size_t v = 0; v < ik.size(); ++v)
+		if (ik[v].empty())
+			misses.push_back(v);
+	// Closest pose per miss, in parallel. Starts: the nearest reached viewpoint's pose (often the right posture family),
+	// then its own seed; random starts only while no collision-free pose is under the cap (a capped gap has no slope).
+	std::vector<closest_ik::Result> closest_poses(misses.size());
+	if (!skip_gaps)
 	{
-		if (!ik[v].empty())
-			continue;
+		const auto closest_start = std::chrono::steady_clock::now();
+		const uint32_t base_seed = static_cast<uint32_t>(ik_sampling::SeededRng().uniformInteger(1, 1 << 30));
+		RunInParallel(this->robot_state, misses.size(), base_seed, [&](size_t i, moveit::core::RobotState& state, random_numbers::RandomNumberGenerator& rng)
+		{
+			const size_t v = misses[i];
+			const Eigen::Isometry3d target = xform * this->viewpoints[v];
+			Joints neighbor;
+			double neighbor_dist = std::numeric_limits<double>::max();
+			for (size_t u = 0; u < ik.size() && !p.tracking; ++u)
+			{
+				if (u == v || ik[u].empty())
+					continue;
+				const Eigen::Isometry3d other = xform * this->viewpoints[u];
+				const double d = (other.translation() - target.translation()).norm() + p.rot_metric_scale * Eigen::AngleAxisd(other.linear() * target.linear().transpose()).angle();
+				if (d < neighbor_dist)
+				{
+					neighbor_dist = d;
+					neighbor = ik[u].front();
+				}
+			}
+			const int fixed_starts = neighbor.empty() ? 1 : 2;
+			closest_ik::Result& closest = closest_poses[i];
+			for (int t = 0; t < std::max(fixed_starts, p.closest_ik_starts) && (t == 0 || !closest.found || closest.gap >= p.miss_gap_cap); ++t)
+			{
+				Joints start = seed_q[v];
+				if (t == 0 && fixed_starts == 2)
+					start = neighbor;
+				else if (t > 0 && !(t == 1 && fixed_starts == 2))
+				{
+					state.setToRandomPositions(this->joint_group, rng);
+					state.copyJointGroupPositions(this->joint_group, start);
+				}
+				const closest_ik::Result r = closest_ik::Solve(this->scene, state, this->joint_group, this->tool_link, target, start, p.closest_ik_iters, p.closest_ik_margin, p.rot_metric_scale, p.manipulability_limit_sharpness);
+				if (r.found && r.gap < closest.gap)
+					closest = r;
+			}
+		});
+		this->closest_ik_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - closest_start).count();
+	}
+	std::vector<MissedViewpoint> missed;
+	for (size_t i = 0; i < misses.size(); ++i)
+	{
+		const size_t v = misses[i];
+		const closest_ik::Result& closest = closest_poses[i];
 		if (skip_gaps)
-		{
 			missed.push_back({static_cast<int>(v), {}, capped_gap});
-			continue;
-		}
-		const Eigen::Isometry3d target = xform * this->viewpoints[v];
-		// Starts: the nearest reached viewpoint's pose (often the right posture family), then its own seed; random
-		// starts only while no collision-free pose is under the cap (a capped gap has no slope).
-		Joints neighbor;
-		double neighbor_dist = std::numeric_limits<double>::max();
-		for (size_t u = 0; u < ik.size() && !p.tracking; ++u)
-		{
-			if (u == v || ik[u].empty())
-				continue;
-			const Eigen::Isometry3d other = xform * this->viewpoints[u];
-			const double d = (other.translation() - target.translation()).norm() +
-				p.rot_metric_scale * Eigen::AngleAxisd(other.linear() * target.linear().transpose()).angle();
-			if (d < neighbor_dist)
-			{
-				neighbor_dist = d;
-				neighbor = ik[u].front();
-			}
-		}
-		const int fixed_starts = neighbor.empty() ? 1 : 2;
-		closest_ik::Result closest;
-		for (int t = 0; t < std::max(fixed_starts, p.closest_ik_starts) &&
-			 (t == 0 || !closest.found || closest.gap >= p.miss_gap_cap);
-			 ++t)
-		{
-			Joints start = seed_q[v];
-			if (t == 0 && fixed_starts == 2)
-				start = neighbor;
-			else if (t > 0 && !(t == 1 && fixed_starts == 2))
-			{
-				this->robot_state.setToRandomPositions(this->joint_group, ik_sampling::SeededRng());
-				this->robot_state.copyJointGroupPositions(this->joint_group, start);
-			}
-			const closest_ik::Result r = closest_ik::Solve(
-				this->scene, this->robot_state, this->joint_group, this->tool_link, target, start, p.closest_ik_iters,
-				p.closest_ik_margin, p.rot_metric_scale, p.manipulability_limit_sharpness);
-			if (r.found && r.gap < closest.gap)
-				closest = r;
-		}
-		if (closest.found && closest.gap < exact_gap)
+		else if (closest.found && closest.gap < exact_gap)
 			ik[v].push_back(closest.q);  // IK just missed it
 		else
 			missed.push_back({static_cast<int>(v), closest.q, closest.found ? closest.pose_error : capped_gap});
