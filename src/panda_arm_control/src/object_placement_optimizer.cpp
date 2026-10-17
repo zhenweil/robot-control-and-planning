@@ -228,7 +228,7 @@ bool ObjectPlacementOptimizer::ResetAndSolveAtStart(const Position& start, int r
 	return true;
 }
 
-// Once all are reached: kinematic moves to lower the cost (unless stop_when_all_reached), then refine. `iter`: moves already used.
+// Once all are reached: kinematic moves to lower the cost (unless stop_when_all_reached), then rounds of refine + tour-placement. `iter`: moves already used.
 void ObjectPlacementOptimizer::ImproveCost(int iter)
 {
 	this->LogRefineAtFirstReach();
@@ -241,8 +241,12 @@ void ObjectPlacementOptimizer::ImproveCost(int iter)
 		for (; iter < this->params.max_kinematic_moves && rclcpp::ok(); ++iter)
 			if (!this->TryReachViewpoints(iter))
 				break;
-	this->RefineBestTour();
-	this->OptimizeTourAndPlacement();
+	for (int round = 1; round <= std::max(1, this->params.tour_placement_rounds) && rclcpp::ok(); ++round)
+	{
+		RCLCPP_INFO(this->node->get_logger(), "  round %d/%d: refine, then tour-placement", round, std::max(1, this->params.tour_placement_rounds));
+		this->RefineBestTour();
+		this->OptimizeTourAndPlacement();
+	}
 }
 
 // One move of the object: gradient line search, else TryKinematicRoomMove (room-then-reach) while viewpoints are

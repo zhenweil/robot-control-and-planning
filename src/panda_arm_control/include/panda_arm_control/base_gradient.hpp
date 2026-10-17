@@ -83,6 +83,7 @@ struct BaseGradientParams
 	// After refine: QP steps moving the object and each tour pose along its self-motion (order and IK branches fixed) to
 	// shorten the tour's joint distance; kept if planned travel drops. 0 = off.
 	int tour_placement_iterations = 0;
+	int tour_placement_rounds = 1;  // refine then tour-placement, repeated this many times
 	double tour_placement_object_step = 0.02;  // m per axis, halved when a step is rejected
 	double tour_placement_self_motion_step = 0.3;  // rad per pose, halved with the object step
 	double tour_placement_joint_margin = 0.05;  // rad kept from each joint limit

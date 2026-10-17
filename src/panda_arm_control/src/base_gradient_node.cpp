@@ -82,6 +82,7 @@ struct Params
 	int bg_refine_solves = 0;
 	int bg_refine_ik_solutions = 8;
 	int bg_tour_placement_iterations = 0;
+	int bg_tour_placement_rounds = 1;
 	double bg_tour_placement_object_step = 0.02;
 	double bg_tour_placement_self_motion_step = 0.3;
 	double bg_tour_placement_joint_margin = 0.05;
@@ -288,6 +289,7 @@ private:
 		this->declareIfNeeded("bg_refine_solves", this->params.bg_refine_solves);
 		this->declareIfNeeded("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
 		this->declareIfNeeded("bg_tour_placement_iterations", this->params.bg_tour_placement_iterations);
+		this->declareIfNeeded("bg_tour_placement_rounds", this->params.bg_tour_placement_rounds);
 		this->declareIfNeeded("bg_tour_placement_object_step", this->params.bg_tour_placement_object_step);
 		this->declareIfNeeded("bg_tour_placement_self_motion_step", this->params.bg_tour_placement_self_motion_step);
 		this->declareIfNeeded("bg_tour_placement_joint_margin", this->params.bg_tour_placement_joint_margin);
@@ -366,6 +368,7 @@ private:
 		this->get_parameter("bg_refine_solves", this->params.bg_refine_solves);
 		this->get_parameter("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
 		this->get_parameter("bg_tour_placement_iterations", this->params.bg_tour_placement_iterations);
+		this->get_parameter("bg_tour_placement_rounds", this->params.bg_tour_placement_rounds);
 		this->get_parameter("bg_tour_placement_object_step", this->params.bg_tour_placement_object_step);
 		this->get_parameter("bg_tour_placement_self_motion_step", this->params.bg_tour_placement_self_motion_step);
 		this->get_parameter("bg_tour_placement_joint_margin", this->params.bg_tour_placement_joint_margin);
@@ -468,6 +471,7 @@ private:
 		bg.refine_solves = this->params.bg_refine_solves;
 		bg.refine_ik_solutions = this->params.bg_refine_ik_solutions;
 		bg.tour_placement_iterations = this->params.bg_tour_placement_iterations;
+		bg.tour_placement_rounds = this->params.bg_tour_placement_rounds;
 		bg.tour_placement_object_step = this->params.bg_tour_placement_object_step;
 		bg.tour_placement_self_motion_step = this->params.bg_tour_placement_self_motion_step;
 		bg.tour_placement_joint_margin = this->params.bg_tour_placement_joint_margin;
