@@ -87,7 +87,6 @@ struct Params
 	double tour_placement_self_motion_step = 0.3;
 	double tour_placement_joint_margin = 0.05;
 	double reconfig_threshold = 1.0;
-	bool travel_gradient = true;
 	bool freeze_order = false;
 	bool lock_input_order = false;
 	double real_cost_planning_time = 0.0;
@@ -97,8 +96,6 @@ struct Params
 	bool trace_line_search = false;
 	int gtsp_restarts_at_reach = 0;
 
-	bool fd_gradient_check = false;
-	double fd_epsilon = 1e-4;
 
 	double ik_timeout = 0.15;
 	int ik_attempts = 0;
@@ -296,7 +293,6 @@ private:
 		this->declareIfNeeded("tour_placement_self_motion_step", this->params.tour_placement_self_motion_step);
 		this->declareIfNeeded("tour_placement_joint_margin", this->params.tour_placement_joint_margin);
 		this->declareIfNeeded("reconfig_threshold", this->params.reconfig_threshold);
-		this->declareIfNeeded("travel_gradient", this->params.travel_gradient);
 		this->declareIfNeeded("freeze_order", this->params.freeze_order);
 		this->declareIfNeeded("lock_input_order", this->params.lock_input_order);
 		this->declareIfNeeded("real_cost_planning_time", this->params.real_cost_planning_time);
@@ -305,8 +301,6 @@ private:
 		this->declareIfNeeded("room_then_reach", this->params.room_then_reach);
 		this->declareIfNeeded("trace_line_search", this->params.trace_line_search);
 		this->declareIfNeeded("gtsp_restarts_at_reach", this->params.gtsp_restarts_at_reach);
-		this->declareIfNeeded("fd_gradient_check", this->params.fd_gradient_check);
-		this->declareIfNeeded("fd_epsilon", this->params.fd_epsilon);
 		this->declareIfNeeded("ik_timeout", this->params.ik_timeout);
 		this->declareIfNeeded("ik_attempts", this->params.ik_attempts);
 		this->declareIfNeeded("random_seed", this->params.random_seed);
@@ -374,7 +368,6 @@ private:
 		this->get_parameter("tour_placement_self_motion_step", this->params.tour_placement_self_motion_step);
 		this->get_parameter("tour_placement_joint_margin", this->params.tour_placement_joint_margin);
 		this->get_parameter("reconfig_threshold", this->params.reconfig_threshold);
-		this->get_parameter("travel_gradient", this->params.travel_gradient);
 		this->get_parameter("freeze_order", this->params.freeze_order);
 		this->get_parameter("lock_input_order", this->params.lock_input_order);
 		this->get_parameter("real_cost_planning_time", this->params.real_cost_planning_time);
@@ -383,8 +376,6 @@ private:
 		this->get_parameter("room_then_reach", this->params.room_then_reach);
 		this->get_parameter("trace_line_search", this->params.trace_line_search);
 		this->get_parameter("gtsp_restarts_at_reach", this->params.gtsp_restarts_at_reach);
-		this->get_parameter("fd_gradient_check", this->params.fd_gradient_check);
-		this->get_parameter("fd_epsilon", this->params.fd_epsilon);
 		this->get_parameter("ik_timeout", this->params.ik_timeout);
 		this->get_parameter("ik_attempts", this->params.ik_attempts);
 		this->get_parameter("random_seed", this->params.random_seed);
@@ -476,7 +467,6 @@ private:
 		bg.tour_placement_self_motion_step = this->params.tour_placement_self_motion_step;
 		bg.tour_placement_joint_margin = this->params.tour_placement_joint_margin;
 		bg.reconfig_threshold = this->params.reconfig_threshold;
-		bg.travel_gradient = this->params.travel_gradient;
 		bg.freeze_order = this->params.freeze_order;
 		bg.lock_input_order = this->params.lock_input_order;
 		bg.real_cost_planning_time = this->params.real_cost_planning_time;
@@ -486,8 +476,6 @@ private:
 		bg.trace_line_search = this->params.trace_line_search;
 		bg.gtsp_restarts_at_reach = this->params.gtsp_restarts_at_reach;
 		bg.random_seed = this->params.random_seed;
-		bg.fd_gradient_check = this->params.fd_gradient_check;
-		bg.fd_epsilon = this->params.fd_epsilon;
 		bg.progress_pub = this->progress_marker_pub;
 		bg.progress_mesh_path = this->resolved_mesh_path;
 		bg.progress_mesh_scale = this->params.mesh_scale;

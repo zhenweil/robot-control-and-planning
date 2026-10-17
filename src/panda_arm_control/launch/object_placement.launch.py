@@ -47,15 +47,6 @@ def generate_launch_description():
         LaunchConfiguration("visualize_progress_delay_sec"), value_type=float
     )
 
-    fd_gradient_check_arg = DeclareLaunchArgument(
-        "fd_gradient_check",
-        default_value="false",
-        description="Log the analytic base-pose gradient next to a central-difference estimate "
-        "each outer iteration -- they should agree while no tour reorder / IK-branch switch "
-        "happens. Defaults to false.",
-    )
-    fd_gradient_check = ParameterValue(LaunchConfiguration("fd_gradient_check"), value_type=bool)
-
     random_seed_arg = DeclareLaunchArgument(
         "random_seed",
         default_value="42",
@@ -113,11 +104,6 @@ def generate_launch_description():
         description="Extra full solves at each descent's result, warm-started from its best solution.",
     )
     gtsp_restarts = ParameterValue(LaunchConfiguration("gtsp_restarts"), value_type=int)
-    travel_gradient_arg = DeclareLaunchArgument(
-        "travel_gradient", default_value="true",
-        description="false: the descent direction ignores tour travel (the cost still includes it).",
-    )
-    travel_gradient = ParameterValue(LaunchConfiguration("travel_gradient"), value_type=bool)
     miss_gap_weight_arg = DeclareLaunchArgument(
         "miss_gap_weight", default_value="5000.0", description="Weight on missed viewpoints' closest-IK gap (0 = no miss gradient)."
     )
@@ -237,7 +223,6 @@ def generate_launch_description():
         "patience": 3,
         "stop_when_all_reached": stop_when_all_reached,
         "gtsp_restarts": gtsp_restarts,
-        "travel_gradient": travel_gradient,
         "freeze_order": freeze_order,
         "lock_input_order": lock_input_order,
         "real_cost_planning_time": real_cost_planning_time,
@@ -245,8 +230,6 @@ def generate_launch_description():
         "planned_travel_in_cost": planned_travel_in_cost,
         "trace_line_search": trace_line_search,
         "gtsp_restarts_at_reach": gtsp_restarts_at_reach,
-        "fd_gradient_check": fd_gradient_check,
-        "fd_epsilon": 1e-4,
         "ik_timeout": ik_timeout,
         "random_seed": ParameterValue(random_seed, value_type=int),
         "visualize_progress_delay_sec": visualize_progress_delay_sec,
@@ -327,7 +310,6 @@ def generate_launch_description():
             use_rviz_arg,
             execute_on_robot_arg,
             visualize_progress_delay_sec_arg,
-            fd_gradient_check_arg,
             random_seed_arg,
             gtsp_num_restart_arg,
             max_solutions_per_candidate_arg,
@@ -337,7 +319,6 @@ def generate_launch_description():
             max_kinematic_moves_arg,
             stop_when_all_reached_arg,
             gtsp_restarts_arg,
-            travel_gradient_arg,
             miss_gap_weight_arg,
             freeze_order_arg,
             lock_input_order_arg,

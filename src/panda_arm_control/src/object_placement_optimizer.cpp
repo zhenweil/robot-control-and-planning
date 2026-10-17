@@ -224,7 +224,7 @@ bool ObjectPlacementOptimizer::ResetAndSolveAtStart(const Position& start, int r
 	TourSolution first = this->SampleIkAndSolveGtsp(this->current_position, this->params, this->ik_start_poses, warm ? &warm->viewpoint_order : nullptr, this->params.max_solutions_per_candidate, start_lock);
 	this->run_result.num_inner_solves += 1;
 	this->current_tour = this->RunGtspRestarts(this->current_position, std::move(first), this->params.gtsp_num_restart - 1, false, start_lock);
-	this->current_tour = this->AddPlannedTravel(this->current_position, std::move(this->current_tour));
+	this->current_tour = this->AddPlannedTravelToCost(this->current_position, std::move(this->current_tour));
 	if (this->current_tour.viewpoint_order.empty())
 	{
 		RCLCPP_WARN(
@@ -270,13 +270,6 @@ bool ObjectPlacementOptimizer::TryReachViewpoints(int iter)
 	this->ik_seconds = 0.0;
 	this->closest_ik_seconds = 0.0;
 	const Eigen::Vector3d g = this->ComputeCostGradient(this->current_tour, this->params);
-	if (this->params.fd_gradient_check)
-	{
-		const Eigen::Vector3d g_fd = this->ComputeNumericCostGradient();
-		RCLCPP_INFO(
-			this->node->get_logger(), "    grad check [x y z]  analytic (%+.4f %+.4f %+.4f)  central-diff (%+.4f %+.4f %+.4f)",
-			g(0), g(1), g(2), g_fd(0), g_fd(1), g_fd(2));
-	}
 	const Eigen::Vector3d g_free = this->RemoveMotionOnLockedAxes(g);
 	const double gnorm = g_free.norm();
 	if (gnorm < 1e-6)
@@ -291,7 +284,7 @@ bool ObjectPlacementOptimizer::TryReachViewpoints(int iter)
 		step = this->TryKinematicRoomMove();
 	std::optional<TourSolution> committed;
 	if (step)
-		committed = this->ConfirmWithFullSolve(*step);
+		committed = this->ConfirmImprovementWithFullSolve(*step);
 	if (!committed)
 	{
 		if (this->current_tour.all_reachable)
@@ -322,7 +315,7 @@ void ObjectPlacementOptimizer::PrepareReachViewpoints()
 	this->fixed_order = this->params.lock_input_order ? &this->input_order
 		: (this->params.freeze_order && this->current_tour.all_reachable) ? &this->locked_order
 														 : nullptr;
-	this->quick_solve_tour = this->AddPlannedTravel(this->current_position, this->QuickSolveTour(this->current_position));
+	this->quick_solve_tour = this->AddPlannedTravelToCost(this->current_position, this->QuickSolveTour(this->current_position, this->params));
 	this->run_result.num_inner_solves += 1;
 }
 
@@ -330,14 +323,16 @@ void ObjectPlacementOptimizer::PrepareReachViewpoints()
 // the quick solve merely failed to find doesn't block the step).
 std::optional<MoveCandidate> ObjectPlacementOptimizer::LineSearch(const Eigen::Vector3d& dir)
 {
+	ObjectPlacementParams probe_params = this->params;
+	probe_params.gaps_min_reached = this->quick_solve_tour.num_reachable;  // a probe reaching fewer is rejected anyway, so it skips miss gaps
 	double step = this->params.initial_step;
 	for (int ls = 0; ls < this->params.max_line_search_iters; ++ls)
 	{
 		const Position cand = ClampToBounds(this->current_position + step * dir, this->params.bounds);
-		TourSolution probe = this->QuickSolveTour(cand, this->quick_solve_tour.num_reachable);
+		TourSolution probe = this->QuickSolveTour(cand, probe_params);
 		this->run_result.num_inner_solves += 1;
 		if (probe.num_reachable >= this->quick_solve_tour.num_reachable)
-			probe = this->AddPlannedTravel(cand, std::move(probe));	// plan only probes that could be accepted
+			probe = this->AddPlannedTravelToCost(cand, std::move(probe));	// plan only probes that could be accepted
 		if (this->params.trace_line_search)
 			RCLCPP_INFO(
 				this->node->get_logger(),
@@ -382,7 +377,9 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 		for (size_t k = 0; k < here_at.viewpoint_order.size(); ++k)
 			this->ik_start_poses[static_cast<size_t>(here_at.viewpoint_order[k])] = here_at.ik_poses[k];
 		this->run_result.num_inner_solves += 1;
-		return this->QuickSolveTour(cand, here_at.num_reachable);
+		ObjectPlacementParams probe_params = this->params;
+		probe_params.gaps_min_reached = here_at.num_reachable;  // a probe reaching fewer is rejected anyway, so it skips miss gaps
+		return this->QuickSolveTour(cand, probe_params);
 	};
 	std::vector<MissedViewpoint> targets = this->quick_solve_tour.missed_viewpoints;
 	std::sort(targets.begin(), targets.end(),
@@ -411,7 +408,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 			if (gained(probe))
 			{
 				trace("aim", target, cand, probe, "accepted");
-				return MoveCandidate{cand, step, this->AddPlannedTravel(cand, std::move(probe))};
+				return MoveCandidate{cand, step, this->AddPlannedTravelToCost(cand, std::move(probe))};
 			}
 			if (lost.empty())
 			{
@@ -498,7 +495,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 				if (gained(rp))
 				{
 					trace(what, target, back, rp, "gained, accepted");
-					return MoveCandidate{back, size, this->AddPlannedTravel(back, std::move(rp))};
+					return MoveCandidate{back, size, this->AddPlannedTravelToCost(back, std::move(rp))};
 				}
 				if (back_lost.empty())
 				{
@@ -526,13 +523,13 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 }
 
 // Full solve at the accepted spot (the probe's own solve stands if better); kept only if it beats the current one.
-std::optional<TourSolution> ObjectPlacementOptimizer::ConfirmWithFullSolve(const MoveCandidate& step)
+std::optional<TourSolution> ObjectPlacementOptimizer::ConfirmImprovementWithFullSolve(const MoveCandidate& step)
 {
 	const int num_restarts = step.tour_solution.all_reachable ? this->params.gtsp_num_restart - 1 : 0;  // the order hardly matters while viewpoints are missed
 	ik_sampling::ReseedRng(this->attempt_seed);
 	TourSolution first = this->SampleIkAndSolveGtsp(step.next_position, this->params, this->ik_start_poses, &step.tour_solution.viewpoint_order, this->params.max_solutions_per_candidate, this->fixed_order);
 	this->run_result.num_inner_solves += 1;
-	TourSolution committed = this->AddPlannedTravel(step.next_position, this->RunGtspRestarts(step.next_position, std::move(first), num_restarts, false, this->fixed_order));
+	TourSolution committed = this->AddPlannedTravelToCost(step.next_position, this->RunGtspRestarts(step.next_position, std::move(first), num_restarts, false, this->fixed_order));
 	if (this->IsBetter(step.tour_solution, committed))
 		committed = step.tour_solution;
 	const bool keep = this->IsBetter(committed, this->current_tour);
@@ -1021,14 +1018,7 @@ TourSolution ObjectPlacementOptimizer::SolveMostManipulablePoses(const Position&
 }
 
 // Quick solve for comparing nearby spots. Tracked (reach phase): each viewpoint follows its current pose with one IK
-// attempt in a fixed order. A probe reaching fewer than gaps_min_reached is rejected anyway, so it skips miss gaps.
-TourSolution ObjectPlacementOptimizer::QuickSolveTour(const Position& at, int gaps_min_reached)
-{
-	ObjectPlacementParams p = this->params;
-	p.gaps_min_reached = gaps_min_reached;
-	return this->QuickSolveTour(at, p);
-}
-
+// attempt in a fixed order.
 TourSolution ObjectPlacementOptimizer::QuickSolveTour(const Position& at, ObjectPlacementParams p)
 {
 	ik_sampling::ReseedRng(this->attempt_seed);
@@ -1092,7 +1082,7 @@ double ObjectPlacementOptimizer::ComputePlannedTravel(const Position& at, const 
 }
 
 // Adds planned travel to the cost, only once every viewpoint is reached (before that comparisons go by count and gap).
-TourSolution ObjectPlacementOptimizer::AddPlannedTravel(const Position& at, TourSolution sol)
+TourSolution ObjectPlacementOptimizer::AddPlannedTravelToCost(const Position& at, TourSolution sol)
 {
 	if (!this->use_planned_travel_in_cost || !sol.all_reachable || sol.planned_cost >= 0.0)
 		return sol;
@@ -1175,12 +1165,6 @@ Eigen::Vector3d ObjectPlacementOptimizer::ComputeManipulabilityGradient(const st
 
 Eigen::Vector3d ObjectPlacementOptimizer::ComputeCostGradient(const TourSolution& sol, const ObjectPlacementParams& p)
 {
-	const size_t n = sol.viewpoint_order.size();
-	auto dq_dp = [&](const Joints& q) { return Eigen::MatrixXd(scene_geometry::DampedPinv(manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, q), p.jacobian_damping).leftCols<3>()); };
-	std::vector<Eigen::MatrixXd> dq(n);
-	for (size_t i = 0; i < n; ++i)
-		dq[i] = dq_dp(sol.ik_poses[i]);
-
 	Eigen::Vector3d g = Eigen::Vector3d::Zero();
 	// While viewpoints are missed, manipulability of the tour poses and the misses' closest poses keeps the arm away from limits.
 	if (!sol.all_reachable)
@@ -1197,70 +1181,6 @@ Eigen::Vector3d ObjectPlacementOptimizer::ComputeCostGradient(const TourSolution
 		const double gap = scene_geometry::PoseGap(m.pose_error, p.rot_metric_scale);
 		if (gap >= 1e-9 && gap < p.miss_gap_cap)
 			g += p.miss_gap_weight * Eigen::Vector3d(m.pose_error.head<3>()) / gap;
-	}
-	if (!p.travel_gradient)
-		return g;
-	const size_t dof = this->home_pose.size();
-	const Eigen::MatrixXd fixed = Eigen::MatrixXd::Zero(static_cast<Eigen::Index>(dof), 3);
-	for (size_t i = 0; i < n; ++i)
-	{
-		const Joints& qa = i == 0 ? this->home_pose : sol.ik_poses[i - 1];
-		const Joints& qb = sol.ik_poses[i];
-		Eigen::VectorXd diff = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(dof));
-		for (int j : this->counted_joint_indices)
-			diff(j) = qa[static_cast<size_t>(j)] - qb[static_cast<size_t>(j)];
-		const Eigen::MatrixXd d_diff = (i == 0 ? fixed : dq[i - 1]) - dq[i];
-		const double nrm = diff.norm();
-		if (nrm > 1e-9)
-			g += p.edge_weights.joint_distance * (d_diff.transpose() * (diff / nrm));
-		Eigen::Index jmax = 0;
-		for (Eigen::Index j = 1; j < diff.size(); ++j)
-			if (std::abs(diff(j)) > std::abs(diff(jmax)))
-				jmax = j;
-		g += p.edge_weights.max_turn * (diff(jmax) >= 0.0 ? 1.0 : -1.0) * d_diff.row(jmax).transpose();
-	}
-	return g;
-}
-
-// Debug: central-difference gradient by re-tracking the tour's poses (one IK per viewpoint) at +-epsilon.
-Eigen::Vector3d ObjectPlacementOptimizer::ComputeNumericCostGradient()
-{
-	auto tracked_cost = [&](const Position& at, bool* all) {
-		const Eigen::Isometry3d xform = scene_geometry::Translation(at);
-		scene_geometry::MoveObject(this->scene, xform * this->object_pose);
-		double cost = 0.0;
-		const Joints* prev = &this->home_pose;
-		bool prev_ok = true;
-		std::vector<Joints> qs(this->current_tour.viewpoint_order.size());
-		*all = true;
-		for (size_t i = 0; i < this->current_tour.viewpoint_order.size(); ++i)
-		{
-			this->robot_state.setJointGroupPositions(this->joint_group, this->current_tour.ik_poses[i]);
-			if (!ik_sampling::ExactIk(
-					this->robot_state, this->joint_group,
-					scene_geometry::ToPoseMsg(xform * this->viewpoints[static_cast<size_t>(this->current_tour.viewpoint_order[i])]),
-					this->params.ik_attempts, this->params.ik_timeout, this->state_validity))
-			{
-				prev_ok = *all = false;
-				continue;
-			}
-			this->robot_state.copyJointGroupPositions(this->joint_group, qs[i]);
-			if (prev_ok)
-				cost += joint_travel::EdgeCost(*prev, qs[i], this->params.edge_weights, this->counted_joint_indices);
-			prev = &qs[i];
-			prev_ok = true;
-		}
-		return cost;
-	};
-	Eigen::Vector3d g = Eigen::Vector3d::Constant(std::nan(""));
-	for (int axis = 0; axis < 3; ++axis)
-	{
-		const Eigen::Vector3d e = this->params.fd_epsilon * Eigen::Vector3d::Unit(axis);
-		bool all_plus, all_minus;
-		const double plus = tracked_cost(this->current_position + e, &all_plus);
-		const double minus = tracked_cost(this->current_position - e, &all_minus);
-		if (all_plus && all_minus)
-			g(axis) = (plus - minus) / (2.0 * this->params.fd_epsilon);
 	}
 	return g;
 }

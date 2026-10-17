@@ -39,7 +39,6 @@
     ik_attempts: 30
 
     # Cost
-    travel_gradient: true
     planned_travel_in_cost: true
     real_cost_planning_time: 0.5
     manipulability_weight: 1.0            # while viewpoints are missed: cost -= this * sum of manipulability

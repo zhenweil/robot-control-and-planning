@@ -17,8 +17,8 @@
 
 #include "panda_arm_control/joint_travel.hpp"
 #include "panda_arm_control/room_margins.hpp"
-#include "panda_arm_control/object_placement.hpp"
 #include "panda_arm_control/scene_geometry.hpp"
+#include "panda_arm_control/object_placement.hpp"
 
 namespace object_placement
 {
@@ -100,45 +100,42 @@ public:
 		const std::vector<Eigen::Isometry3d>& viewpoints_nominal, const Joints& home, const ObjectPlacementParams& params);
 	ObjectPlacementOptimizer(const ObjectPlacementOptimizer&) = delete;
 	ObjectPlacementOptimizer& operator=(const ObjectPlacementOptimizer&) = delete;
-
-	// Runs the whole search from params' start position; restores the object's scene pose before returning.
-	ObjectPlacementResult Optimize();
+	ObjectPlacementResult Optimize(); // Run object placement optimization
 
 private:
-	// --- Reach and improve ---
-	bool ResetAndSolveAtStart(const Position& start, int restart_in, const TourSolution* warm);
-	ReachAttemptResult ReachAllViewpoints(const Position& from);
-	void RefineGtspAndPlacement(int iter);
+	// Top level functions
+	bool ResetAndSolveAtStart(const Position& start, int restart_in, const TourSolution* warm); // Initialize first solve
+	ReachAttemptResult ReachAllViewpoints(const Position& from); // Try to reach all viewpoints. Closest IK + kinematic room then reach + manipulability jump
+	void RefineGtspAndPlacement(int iter); // Refine tour and object placement after all viewpoints reached
 
+	// Lower level functions
 	void PrepareReachViewpoints();
-	bool TryReachViewpoints(int iter);
+	bool TryReachViewpoints(int iter); // Try to reach all viewpoints one attempt
 	std::optional<MoveCandidate> TryKinematicRoomMove();
 	std::optional<MoveCandidate> LineSearch(const Eigen::Vector3d& dir);
-	std::optional<TourSolution> ConfirmWithFullSolve(const MoveCandidate& step);
-	bool CommitMove(const MoveCandidate& step, TourSolution committed, int iter, const Eigen::Vector3d& g);
+	std::optional<TourSolution> ConfirmImprovementWithFullSolve(const MoveCandidate& step);
+	bool CommitMove(const MoveCandidate& step, TourSolution committed, int iter, const Eigen::Vector3d& g); // Actually move the object
 	Position RunManipulabilityJump(const Position& from, const TourSolution& warm, int restart_in);
 	void OptimizeTourAndPlacement();
 	void RestartGtsp();
 
 	// --- Solving and scoring ---
 	TourSolution QuickSolveTour(const Position& at, ObjectPlacementParams p);
-	TourSolution QuickSolveTour(const Position& at, int gaps_min_reached = 0);
 	TourSolution SolveMostManipulablePoses(const Position& at, const ObjectPlacementParams& p);
 	TourSolution RunGtspRestarts(const Position& at, TourSolution best_sol, int num_restarts, bool warm_start, const std::vector<int>* fixed_order);
 	std::vector<std::vector<Joints>> CollectIkPoses(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, int max_solutions);
 	TourSolution SampleIkAndSolveGtsp(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
 
 	// Compute gradient
-	Eigen::Vector3d ComputeNumericCostGradient();
-	Eigen::Vector3d ComputeCostGradient(const TourSolution& sol, const ObjectPlacementParams& p);
+	Eigen::Vector3d ComputeCostGradient(const TourSolution& sol, const ObjectPlacementParams& p); // Cost=closest_IK_gap + manipulability. Used for closest IK move
 	Eigen::Vector3d ComputeManipulabilityGradient(const std::vector<Joints>& poses, double sum_weight, double softmin_weight);
 
 	void RememberLastPoses(const TourSolution& sol);
 	double ComputeWeightedCost(const TourSolution& sol) const;
 	bool IsBetter(const TourSolution& a, const TourSolution& b) const;
-	TourSolution AddPlannedTravel(const Position& at, TourSolution sol);
 	void RecordHistoryAndBest(const Position& at, const TourSolution& sol);
 	double ComputePlannedTravel(const Position& at, const TourSolution& sol);
+	TourSolution AddPlannedTravelToCost(const Position& at, TourSolution sol);
 
 	// --- Room-then-reach ---
 	Eigen::Vector3d RemoveMotionOnLockedAxes(Eigen::Vector3d v) const;

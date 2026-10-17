@@ -89,7 +89,6 @@ struct ObjectPlacementParams
 	int gtsp_restart_ik_solutions = 8;  // IK solutions per viewpoint in GTSP restarts: more same-branch choices for GTSP
 	// Reconfiguration: a move turning any joint (joint 7 aside) more than this; GTSP restarts log how many are left.
 	double reconfig_threshold = 1.0;
-	bool travel_gradient = true;  // false: the descent direction ignores tour travel
 	bool freeze_order = false;  // once all viewpoints are reached, keep the viewpoint order fixed
 	bool lock_input_order = false;  // visit viewpoints in the input order throughout (no GTSP reordering)
 	// > 0: OMPL-planned joint travel can be computed; seconds per planning attempt.
@@ -109,9 +108,6 @@ struct ObjectPlacementParams
 	int gtsp_restarts_at_reach = 0;  // log N GTSP restarts at the first all-reached placement (descent continues)
 
 	int random_seed = 42;
-	// Log the analytic gradient next to a central-difference estimate every outer iteration.
-	bool fd_gradient_check = false;
-	double fd_epsilon = 1e-4;
 
 	// Optional live convergence markers on this topic (base breadcrumb trail, -grad arrow, current
 	// tour). nullptr (default) disables progress publishing.
