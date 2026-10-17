@@ -16,7 +16,7 @@ DIR=$HERE/runs/$NAME
 mkdir -p "$DIR"
 
 # Snapshot the params, so editing the YAML mid-sweep doesn't change this run.
-cp "${BASEYAML:-$WS/src/panda_arm_control/config/object_placement_run.yaml}" "$DIR/params.yaml"
+cp "${BASEYAML:-$WS/src/object_placement_planning/config/object_placement_run.yaml}" "$DIR/params.yaml"
 export BASEYAML=$DIR/params.yaml
 for x in $X; do for y in $Y; do for z in $Z; do echo "$x $y $z"; done; done; done > "$DIR/starts.txt"
 echo "method=${METHOD:-object_placement} robot=${ROBOT:-panda} seed=$SEED workers=$NW starts=$(wc -l < "$DIR/starts.txt") git=$(git -C "$WS" rev-parse --short HEAD)" \

@@ -1,0 +1,151 @@
+<?xml version="1.0"?>
+<!-- Universal Robots UR5e, written from Universal_Robots_ROS2_Description (humble, BSD-3-Clause; see LICENSE, UPSTREAM_COMMIT):
+     ur_macro.xacro's links and joints with config/ur5e's default_kinematics, joint_limits and mesh offsets. Collision meshes
+     serve as visuals too; no inertials, ros2_control or world link (the SRDF's virtual joint fixes base_link to world, as
+     for the Panda). Adds the camera placeholder and tool0 of panda_arm_moveit's panda.urdf, so the same viewpoints
+     (tool0 poses) apply. -->
+<robot name="ur5e">
+  <link name="base_link"/>
+  <link name="base_link_inertia">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 3.141592653589793"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/base.stl"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 3.141592653589793"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/base.stl"/></geometry>
+    </collision>
+  </link>
+  <link name="shoulder_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 3.141592653589793"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/shoulder.stl"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 3.141592653589793"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/shoulder.stl"/></geometry>
+    </collision>
+  </link>
+  <link name="upper_arm_link">
+    <visual>
+      <origin xyz="0 0 0.138" rpy="1.5707963267948966 0 -1.5707963267948966"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/upperarm.stl"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.138" rpy="1.5707963267948966 0 -1.5707963267948966"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/upperarm.stl"/></geometry>
+    </collision>
+  </link>
+  <link name="forearm_link">
+    <visual>
+      <origin xyz="0 0 0.007" rpy="1.5707963267948966 0 -1.5707963267948966"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/forearm.stl"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.007" rpy="1.5707963267948966 0 -1.5707963267948966"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/forearm.stl"/></geometry>
+    </collision>
+  </link>
+  <link name="wrist_1_link">
+    <visual>
+      <origin xyz="0 0 -0.127" rpy="1.5707963267948966 0 0"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/wrist1.stl"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.127" rpy="1.5707963267948966 0 0"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/wrist1.stl"/></geometry>
+    </collision>
+  </link>
+  <link name="wrist_2_link">
+    <visual>
+      <origin xyz="0 0 -0.0997" rpy="0 0 0"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/wrist2.stl"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.0997" rpy="0 0 0"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/wrist2.stl"/></geometry>
+    </collision>
+  </link>
+  <link name="wrist_3_link">
+    <visual>
+      <origin xyz="0 -0.0005 -0.0989" rpy="1.5707963267948966 0 0"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/wrist3.stl"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.0005 -0.0989" rpy="1.5707963267948966 0 0"/>
+      <geometry><mesh filename="package://ur_arm_moveit/meshes/ur5e/wrist3.stl"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="base_link-base_link_inertia" type="fixed">
+    <parent link="base_link"/>
+    <child link="base_link_inertia"/>
+    <origin xyz="0 0 0" rpy="0 0 3.141592653589793"/>
+  </joint>
+  <joint name="shoulder_pan_joint" type="revolute">
+    <parent link="base_link_inertia"/>
+    <child link="shoulder_link"/>
+    <origin xyz="0 0 0.1625" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="150.0" velocity="3.141592653589793"/>
+  </joint>
+  <joint name="shoulder_lift_joint" type="revolute">
+    <parent link="shoulder_link"/>
+    <child link="upper_arm_link"/>
+    <origin xyz="0 0 0" rpy="1.570796327 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="150.0" velocity="3.141592653589793"/>
+  </joint>
+  <joint name="elbow_joint" type="revolute">
+    <parent link="upper_arm_link"/>
+    <child link="forearm_link"/>
+    <origin xyz="-0.425 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.141592653589793" upper="3.141592653589793" effort="150.0" velocity="3.141592653589793"/>
+  </joint>
+  <joint name="wrist_1_joint" type="revolute">
+    <parent link="forearm_link"/>
+    <child link="wrist_1_link"/>
+    <origin xyz="-0.3922 0 0.1333" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="28.0" velocity="3.141592653589793"/>
+  </joint>
+  <joint name="wrist_2_joint" type="revolute">
+    <parent link="wrist_1_link"/>
+    <child link="wrist_2_link"/>
+    <origin xyz="0 -0.0997 -2.044881182297852e-11" rpy="1.570796327 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="28.0" velocity="3.141592653589793"/>
+  </joint>
+  <joint name="wrist_3_joint" type="revolute">
+    <parent link="wrist_2_link"/>
+    <child link="wrist_3_link"/>
+    <origin xyz="0 0.09959999999999999 -2.042830148012698e-11" rpy="1.570796326589793 3.141592653589793 3.141592653589793"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-6.283185307179586" upper="6.283185307179586" effort="28.0" velocity="3.141592653589793"/>
+  </joint>
+
+  <!-- Camera placeholder, as panda_hand in panda_arm_moveit: a thin cylinder from the flange (wrist_3_link, whose frame is
+       UR's tool0 frame) to tool0. -->
+  <joint name="camera_joint" type="fixed">
+    <parent link="wrist_3_link"/>
+    <child link="camera"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="camera">
+    <visual>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.01" length="0.1"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.01" length="0.1"/></geometry>
+    </collision>
+  </link>
+  <joint name="tool0_joint" type="fixed">
+    <parent link="camera"/>
+    <child link="tool0"/>
+    <origin xyz="0 0 0.1034" rpy="0 0 0"/>
+  </joint>
+  <link name="tool0"/>
+</robot>

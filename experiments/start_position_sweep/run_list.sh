@@ -7,12 +7,12 @@
 #        BASEYAML=<params yaml>                  (default: the package's config/object_placement_run.yaml)
 #        TIME_BUDGET=<s>                         (random_placement only, default 90)
 #        TIMEOUT=<s>                             (per start, default 900)
-#        ROBOT=panda|kinova|xarm7                (default panda)
+#        ROBOT=panda|kinova|xarm7|ur5e           (default panda)
 set -u
 LIST=$1; OUT=$2; NW=${3:-6}; SEED=${4:-42}
 METHOD=${METHOD:-object_placement}
 WS=$(cd "$(dirname "$0")/../.." && pwd)  # workspace root
-BASE=${BASEYAML:-$WS/src/panda_arm_control/config/object_placement_run.yaml}
+BASE=${BASEYAML:-$WS/src/object_placement_planning/config/object_placement_run.yaml}
 TIME_BUDGET=${TIME_BUDGET:-90}
 TIMEOUT=${TIMEOUT:-900}
 ROBOT=${ROBOT:-panda}
@@ -39,7 +39,7 @@ worker() {
     [ "$METHOD" = random_placement ] && args="$args time_budget_sec:=$TIME_BUDGET"
     local before; before=$(ls -t "$ROS_LOG_DIR"/${METHOD}_*.log 2>/dev/null | head -1)
     local t0; t0=$(date +%s)
-    setsid ros2 launch panda_arm_control "$METHOD.launch.py" $args > /dev/null 2>&1 &
+    setsid ros2 launch object_placement_planning "$METHOD.launch.py" $args > /dev/null 2>&1 &
     local pid=$! log="" cur
     for _ in $(seq 1 "$TIMEOUT"); do
       sleep 1

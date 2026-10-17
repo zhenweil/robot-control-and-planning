@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ur_moveit_config's SRDF (Universal_Robots_ROS2_Driver, humble) with the chain ending at tool0, a virtual joint fixing
+     base_link to world (as panda.srdf), the home pose, and the camera's collision pair. -->
+<robot name="ur5e">
+    <group name="ur_manipulator">
+        <chain base_link="base_link" tip_link="tool0"/>
+    </group>
+    <!-- tool0 at the Panda home's tool0 pose (object_pose.yaml initial_joints). -->
+    <group_state name="home" group="ur_manipulator">
+        <joint name="shoulder_pan_joint" value="-0.5083"/>
+        <joint name="shoulder_lift_joint" value="-2.0888"/>
+        <joint name="elbow_joint" value="1.6225"/>
+        <joint name="wrist_1_joint" value="-1.1827"/>
+        <joint name="wrist_2_joint" value="-1.5273"/>
+        <joint name="wrist_3_joint" value="-2.0778"/>
+    </group_state>
+    <virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="base_link"/>
+    <disable_collisions link1="base_link_inertia" link2="shoulder_link" reason="Adjacent"/>
+    <disable_collisions link1="forearm_link" link2="upper_arm_link" reason="Adjacent"/>
+    <disable_collisions link1="forearm_link" link2="wrist_1_link" reason="Adjacent"/>
+    <disable_collisions link1="shoulder_link" link2="upper_arm_link" reason="Adjacent"/>
+    <disable_collisions link1="wrist_1_link" link2="wrist_2_link" reason="Adjacent"/>
+    <disable_collisions link1="wrist_1_link" link2="wrist_3_link" reason="Never"/>
+    <disable_collisions link1="wrist_2_link" link2="wrist_3_link" reason="Adjacent"/>
+    <disable_collisions link1="camera" link2="wrist_3_link" reason="Adjacent"/>
+</robot>
