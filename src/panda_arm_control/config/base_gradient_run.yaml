@@ -18,8 +18,6 @@
     bg_descent_num_restart: 3                # descents; each restart first jumps up the reached viewpoints' manipulability
     bg_jump_softmin_weight: 100.0            # jump score: sum of manipulability + this x soft-min
     bg_jump_max_moves: 10                    # moves per manipulability jump
-    bg_reach_outer_iterations: 0             # after all reached + refined: steps up the reachability map, each re-solved; 0 = off
-    bg_reach_outer_step: 0.1                 # m, halved when a step does not lower the cost
     bg_stop_when_all_reached: true
     bg_reach_time_limit: 120.0              # s per descent to reach every viewpoint, then stuck; 0 = none
     bg_reach_patience: 3                     # reach iterations without gaining a viewpoint, then stuck (jump + restart)

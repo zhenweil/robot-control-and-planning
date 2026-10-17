@@ -1,4 +1,4 @@
-"""Builds the reachability map used by base_gradient's reachability outer loop; settings in config/reachability_map.yaml."""
+"""Builds the reachability map used by random_placement's weighted sampling; settings in config/reachability_map.yaml."""
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare

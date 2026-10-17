@@ -65,7 +65,7 @@ std::vector<Joints> PrependHomePose(const Joints& home, const std::vector<Joints
 }
 
 // ---------------------------------------------------------------------------------------------
-// Setup and the outer loop
+// Setup and the run
 // ---------------------------------------------------------------------------------------------
 
 ObjectPlacementOptimizer::ObjectPlacementOptimizer(
@@ -103,28 +103,7 @@ BaseGradientResult ObjectPlacementOptimizer::Optimize()
 {
 	const Position start(this->params.initial_x, this->params.initial_y, this->params.initial_z);
 
-	this->outer_iteration = 0;
-	ReachAttemptResult best_result = this->ReachAllViewpoints(start); // Try to reach all viewpoints
-	double step = this->params.reach_outer_step;
-
-	// After all viewpoints are reached
-	for (int outer = 1; outer <= this->params.reach_outer_iterations && best_result.all_reachable && step >= 0.02 && rclcpp::ok(); ++outer)
-	{
-		const std::optional<Position> next = this->GetReachabilityMapStep(best_result.position, step, outer); // Try to move more based on reachability map
-		if (!next) break;
-		
-		this->outer_iteration = outer;
-		const ReachAttemptResult d = this->ReachAllViewpoints(*next); // Try to reach all viewpoints again after reachability move
-		const bool better = d.all_reachable && d.weighted_cost_sum < best_result.weighted_cost_sum;
-		RCLCPP_INFO(
-			this->node->get_logger(), "outer %d done: reachable %d/%d, cost %.4f vs %.4f best -> %s", outer,
-			d.tour_solution.num_reachable, this->num_viewpoint, d.weighted_cost_sum, best_result.weighted_cost_sum,
-			better ? "new best" : "kept the best, halving the step");
-		if (better)
-			best_result = d;
-		else
-			step *= 0.5;
-	}
+	const ReachAttemptResult best_result = this->ReachAllViewpoints(start); // Try to reach all viewpoints
 
 	const TourSolution& final_tour = best_result.tour_solution;
 	this->run_result.x = best_result.position.x();
@@ -244,8 +223,7 @@ bool ObjectPlacementOptimizer::ResetAndSolveAtStart(const Position& start, int r
 	this->RememberLastPoses(this->current_tour);
 	this->PublishProgressMarkers(Eigen::Vector3d::Zero());
 	RCLCPP_INFO(
-		this->node->get_logger(), "outer %d/%d reach attempt %d/%d start: reachable %d/%d", this->outer_iteration,
-		this->params.reach_outer_iterations, this->attempt_index + 1, std::max(1, this->params.descent_num_restart),
+		this->node->get_logger(), "reach attempt %d/%d start: reachable %d/%d", this->attempt_index + 1, std::max(1, this->params.descent_num_restart),
 		this->current_tour.num_reachable, this->num_viewpoint);
 	return true;
 }
@@ -566,8 +544,7 @@ bool ObjectPlacementOptimizer::CommitMove(
 	this->RememberLastPoses(this->current_tour);
 	this->RecordHistoryAndBest(this->current_position, this->current_tour);
 	RCLCPP_INFO(
-		this->node->get_logger(), "outer %d/%d reach attempt %d/%d kinematic move %d/%d: reachable %d/%d",
-		this->outer_iteration, this->params.reach_outer_iterations, this->attempt_index + 1,
+		this->node->get_logger(), "reach attempt %d/%d kinematic move %d/%d: reachable %d/%d", this->attempt_index + 1,
 		std::max(1, this->params.descent_num_restart), iter + 1, this->params.max_kinematic_moves,
 		this->current_tour.num_reachable, this->num_viewpoint);
 	this->PublishProgressMarkers(-g);
@@ -592,68 +569,6 @@ bool ObjectPlacementOptimizer::CommitMove(
 // Gradient ascent on the reached viewpoints' manipulability (sum + jump_softmin_weight x soft-min), whatever is
 // reachable at each spot; misses and travel ignored. Backtracking line search; a step is kept when its full solve
 // raises the score. Ends when no step does, or after `patience` steps of tiny gain.
-// One step up the soft-min, over all viewpoints (reached or not), of their reachability-map values: `step`, else half or
-// a quarter of it, whichever first raises the score.
-std::optional<Position> ObjectPlacementOptimizer::GetReachabilityMapStep(const Position& from, double step, int outer)
-{
-	if (!this->reachability_map_load_attempted)
-	{
-		this->reachability_map_load_attempted = true;
-		ReachabilityMap::Options options;
-		options.samples = this->params.reach_map_samples;
-		options.self_collision = this->params.reach_map_self_collision;
-		options.voxel = this->params.reach_map_voxel;
-		options.directions = this->params.reach_map_directions;
-		options.limit_sharpness = this->params.reach_map_limit_sharpness;
-		options.seed = this->params.reach_map_seed;
-		const std::string path =
-			this->params.reach_map_file.empty() ? ReachabilityMap::DefaultPath(this->group_name) : this->params.reach_map_file;
-		this->reachability_map =
-			ReachabilityMap::Load(path, this->robot_model, this->group_name, this->tool_link->getName(), options);
-		if (this->reachability_map)
-		{
-			for (const Eigen::Isometry3d& v : this->viewpoints)
-				this->reachability_bins.push_back(this->reachability_map->Bin(v.linear().col(2)));
-			RCLCPP_INFO(this->node->get_logger(), "reachability map loaded from %s", path.c_str());
-		}
-		else
-			RCLCPP_WARN(
-				this->node->get_logger(),
-				"no reachability map built with these settings at %s (ros2 launch panda_arm_control "
-				"reachability_map.launch.py) -- skipping the reachability steps",
-				path.c_str());
-	}
-	if (!this->reachability_map)
-		return std::nullopt;
-	auto score = [&](const Position& at)
-	{
-		return this->reachability_map
-			->ScoreAt(this->viewpoints, this->reachability_bins, at, this->params.reach_map_tau)
-			.value;
-	};
-	const Eigen::Vector3d g = this->RemoveMotionOnLockedAxes(
-		this->reachability_map->ScoreAt(this->viewpoints, this->reachability_bins, from, this->params.reach_map_tau)
-			.gradient);
-	const double start_score = score(from);
-	for (double size = step; size >= 0.25 * step - 1e-12 && g.norm() > 1e-12; size *= 0.5)
-	{
-		const Position cand = ClampToBounds(from + size * g.normalized(), this->params.bounds);
-		const double s = score(cand);
-		if (s > start_score)
-		{
-			RCLCPP_INFO(
-				this->node->get_logger(),
-				"outer %d: reachability step %.3f m, map score %.4f -> %.4f, abs (%.4f, %.4f, %.4f) -> (%.4f, %.4f, %.4f)",
-				outer, size, start_score, s, from.x(), from.y(), from.z(), cand.x(), cand.y(), cand.z());
-			this->move_history.push_back({from, cand, MoveKind::ReachabilityMove});
-			return cand;
-		}
-	}
-	RCLCPP_INFO(
-		this->node->get_logger(), "outer %d: no step raises the reachability-map score (%.4f)", outer, start_score);
-	return std::nullopt;
-}
-
 Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, const TourSolution& warm, int restart_in)
 {
 	BaseGradientParams p = this->params;	// reached viewpoints' manipulability only; misses need no closest pose
@@ -1624,9 +1539,7 @@ void ObjectPlacementOptimizer::PublishProgressMarkers(const Eigen::Vector3d& neg
 		crumbs.scale.x = crumbs.scale.y = crumbs.scale.z = 0.012;
 		for (const MoveSegment& m : this->move_history)
 		{
-			const std_msgs::msg::ColorRGBA c = m.kind == MoveKind::KinematicRoomMove ? marker_utils::Rgba(1.0f, 0.4f, 0.1f, 0.9f)
-				: m.kind == MoveKind::ManipulabilityJump									 ? marker_utils::Rgba(1.0f, 1.0f, 1.0f, 0.9f)
-																		 : marker_utils::Rgba(0.0f, 0.9f, 0.9f, 0.9f);
+			const std_msgs::msg::ColorRGBA c = m.kind == MoveKind::KinematicRoomMove ? marker_utils::Rgba(1.0f, 0.4f, 0.1f, 0.9f) : marker_utils::Rgba(1.0f, 1.0f, 1.0f, 0.9f);
 			for (const Position& p : {m.from, m.to})
 			{
 				lines.points.push_back(scene_geometry::ToPoint((scene_geometry::Translation(p) * this->object_pose).translation()));

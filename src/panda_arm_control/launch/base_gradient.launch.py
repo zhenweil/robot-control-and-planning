@@ -268,11 +268,6 @@ def generate_launch_description():
         [FindPackageShare("panda_arm_control"), "config", "object_pose.yaml"]
     )
 
-    # Reachability-map generation settings (used by the reachability outer loop, bg_reach_outer_iterations).
-    reachability_map_config = PathJoinSubstitution(
-        [FindPackageShare("panda_arm_control"), "config", "reachability_map.yaml"]
-    )
-
     params_file_arg = DeclareLaunchArgument(
         "params_file", default_value="",
         description="Optional YAML of bg_* node parameters; loaded last, so it overrides the launch arguments.",
@@ -286,7 +281,7 @@ def generate_launch_description():
             executable="base_gradient",
             name="base_gradient",
             output="screen",
-            parameters=[moveit_config.to_dict(), base_gradient_params, object_pose_config, reachability_map_config, *extra],
+            parameters=[moveit_config.to_dict(), base_gradient_params, object_pose_config, *extra],
             # Makes MoveIt's IK (KDL) deterministic -- it otherwise re-seeds from /dev/urandom on
             # retries, which is the main run-to-run inconsistency in the result.
             additional_env={"RANDOM_SEED": random_seed},

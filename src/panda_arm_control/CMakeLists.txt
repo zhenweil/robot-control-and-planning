@@ -94,13 +94,12 @@ add_executable(base_gradient
 	src/room_margins.cpp
 	src/scene_geometry.cpp
 	src/tour_placement.cpp
-	src/reachability_map.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
 	src/base_gradient_node.cpp
 	)
 
-# Builds the reachability map that base_gradient's bg_reach_map_jump loads.
+# Builds the reachability map that random_placement's weighted sampling loads.
 add_executable(build_reachability_map
 	src/reachability_map.cpp
 	src/build_reachability_map.cpp

@@ -1,6 +1,6 @@
 # Reachability map settings. Build the map with: ros2 launch panda_arm_control reachability_map.launch.py
-# base_gradient (bg_reach_outer_iterations > 0) loads it, also reading this file, and only accepts a map built with the same
-# settings (and robot, group, tool link).
+# random_placement (weighted sampling) and reachability_climb load it, also reading this file, and only accept a map built
+# with the same settings (and robot, group, tool link).
 /**:
   ros__parameters:
     bg_reach_map_file: ""                    # cache; empty = ~/.ros/reachability_<group>.bin

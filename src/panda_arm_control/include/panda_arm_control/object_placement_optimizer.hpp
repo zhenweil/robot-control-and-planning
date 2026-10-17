@@ -1,7 +1,7 @@
 #pragma once
 // Object placement: finds the object position (abs x, y, z; orientation stays nominal) from which the arm reaches
 // every viewpoint with the least tour travel. Kinematic moves (gradient steps) inside reach attempts; a manipulability
-// jump before each new reach attempt; reachability-map steps (outer iterations) once every viewpoint is reached.
+// jump before each new reach attempt; refine and tour-placement once every viewpoint is reached.
 
 #include <chrono>
 #include <limits>
@@ -19,7 +19,6 @@
 #include "panda_arm_control/room_margins.hpp"
 #include "panda_arm_control/base_gradient.hpp"
 #include "panda_arm_control/scene_geometry.hpp"
-#include "panda_arm_control/reachability_map.hpp"
 
 namespace object_placement
 {
@@ -75,8 +74,7 @@ struct MoveCandidate
 enum class MoveKind
 {
 	KinematicRoomMove,
-	ManipulabilityJump,
-	ReachabilityMove
+	ManipulabilityJump
 };
 
 struct MoveSegment
@@ -117,7 +115,6 @@ public:
 
 private:
 	Position RunManipulabilityJump(const Position& from, const TourSolution& warm, int restart_in);
-	std::optional<Position> GetReachabilityMapStep(const Position& from, double step, int outer);
 
 	// --- Reach and improve ---
 	bool ResetAndSolveAtStart(const Position& start, int restart_in, const TourSolution* warm);
@@ -195,12 +192,8 @@ private:
 	std::vector<int> counted_joint_indices;  // joints that count as travel: all but joint 7, which only spins the camera
 	moveit::core::GroupStateValidityCallbackFn state_validity;
 
-	std::vector<int> reachability_bins;  // each viewpoint's approach-direction bin
-	bool reachability_map_load_attempted = false;
-	std::optional<ReachabilityMap> reachability_map;  // loaded on first use
 
 	// --- Whole run ---
-	int outer_iteration = 0;
 	BaseGradientResult run_result;		 // history and solve count; Optimize fills in the rest
 	std::vector<MoveSegment> move_history;	 // every move, kept for RViz
 
