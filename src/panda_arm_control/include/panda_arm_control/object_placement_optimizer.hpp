@@ -114,15 +114,17 @@ private:
 	std::optional<MoveCandidate> TryKinematicRoomMove();
 	std::optional<MoveCandidate> LineSearch(const Eigen::Vector3d& dir);
 	std::optional<TourSolution> ConfirmImprovementWithFullSolve(const MoveCandidate& step);
-	bool CommitMove(const MoveCandidate& step, TourSolution committed, int iter, const Eigen::Vector3d& g); // Actually move the object
+	bool CommitMoveAndCheckConvergence(const MoveCandidate& step, TourSolution committed, int iter, const Eigen::Vector3d& g); // Actually move the object
 	Position RunManipulabilityJump(const Position& from, const TourSolution& warm, int restart_in);
+	double GetJumpScore(const TourSolution& tour) const;
 	void OptimizeTourAndPlacement();
 	void RestartGtsp();
 
 	// --- Solving and scoring ---
 	TourSolution QuickSolveTour(const Position& at, ObjectPlacementParams p);
+	TourSolution TestCandidateMove(const TourSolution& from_tour, const Position& at);
 	TourSolution FindMostManipulablePoses(const Position& at, const ObjectPlacementParams& p);
-	TourSolution RunGtspRestarts(const Position& at, TourSolution best_sol, int num_restarts, bool warm_start, const std::vector<int>* fixed_order);
+	TourSolution RunGtspRestartsAndEvaluate(const Position& at, TourSolution best_sol, int num_restarts, bool warm_start, const std::vector<int>* fixed_order);
 	std::vector<std::vector<Joints>> CollectIkPoses(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, int max_solutions);
 	std::vector<MissedViewpoint> FindClosestPosesForMissedViewpoints(const Position& at, const ObjectPlacementParams& p, const TourSolution& tour, const std::vector<Joints>& seed_q);
 	TourSolution EvaluateObjectPosition(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
@@ -139,6 +141,8 @@ private:
 	bool HasMoreReachedOrLowerCost(const TourSolution& a, const TourSolution& b) const;
 
 	// --- Room-then-reach ---
+	void TraceRoomMove(const std::string& what, int target, const Position& cand, const TourSolution& candidate_tour, const std::string& verdict);
+	double GetStretch(const Joints& q);
 	std::vector<room_margins::Margin> GetIkPoseMargins(int v, const Joints& q);
 	room_margins::ArmModel BuildRoomMarginArmModel(const Position& at, const TourSolution& sol);
 	Eigen::Vector3d GetMoveDirectionToCloseGap(int target, const TourSolution& here_at, bool first);
@@ -194,6 +198,7 @@ private:
 	bool logged_gtsp_restarts_at_first_reach = false;
 	
 	// Log and visualization
+	void LogJumpStep(int restart_in, int iter, double step);
 	void LogGtspRestartsAtFirstReach();
 	void PublishProgressMarkers(const Eigen::Vector3d& neg_grad);
 };
