@@ -50,6 +50,8 @@ struct Params
 	double bg_max_joint_deviation_weight = 1.0;
 	double bg_miss_gap_weight = 5000.0;
 	double bg_manipulability_limit_sharpness = 0.0;
+	double bg_manipulability_weight = 0.0;
+	double bg_softmin_manipulability_weight = 0.0;
 	double bg_softmin_tau = 0.01;
 	double bg_miss_gap_cap = 0.15;
 	double bg_closest_ik_margin = 0.02;
@@ -263,6 +265,8 @@ private:
 		this->declareIfNeeded("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
 		this->declareIfNeeded("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
 		this->declareIfNeeded("bg_manipulability_limit_sharpness", this->params.bg_manipulability_limit_sharpness);
+		this->declareIfNeeded("bg_manipulability_weight", this->params.bg_manipulability_weight);
+		this->declareIfNeeded("bg_softmin_manipulability_weight", this->params.bg_softmin_manipulability_weight);
 		this->declareIfNeeded("bg_softmin_tau", this->params.bg_softmin_tau);
 		this->declareIfNeeded("bg_miss_gap_cap", this->params.bg_miss_gap_cap);
 		this->declareIfNeeded("bg_closest_ik_margin", this->params.bg_closest_ik_margin);
@@ -345,6 +349,8 @@ private:
 		this->get_parameter("bg_max_joint_deviation_weight", this->params.bg_max_joint_deviation_weight);
 		this->get_parameter("bg_miss_gap_weight", this->params.bg_miss_gap_weight);
 		this->get_parameter("bg_manipulability_limit_sharpness", this->params.bg_manipulability_limit_sharpness);
+		this->get_parameter("bg_manipulability_weight", this->params.bg_manipulability_weight);
+		this->get_parameter("bg_softmin_manipulability_weight", this->params.bg_softmin_manipulability_weight);
 		this->get_parameter("bg_softmin_tau", this->params.bg_softmin_tau);
 		this->get_parameter("bg_miss_gap_cap", this->params.bg_miss_gap_cap);
 		this->get_parameter("bg_closest_ik_margin", this->params.bg_closest_ik_margin);
@@ -449,6 +455,8 @@ private:
 		bg.edge_weights.max_turn = this->params.bg_max_joint_deviation_weight;
 		bg.miss_gap_weight = this->params.bg_miss_gap_weight;
 		bg.manipulability_limit_sharpness = this->params.bg_manipulability_limit_sharpness;
+		bg.manipulability_weight = this->params.bg_manipulability_weight;
+		bg.softmin_manipulability_weight = this->params.bg_softmin_manipulability_weight;
 		bg.softmin_tau = this->params.bg_softmin_tau;
 		bg.miss_gap_cap = this->params.bg_miss_gap_cap;
 		bg.closest_ik_margin = this->params.bg_closest_ik_margin;

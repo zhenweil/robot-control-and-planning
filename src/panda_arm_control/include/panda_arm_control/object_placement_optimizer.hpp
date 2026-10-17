@@ -151,7 +151,7 @@ private:
 	// Compute gradient
 	Eigen::Vector3d ComputeNumericCostGradient();
 	Eigen::Vector3d ComputeCostGradient(const TourSolution& sol, const BaseGradientParams& p);
-	Eigen::Vector3d ComputeManipulabilityGradient(const TourSolution& sol);
+	Eigen::Vector3d ComputeManipulabilityGradient(const std::vector<Joints>& poses, double sum_weight, double softmin_weight);
 
 	void RememberLastPoses(const TourSolution& sol);
 	double ComputeWeightedCost(const TourSolution& sol) const;

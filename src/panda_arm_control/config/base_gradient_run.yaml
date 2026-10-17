@@ -40,7 +40,9 @@
     bg_travel_gradient: true
     bg_planned_travel_in_cost: true
     bg_real_cost_planning_time: 0.5
-    bg_softmin_tau: 0.01                     # jump's soft-min: small = only the worst pose, large = closer to the average
+    bg_manipulability_weight: 1.0            # while viewpoints are missed: cost -= this * sum of manipulability
+    bg_softmin_manipulability_weight: 1000.0 # while viewpoints are missed: cost -= this * soft-min manipulability (worst poses)
+    bg_softmin_tau: 0.01                     # soft-min: small = only the worst pose, large = closer to the average
     bg_manipulability_limit_sharpness: 20.0  # joints near a limit count less in manipulability; 0 = plain
     bg_miss_gap_weight: 200.0
     bg_closest_ik_starts: 5                  # closest-IK starts per missed viewpoint (only runs while viewpoints are missed)

@@ -30,11 +30,14 @@ struct BaseGradientParams
 	// Tour edge cost: joint distance and largest single-joint turn
 	joint_travel::EdgeWeights edge_weights;
 
-	// Manipulability sqrt(det(J J^T)) is not in the cost; only the manipulability jump climbs it.
+	// Manipulability sqrt(det(J J^T)) of the tour poses and the misses' closest poses: while viewpoints are missed, cost -=
+	// manipulability_weight * sum + softmin_manipulability_weight * soft-min. Once all are reached the cost is travel only.
+	double manipulability_weight = 0.0;
+	double softmin_manipulability_weight = 0.0;
 	// Range-aware manipulability: each joint's Jacobian column is scaled by 1 - exp(-k (q-lo)(hi-q)/range^2),
 	// so joints near a limit count less. k = this; 0 = plain manipulability.
 	double manipulability_limit_sharpness = 0.0;
-	// Soft-min manipulability -tau log sum exp(-w / tau), ~ the worst poses' w; the jump weighs it by jump_softmin_weight.
+	// Soft-min manipulability -tau log sum exp(-w / tau), ~ the worst poses' w.
 	double softmin_tau = 0.01;
 	// A missed viewpoint costs unreachable_penalty + miss_gap_weight * min(gap, miss_gap_cap), where gap
 	// is its closest-IK pose gap (m, rotation scaled by rot_metric_scale): gives misses a gradient.

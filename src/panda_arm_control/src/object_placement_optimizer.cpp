@@ -681,7 +681,7 @@ Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, c
 	this->stall_count = 0;
 	for (int iter = 0; iter < this->params.jump_max_moves && rclcpp::ok(); ++iter)
 	{
-		const Eigen::Vector3d g = this->RemoveMotionOnLockedAxes(this->ComputeManipulabilityGradient(this->current_tour));
+		const Eigen::Vector3d g = this->RemoveMotionOnLockedAxes(this->ComputeManipulabilityGradient(this->current_tour.ik_poses, 1.0, this->params.jump_softmin_weight));
 		if (g.norm() < 1e-9)
 			break;
 		this->ik_start_poses = GetIkStartPoses(this->current_tour, this->home_pose, this->num_viewpoint);
@@ -922,13 +922,19 @@ TourSolution ObjectPlacementOptimizer::SolveTour(
 	out.straight_line_travel =
 		joint_travel::TravelCost(PrependHomePose(this->home_pose, out.ik_poses), p.edge_weights, this->counted_joint_indices);
 
-	// Manipulability of the tour poses: not in the cost, only the manipulability jump's score and the logs.
+	// Manipulability of the tour poses and the misses' closest poses: in the cost only while viewpoints are missed.
 	std::vector<double> ws;
 	for (const Joints& q : out.ik_poses)
 	{
 		ws.push_back(manipulability::Value(this->robot_state, this->joint_group, this->tool_link, q, k));
 		out.manipulability_sum += ws.back();
 	}
+	for (const MissedViewpoint& m : missed)
+		if (!m.closest_pose.empty())
+		{
+			ws.push_back(manipulability::Value(this->robot_state, this->joint_group, this->tool_link, m.closest_pose, k));
+			out.manipulability_sum += ws.back();
+		}
 	out.softmin_manipulability = manipulability::SoftMin(ws, p.softmin_tau);
 
 	out.missed_viewpoints = std::move(missed);
@@ -936,6 +942,8 @@ TourSolution ObjectPlacementOptimizer::SolveTour(
 		out.miss_gap_sum += std::min(p.miss_gap_cap, scene_geometry::PoseGap(m.pose_error, p.rot_metric_scale));
 	out.miss_cost = p.miss_gap_weight * out.miss_gap_sum;
 	out.weighted_cost_sum = p.unreachable_penalty * (this->num_viewpoint - out.num_reachable) + out.miss_cost;
+	if (!out.all_reachable)
+		out.weighted_cost_sum -= p.manipulability_weight * out.manipulability_sum + p.softmin_manipulability_weight * out.softmin_manipulability;
 	return out;
 }
 
@@ -1076,8 +1084,8 @@ TourSolution ObjectPlacementOptimizer::AddPlannedTravel(const Position& at, Tour
 double ObjectPlacementOptimizer::ComputeWeightedCost(const TourSolution& sol) const
 {
 	const double travel = this->use_planned_travel_in_cost && sol.planned_cost >= 0.0 ? sol.planned_cost : 0.0;
-	return travel +
-		this->params.unreachable_penalty * (this->num_viewpoint - sol.num_reachable) + sol.miss_cost;
+	const double reach_phase_comfort = sol.all_reachable ? 0.0 : this->params.manipulability_weight * sol.manipulability_sum + this->params.softmin_manipulability_weight * sol.softmin_manipulability;
+	return travel + this->params.unreachable_penalty * (this->num_viewpoint - sol.num_reachable) + sol.miss_cost - reach_phase_comfort;
 }
 
 // More viewpoints reached wins; cost breaks ties. While either side misses one, planned travel is left out: it jumps
@@ -1122,26 +1130,26 @@ void ObjectPlacementOptimizer::RememberLastPoses(const TourSolution& sol)
 
 // Cost gradient w.r.t. the object position. Each pose follows its viewpoint as dq/dp = J^+ (the home pose doesn't
 // move); travel edges, comfort terms and miss gaps chain through that.
-// Slope of the manipulability jump's score (sum + jump_softmin_weight x soft-min of the tour poses' manipulability)
-// w.r.t. the object position, as the arm follows the viewpoints. Negated, like a cost gradient.
-Eigen::Vector3d ObjectPlacementOptimizer::ComputeManipulabilityGradient(const TourSolution& sol)
+// Slope of sum_weight x sum + softmin_weight x soft-min of the poses' manipulability w.r.t. the object position, as the
+// arm follows the viewpoints. Negated, like a cost gradient.
+Eigen::Vector3d ObjectPlacementOptimizer::ComputeManipulabilityGradient(const std::vector<Joints>& poses, double sum_weight, double softmin_weight)
 {
 	const double k = this->params.manipulability_limit_sharpness;
 	std::vector<double> ws;
 	std::vector<Eigen::Vector3d> dw;
 	Eigen::Vector3d g = Eigen::Vector3d::Zero();
-	for (const Joints& q : sol.ik_poses)
+	for (const Joints& q : poses)
 	{
 		const Eigen::MatrixXd dq_dp = scene_geometry::DampedPinv(manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, q), this->params.jacobian_damping).leftCols<3>();
 		ws.push_back(std::max(1e-6, manipulability::Value(this->robot_state, this->joint_group, this->tool_link, q, k)));
 		dw.push_back(dq_dp.transpose() * manipulability::Gradient(this->robot_state, this->joint_group, this->tool_link, q, k));
-		g -= dw.back();
+		g -= sum_weight * dw.back();
 	}
-	if (ws.empty())
+	if (ws.empty() || softmin_weight <= 0.0)
 		return g;
 	const std::vector<double> shares = manipulability::SoftMinShares(ws, this->params.softmin_tau);
 	for (size_t i = 0; i < shares.size(); ++i)
-		g -= this->params.jump_softmin_weight * shares[i] * dw[i];
+		g -= softmin_weight * shares[i] * dw[i];
 	return g;
 }
 
@@ -1154,6 +1162,15 @@ Eigen::Vector3d ObjectPlacementOptimizer::ComputeCostGradient(const TourSolution
 		dq[i] = dq_dp(sol.ik_poses[i]);
 
 	Eigen::Vector3d g = Eigen::Vector3d::Zero();
+	// While viewpoints are missed, manipulability of the tour poses and the misses' closest poses keeps the arm away from limits.
+	if (!sol.all_reachable)
+	{
+		std::vector<Joints> poses = sol.ik_poses;
+		for (const MissedViewpoint& m : sol.missed_viewpoints)
+			if (!m.closest_pose.empty())
+				poses.push_back(m.closest_pose);
+		g += this->ComputeManipulabilityGradient(poses, p.manipulability_weight, p.softmin_manipulability_weight);
+	}
 	// MissedViewpoint gaps: the viewpoint moves with the object; no slope past the cap.
 	for (const MissedViewpoint& m : sol.missed_viewpoints)
 	{
