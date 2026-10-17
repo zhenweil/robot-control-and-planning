@@ -1,8 +1,8 @@
-"""Per-robot settings shared by the launch files: robot:=panda (default) or robot:=kinova (Kinova Gen3 7-DOF)."""
+"""Per-robot settings shared by the launch files: robot:=panda (default), kinova (Kinova Gen3 7-DOF) or xarm7 (UFactory xArm7)."""
 from moveit_configs_utils import MoveItConfigsBuilder
 
-# home: the tour's start pose (overrides object_pose.yaml's initial_joints). The kinova home puts tool0 at the Panda
-# home's tool0 pose, so both robots start the tour from the same camera pose.
+# home: the tour's start pose (overrides object_pose.yaml's initial_joints). The other robots' homes put tool0 at the
+# Panda home's tool0 pose, so all robots start the tour from the same camera pose.
 ROBOTS = {
     "panda": {
         "name": "panda",
@@ -23,6 +23,16 @@ ROBOTS = {
         "group": "manipulator",
         "base_link": None,  # the URDF has its own world link
         "home": {"joint_1": -0.0394, "joint_2": -0.0876, "joint_3": -0.0461, "joint_4": 1.4027, "joint_5": 0.0037, "joint_6": 1.7371, "joint_7": -3.226},
+    },
+    "xarm7": {
+        "name": "xarm7",
+        "package": "xarm_arm_moveit",
+        "urdf": "urdf/xarm7.urdf",
+        "srdf": "config/xarm7.srdf",
+        "controllers": "config/moveit_controllers.yaml",
+        "group": "xarm7",
+        "base_link": "link_base",
+        "home": {"joint1": 0.0, "joint2": -0.5638, "joint3": 0.0, "joint4": 1.2697, "joint5": 0.0, "joint6": 1.744, "joint7": 0.0},
     },
 }
 

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- xarm_moveit_config's xarm7 SRDF (xarm_ros2, humble) without the gripper, with the chain ending at tool0, a virtual joint
+     fixing link_base to world (as panda.srdf), the home pose, and the camera's collision pairs. -->
+<robot name="xarm7">
+    <group name="xarm7">
+        <chain base_link="link_base" tip_link="tool0"/>
+    </group>
+    <!-- tool0 at the Panda home's tool0 pose (object_pose.yaml initial_joints). -->
+    <group_state name="home" group="xarm7">
+        <joint name="joint1" value="0"/>
+        <joint name="joint2" value="-0.5638"/>
+        <joint name="joint3" value="0"/>
+        <joint name="joint4" value="1.2697"/>
+        <joint name="joint5" value="0"/>
+        <joint name="joint6" value="1.744"/>
+        <joint name="joint7" value="0"/>
+    </group_state>
+    <virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="link_base"/>
+    <disable_collisions link1="link1" link2="link2" reason="Adjacent" />
+    <disable_collisions link1="link1" link2="link3" reason="Never" />
+    <disable_collisions link1="link1" link2="link4" reason="Never" />
+    <disable_collisions link1="link1" link2="link_base" reason="Adjacent" />
+    <disable_collisions link1="link2" link2="link3" reason="Adjacent" />
+    <disable_collisions link1="link2" link2="link_base" reason="Never" />
+    <disable_collisions link1="link3" link2="link4" reason="Adjacent" />
+    <disable_collisions link1="link3" link2="link5" reason="Never" />
+    <disable_collisions link1="link3" link2="link6" reason="Never" />
+    <disable_collisions link1="link3" link2="link7" reason="Never" />
+    <disable_collisions link1="link3" link2="link_base" reason="Never" />
+    <disable_collisions link1="link4" link2="link5" reason="Adjacent" />
+    <disable_collisions link1="link4" link2="link6" reason="Never" />
+    <disable_collisions link1="link4" link2="link7" reason="Never" />
+    <disable_collisions link1="link5" link2="link6" reason="Adjacent" />
+    <disable_collisions link1="link5" link2="link7" reason="Never" />
+    <disable_collisions link1="link6" link2="link7" reason="Adjacent" />
+    <disable_collisions link1="camera" link2="link7" reason="Adjacent"/>
+    <disable_collisions link1="camera" link2="link6" reason="Never"/>
+</robot>
