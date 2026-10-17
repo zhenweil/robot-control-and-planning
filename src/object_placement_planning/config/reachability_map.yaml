@@ -1,5 +1,5 @@
 # Reachability map settings. Build the map with: ros2 launch object_placement_planning reachability_map.launch.py
-# random_placement (weighted sampling) and reachability_climb load it, also reading this file, and only accept a map built
+# random_placement (weighted sampling) loads it, also reading this file, and only accepts a map built
 # with the same settings (and robot, group, tool link).
 /**:
   ros__parameters:

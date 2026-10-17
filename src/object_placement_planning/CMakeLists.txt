@@ -85,13 +85,6 @@ add_executable(build_reachability_map
 target_include_directories(build_reachability_map PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 ament_target_dependencies(build_reachability_map rclcpp moveit_ros_planning random_numbers)
 
-# Sanity check: climbs the saved reachability map from a start object position (no IK).
-add_executable(reachability_climb
-	src/reachability_map.cpp
-	src/viewpoint_io.cpp
-	src/reachability_climb.cpp
-	)
-
 # Viewpoints with no robot reachability check, for object_placement's tour_input_dir.
 add_executable(viewpoint_generator
 	src/mesh_utils.cpp
@@ -113,7 +106,7 @@ add_executable(random_placement
 	src/random_placement_node.cpp
 	)
 
-foreach(viewpoint_planner_target viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement reachability_climb viewpoint_generator)
+foreach(viewpoint_planner_target viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement viewpoint_generator)
 	target_include_directories(${viewpoint_planner_target} PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		)
@@ -152,7 +145,7 @@ install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement build_reachability_map reachability_climb viewpoint_generator
+install(TARGETS viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement build_reachability_map viewpoint_generator
 	DESTINATION lib/${PROJECT_NAME}
 	)
 
