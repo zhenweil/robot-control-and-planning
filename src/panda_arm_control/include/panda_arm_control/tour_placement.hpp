@@ -26,7 +26,6 @@ struct StepLimits
 	double joint_margin = 0.05;  // rad kept from each joint limit
 	double max_object_step = 0.02;  // m per axis
 	double max_self_motion = 0.3;  // rad along each pose's self-motion
-	Eigen::Vector3d free_axes = Eigen::Vector3d::Ones();  // 0 = that object axis is locked
 	std::vector<bool> frozen_poses;  // per pose: true = no self-motion (empty = none frozen)
 };
 

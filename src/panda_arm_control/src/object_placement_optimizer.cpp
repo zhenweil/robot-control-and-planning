@@ -1,22 +1,20 @@
-#include "panda_arm_control/object_placement_optimizer.hpp"
-
-#include <algorithm>
-#include <atomic>
 #include <cmath>
-#include <cstdio>
-#include <functional>
-#include <numeric>
+#include <atomic>
 #include <thread>
+#include <cstdio>
+#include <numeric>
+#include <algorithm>
+#include <functional>
 
-#include <visualization_msgs/msg/marker_array.hpp>
-
-#include "panda_arm_control/closest_ik.hpp"
 #include "panda_arm_control/gtsp.hpp"
+#include "panda_arm_control/closest_ik.hpp"
 #include "panda_arm_control/ik_sampling.hpp"
-#include "panda_arm_control/manipulability.hpp"
 #include "panda_arm_control/marker_utils.hpp"
-#include "panda_arm_control/real_cost_planning.hpp"
 #include "panda_arm_control/tour_placement.hpp"
+#include "panda_arm_control/manipulability.hpp"
+#include <visualization_msgs/msg/marker_array.hpp>
+#include "panda_arm_control/real_cost_planning.hpp"
+#include "panda_arm_control/object_placement_optimizer.hpp"
 
 namespace object_placement
 {
@@ -51,8 +49,7 @@ std::vector<Joints> GetIkStartPoses(const TourSolution& sol, const Joints& fallb
 	return seeds;
 }
 
-// Runs work(index, state, rng) for every index on all cores. Each thread has its own robot state; each index its own
-// RNG, seeded from base_seed and the index, so the result doesn't depend on which thread took it.
+// Take function and run in parallel
 void RunInParallel(const moveit::core::RobotState& state_template, size_t count, uint32_t base_seed, const std::function<void(size_t, moveit::core::RobotState&, random_numbers::RandomNumberGenerator&)>& work)
 {
 	std::atomic<size_t> next_index{0};
@@ -99,8 +96,10 @@ ObjectPlacementOptimizer::ObjectPlacementOptimizer(
 	  counted_joint_indices(joint_travel::AllJoints(static_cast<int>(home.size()) - 1))
 {
 	ik_sampling::ReseedRng(this->params.random_seed);
+
 	for (Eigen::Isometry3d& t : this->viewpoints)
 		t.translation() -= this->object_translation_nominal;
+
 	std::iota(this->input_order.begin(), this->input_order.end(), 0);
 	this->robot_state.setToDefaultValues();
 	this->joint_group = this->robot_state.getJointModelGroup(this->group_name);
@@ -119,7 +118,6 @@ ObjectPlacementOptimizer::ObjectPlacementOptimizer(
 ObjectPlacementResult ObjectPlacementOptimizer::Optimize()
 {
 	const Position start(this->params.initial_x, this->params.initial_y, this->params.initial_z);
-
 	const ReachAttemptResult best_result = this->ReachAllViewpoints(start); // Try to reach all viewpoints
 
 	const TourSolution& final_tour = best_result.tour_solution;
@@ -221,7 +219,7 @@ bool ObjectPlacementOptimizer::ResetAndSolveAtStart(const Position& start, int r
 
 	ik_sampling::ReseedRng(this->attempt_seed);
 	const std::vector<int>* start_lock = this->params.lock_input_order ? &this->input_order : nullptr;
-	TourSolution first = this->SampleIkAndSolveGtsp(this->current_position, this->params, this->ik_start_poses, warm ? &warm->viewpoint_order : nullptr, this->params.max_solutions_per_candidate, start_lock);
+	TourSolution first = this->EvaluateObjectPosition(this->current_position, this->params, this->ik_start_poses, warm ? &warm->viewpoint_order : nullptr, this->params.max_solutions_per_candidate, start_lock);
 	this->run_result.num_inner_solves += 1;
 	this->current_tour = this->RunGtspRestarts(this->current_position, std::move(first), this->params.gtsp_num_restart - 1, false, start_lock);
 	this->current_tour = this->AddPlannedTravelToCost(this->current_position, std::move(this->current_tour));
@@ -233,7 +231,6 @@ bool ObjectPlacementOptimizer::ResetAndSolveAtStart(const Position& start, int r
 		return false;
 	}
 	this->RecordHistoryAndBest(this->current_position, this->current_tour);
-	this->RememberLastPoses(this->current_tour);
 	this->PublishProgressMarkers(Eigen::Vector3d::Zero());
 	RCLCPP_INFO(
 		this->node->get_logger(), "reach attempt %d/%d start: reachable %d/%d", this->attempt_index + 1, std::max(1, this->params.descent_num_restart),
@@ -270,8 +267,7 @@ bool ObjectPlacementOptimizer::TryReachViewpoints(int iter)
 	this->ik_seconds = 0.0;
 	this->closest_ik_seconds = 0.0;
 	const Eigen::Vector3d g = this->ComputeCostGradient(this->current_tour, this->params);
-	const Eigen::Vector3d g_free = this->RemoveMotionOnLockedAxes(g);
-	const double gnorm = g_free.norm();
+	const double gnorm = g.norm();
 	if (gnorm < 1e-6)
 	{
 		RCLCPP_INFO(this->node->get_logger(), "  reach attempt %d: gradient ~ 0 -- converged", this->attempt_index + 1);
@@ -279,7 +275,7 @@ bool ObjectPlacementOptimizer::TryReachViewpoints(int iter)
 		return false;
 	}
 	this->PrepareReachViewpoints();
-	std::optional<MoveCandidate> step = this->LineSearch(-g_free / gnorm);
+	std::optional<MoveCandidate> step = this->LineSearch(-g / gnorm);
 	if (!step && this->params.room_then_reach && !this->quick_solve_tour.missed_viewpoints.empty())
 		step = this->TryKinematicRoomMove();
 	std::optional<TourSolution> committed;
@@ -302,10 +298,19 @@ bool ObjectPlacementOptimizer::TryReachViewpoints(int iter)
 // Where IK starts per viewpoint, whether the order is fixed, and the baseline quick solve a try must beat.
 void ObjectPlacementOptimizer::PrepareReachViewpoints()
 {
+	// Save each viewpoint's latest pose so its IK keeps starting from the same arm pose shape.
+	for (size_t k = 0; k < this->current_tour.viewpoint_order.size(); ++k)
+	{
+		const size_t viewpoint_index = static_cast<size_t>(this->current_tour.viewpoint_order[k]);
+		this->last_reached_poses[viewpoint_index] = this->current_tour.ik_poses[k];
+		this->last_closest_poses[viewpoint_index].clear();
+	}
 	this->ik_start_poses = GetIkStartPoses(this->current_tour, this->home_pose, this->num_viewpoint);
 	for (const MissedViewpoint& m : this->current_tour.missed_viewpoints)
 	{
 		const size_t v = static_cast<size_t>(m.viewpoint_index);
+		if (!m.closest_pose.empty())
+			this->last_closest_poses[v] = m.closest_pose;
 		if (!this->last_closest_poses[v].empty())
 			this->ik_start_poses[v] = this->last_closest_poses[v];
 		else if (!this->last_reached_poses[v].empty())
@@ -341,7 +346,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::LineSearch(const Eigen::V
 				step, cand.x(), cand.y(), cand.z(), probe.num_reachable, this->quick_solve_tour.num_reachable,
 				probe.weighted_cost_sum, this->quick_solve_tour.weighted_cost_sum, probe.manipulability_sum,
 				this->quick_solve_tour.manipulability_sum, probe.planned_cost, this->quick_solve_tour.planned_cost);
-		if (this->IsBetter(probe, this->quick_solve_tour))
+		if (this->HasMoreReachedOrLowerCost(probe, this->quick_solve_tour))
 			return MoveCandidate{cand, step, std::move(probe)};
 		step *= this->params.step_shrink;
 	}
@@ -527,12 +532,12 @@ std::optional<TourSolution> ObjectPlacementOptimizer::ConfirmImprovementWithFull
 {
 	const int num_restarts = step.tour_solution.all_reachable ? this->params.gtsp_num_restart - 1 : 0;  // the order hardly matters while viewpoints are missed
 	ik_sampling::ReseedRng(this->attempt_seed);
-	TourSolution first = this->SampleIkAndSolveGtsp(step.next_position, this->params, this->ik_start_poses, &step.tour_solution.viewpoint_order, this->params.max_solutions_per_candidate, this->fixed_order);
+	TourSolution first = this->EvaluateObjectPosition(step.next_position, this->params, this->ik_start_poses, &step.tour_solution.viewpoint_order, this->params.max_solutions_per_candidate, this->fixed_order);
 	this->run_result.num_inner_solves += 1;
 	TourSolution committed = this->AddPlannedTravelToCost(step.next_position, this->RunGtspRestarts(step.next_position, std::move(first), num_restarts, false, this->fixed_order));
-	if (this->IsBetter(step.tour_solution, committed))
+	if (this->HasMoreReachedOrLowerCost(step.tour_solution, committed))
 		committed = step.tour_solution;
-	const bool keep = this->IsBetter(committed, this->current_tour);
+	const bool keep = this->HasMoreReachedOrLowerCost(committed, this->current_tour);
 	if (this->params.trace_line_search)
 		RCLCPP_INFO(
 			this->node->get_logger(), "    full solve: reached %d vs %d current, cost %.2f vs %.2f current -> %s",
@@ -555,7 +560,6 @@ bool ObjectPlacementOptimizer::CommitMove(
 	this->move_history.push_back({MoveType::KinematicRoomMove, this->current_position, step.next_position});
 	this->current_position = step.next_position;
 	this->current_tour = std::move(committed);
-	this->RememberLastPoses(this->current_tour);
 	this->RecordHistoryAndBest(this->current_position, this->current_tour);
 	RCLCPP_INFO(
 		this->node->get_logger(), "reach attempt %d/%d kinematic move %d/%d: reachable %d/%d  (%.1f s: IK %.1f s, closest IK %.1f s)", this->attempt_index + 1,
@@ -607,12 +611,12 @@ Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, c
 	this->quick_solve_start_from_current_ik = true;
 	this->ik_start_poses = GetIkStartPoses(warm, this->home_pose, this->num_viewpoint);
 	ik_sampling::ReseedRng(this->attempt_seed);
-	this->current_tour = this->SolveMostManipulablePoses(this->current_position, p);
+	this->current_tour = this->FindMostManipulablePoses(this->current_position, p);
 	log_step(0, 0.0);
 	this->stall_count = 0;
 	for (int iter = 0; iter < this->params.jump_max_moves && rclcpp::ok(); ++iter)
 	{
-		const Eigen::Vector3d g = this->RemoveMotionOnLockedAxes(this->ComputeManipulabilityGradient(this->current_tour.ik_poses, 1.0, this->params.jump_softmin_weight));
+		const Eigen::Vector3d g = this->ComputeManipulabilityGradient(this->current_tour.ik_poses, 1.0, this->params.jump_softmin_weight);
 		if (g.norm() < 1e-9)
 			break;
 		this->ik_start_poses = GetIkStartPoses(this->current_tour, this->home_pose, this->num_viewpoint);
@@ -636,7 +640,7 @@ Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, c
 			break;
 		// Fresh IK at the new spot can find more manipulable poses than the tracked probe; keep the better.
 		ik_sampling::ReseedRng(this->attempt_seed);
-		TourSolution committed = this->SolveMostManipulablePoses(step->next_position, p);
+		TourSolution committed = this->FindMostManipulablePoses(step->next_position, p);
 		if (score(step->tour_solution) > score(committed))
 			committed = step->tour_solution;
 		if (score(committed) <= score(this->current_tour))
@@ -668,7 +672,7 @@ void ObjectPlacementOptimizer::LogGtspRestartsAtFirstReach()
 	this->logged_gtsp_restarts_at_first_reach = true;
 	TourSolution start = this->current_tour;
 	if (this->can_plan && start.planned_cost < 0.0)
-		start.planned_cost = this->ComputePlannedTravel(this->current_position, start);
+		start.planned_cost = this->ComputeRealPlannedTravelCost(this->current_position, start);
 	const std::vector<int>* lock = this->params.lock_input_order ? &this->input_order : this->params.freeze_order ? &start.viewpoint_order : nullptr;
 	const TourSolution restarted = this->RunGtspRestarts(this->current_position, start, this->params.gtsp_restarts_at_reach, true, lock);
 	RCLCPP_INFO(
@@ -687,7 +691,7 @@ void ObjectPlacementOptimizer::RestartGtsp()
 		return;
 	TourSolution start = this->best_in_attempt.tour_solution;
 	if (this->can_plan && start.planned_cost < 0.0)
-		start.planned_cost = this->ComputePlannedTravel(this->best_in_attempt.position, start);
+		start.planned_cost = this->ComputeRealPlannedTravelCost(this->best_in_attempt.position, start);
 	const std::vector<int>* lock = this->params.lock_input_order ? &this->input_order : this->params.freeze_order ? &start.viewpoint_order : nullptr;
 	this->best_in_attempt.tour_solution = this->RunGtspRestarts(this->best_in_attempt.position, start, this->params.gtsp_restarts, true, lock);
 	this->best_in_attempt.weighted_cost_sum = this->ComputeWeightedCost(this->best_in_attempt.tour_solution);
@@ -726,7 +730,6 @@ void ObjectPlacementOptimizer::OptimizeTourAndPlacement()
 		limits.joint_max.push_back(this->robot_model->getVariableBounds(name).max_position_);
 	}
 	limits.joint_margin = this->params.tour_placement_joint_margin;
-	limits.free_axes = this->RemoveMotionOnLockedAxes(Eigen::Vector3d::Ones());
 	limits.frozen_poses.assign(this->best_in_attempt.tour_solution.ik_poses.size(), false);
 	double object_step = this->params.tour_placement_object_step;
 	double self_motion_step = this->params.tour_placement_self_motion_step;
@@ -811,7 +814,7 @@ void ObjectPlacementOptimizer::OptimizeTourAndPlacement()
 	TourSolution optimized = this->best_in_attempt.tour_solution;
 	optimized.ik_poses = poses;
 	optimized.joint_distance_plus_turn = joint_travel::TravelCost(PrependHomePose(this->home_pose, poses), this->params.edge_weights, this->counted_joint_indices);
-	optimized.planned_cost = this->can_plan ? this->ComputePlannedTravel(position, optimized) : -1.0;
+	optimized.planned_cost = this->can_plan ? this->ComputeRealPlannedTravelCost(position, optimized) : -1.0;
 	optimized.weighted_cost_sum = this->ComputeWeightedCost(optimized);
 	const bool kept = optimized.weighted_cost_sum < this->best_in_attempt.weighted_cost_sum;
 	RCLCPP_INFO(this->node->get_logger(), "  tour-placement (%.1f s): planned travel %.2f -> %.2f rad%s", std::chrono::duration<double>(std::chrono::steady_clock::now() - tour_placement_start).count(), this->best_in_attempt.tour_solution.planned_cost, optimized.planned_cost, kept ? "" : "  -- not kept");
@@ -872,101 +875,104 @@ std::vector<std::vector<Joints>> ObjectPlacementOptimizer::CollectIkPoses(
 	return ik;
 }
 
-// The tour at `at`: IK solutions, closest poses for the misses, then the GTSP (or the fixed order), scored.
-TourSolution ObjectPlacementOptimizer::SampleIkAndSolveGtsp(
-	const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed_q,
-	const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order)
+// Collects IK poses for every viewpoint, then solves the GTSP over the reached ones (or follows the fixed order).
+TourSolution ObjectPlacementOptimizer::SampleIkAndSolveGtsp(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed_q, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order)
 {
-	std::vector<std::vector<Joints>> ik = this->CollectIkPoses(at, p, seed_q, max_solutions);
-	const double exact_gap = 1e-4;	// 0.1 mm: a closest pose this near counts as an IK solution
-	// A miss without a closest pose counts the largest gap, with no slope.
-	const scene_geometry::Vector6d capped_gap = scene_geometry::Vector6d::UnitX() * p.miss_gap_cap;
-	const Eigen::Isometry3d xform = scene_geometry::Translation(at);
-	const int num_found = static_cast<int>(std::count_if(ik.begin(), ik.end(), [](const auto& s) { return !s.empty(); }));
-	const bool skip_gaps = num_found < p.gaps_min_reached;	// rejected on count anyway
-	std::vector<size_t> misses;
-	for (size_t v = 0; v < ik.size(); ++v)
-		if (ik[v].empty())
-			misses.push_back(v);
-	// Closest pose per miss, in parallel. Starts: the nearest reached viewpoint's pose (often the right posture family),
-	// then its own seed; random starts only while no collision-free pose is under the cap (a capped gap has no slope).
-	std::vector<closest_ik::Result> closest_poses(misses.size());
-	if (!skip_gaps)
-	{
-		const auto closest_start = std::chrono::steady_clock::now();
-		const uint32_t base_seed = static_cast<uint32_t>(ik_sampling::SeededRng().uniformInteger(1, 1 << 30));
-		RunInParallel(this->robot_state, misses.size(), base_seed, [&](size_t i, moveit::core::RobotState& state, random_numbers::RandomNumberGenerator& rng)
-		{
-			const size_t v = misses[i];
-			const Eigen::Isometry3d target = xform * this->viewpoints[v];
-			Joints neighbor;
-			double neighbor_dist = std::numeric_limits<double>::max();
-			for (size_t u = 0; u < ik.size() && !p.tracking; ++u)
-			{
-				if (u == v || ik[u].empty())
-					continue;
-				const Eigen::Isometry3d other = xform * this->viewpoints[u];
-				const double d = (other.translation() - target.translation()).norm() + p.rot_metric_scale * Eigen::AngleAxisd(other.linear() * target.linear().transpose()).angle();
-				if (d < neighbor_dist)
-				{
-					neighbor_dist = d;
-					neighbor = ik[u].front();
-				}
-			}
-			const int fixed_starts = neighbor.empty() ? 1 : 2;
-			closest_ik::Result& closest = closest_poses[i];
-			for (int t = 0; t < std::max(fixed_starts, p.closest_ik_starts) && (t == 0 || !closest.found || closest.gap >= p.miss_gap_cap); ++t)
-			{
-				Joints start = seed_q[v];
-				if (t == 0 && fixed_starts == 2)
-					start = neighbor;
-				else if (t > 0 && !(t == 1 && fixed_starts == 2))
-				{
-					state.setToRandomPositions(this->joint_group, rng);
-					state.copyJointGroupPositions(this->joint_group, start);
-				}
-				const closest_ik::Result r = closest_ik::Solve(this->scene, state, this->joint_group, this->tool_link, target, start, p.closest_ik_iters, p.closest_ik_margin, p.rot_metric_scale, p.manipulability_limit_sharpness);
-				if (r.found && r.gap < closest.gap)
-					closest = r;
-			}
-		});
-		this->closest_ik_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - closest_start).count();
-	}
-	std::vector<MissedViewpoint> missed;
-	for (size_t i = 0; i < misses.size(); ++i)
-	{
-		const size_t v = misses[i];
-		const closest_ik::Result& closest = closest_poses[i];
-		if (skip_gaps)
-			missed.push_back({static_cast<int>(v), {}, capped_gap});
-		else if (closest.found && closest.gap < exact_gap)
-			ik[v].push_back(closest.q);  // IK just missed it
-		else
-			missed.push_back({static_cast<int>(v), closest.q, closest.found ? closest.pose_error : capped_gap});
-	}
-
-	const double k = p.manipulability_limit_sharpness;
-	gtsp::Solver tour_solver(std::move(ik), this->home_pose, p.edge_weights, p.gtsp_two_opt_rounds);
+	gtsp::Solver tour_solver(this->CollectIkPoses(at, p, seed_q, max_solutions), this->home_pose, p.edge_weights, p.gtsp_two_opt_rounds);
 	tour_solver.SetTravelJoints(this->counted_joint_indices);
-	gtsp::Tour tour = fixed_order ? tour_solver.SolveFixedOrder(*fixed_order)
-		: initial_order			  ? tour_solver.Solve(*initial_order)
-								  : tour_solver.Solve();
+	gtsp::Tour tour = fixed_order ? tour_solver.SolveFixedOrder(*fixed_order) : initial_order ? tour_solver.Solve(*initial_order) : tour_solver.Solve();
 	TourSolution out;
 	out.viewpoint_order = std::move(tour.order);
 	out.ik_poses = std::move(tour.poses);
 	out.num_reachable = static_cast<int>(out.viewpoint_order.size());
 	out.all_reachable = out.num_reachable == this->num_viewpoint;
-	out.joint_distance_plus_turn =
-		joint_travel::TravelCost(PrependHomePose(this->home_pose, out.ik_poses), p.edge_weights, this->counted_joint_indices);
+	out.joint_distance_plus_turn = joint_travel::TravelCost(PrependHomePose(this->home_pose, out.ik_poses), p.edge_weights, this->counted_joint_indices);
+	return out;
+}
+
+// Closest pose per missed viewpoint, in parallel. Starts: the nearest reached viewpoint's tour pose (often the right
+// posture family), then its own seed; random starts only while no collision-free pose is under the cap (a capped gap
+// has no slope).
+std::vector<MissedViewpoint> ObjectPlacementOptimizer::FindClosestPosesForMissedViewpoints(const Position& at, const ObjectPlacementParams& p, const TourSolution& tour, const std::vector<Joints>& seed_q)
+{
+	// A miss without a closest pose counts the largest gap, with no slope.
+	const scene_geometry::Vector6d capped_gap = scene_geometry::Vector6d::UnitX() * p.miss_gap_cap;
+	std::vector<bool> reached(this->viewpoints.size(), false);
+	for (const int viewpoint_index : tour.viewpoint_order)
+		reached[static_cast<size_t>(viewpoint_index)] = true;
+	std::vector<size_t> misses;
+	for (size_t v = 0; v < reached.size(); ++v)
+		if (!reached[v])
+			misses.push_back(v);
+	std::vector<MissedViewpoint> missed;
+	if (tour.num_reachable < p.gaps_min_reached)  // rejected on count anyway
+	{
+		for (const size_t v : misses)
+			missed.push_back({static_cast<int>(v), {}, capped_gap});
+		return missed;
+	}
+
+	const Eigen::Isometry3d xform = scene_geometry::Translation(at);
+	std::vector<closest_ik::Result> closest_poses(misses.size());
+	const auto closest_start = std::chrono::steady_clock::now();
+	const uint32_t base_seed = static_cast<uint32_t>(ik_sampling::SeededRng().uniformInteger(1, 1 << 30));
+	RunInParallel(this->robot_state, misses.size(), base_seed, [&](size_t i, moveit::core::RobotState& state, random_numbers::RandomNumberGenerator& rng)
+	{
+		const size_t v = misses[i];
+		const Eigen::Isometry3d target = xform * this->viewpoints[v];
+		Joints neighbor;
+		double neighbor_dist = std::numeric_limits<double>::max();
+		for (size_t k = 0; k < tour.viewpoint_order.size() && !p.tracking; ++k)
+		{
+			const Eigen::Isometry3d other = xform * this->viewpoints[static_cast<size_t>(tour.viewpoint_order[k])];
+			const double d = (other.translation() - target.translation()).norm() + p.rot_metric_scale * Eigen::AngleAxisd(other.linear() * target.linear().transpose()).angle();
+			if (d < neighbor_dist)
+			{
+				neighbor_dist = d;
+				neighbor = tour.ik_poses[k];
+			}
+		}
+		const int fixed_starts = neighbor.empty() ? 1 : 2;
+		closest_ik::Result& closest = closest_poses[i];
+		for (int t = 0; t < std::max(fixed_starts, p.closest_ik_starts) && (t == 0 || !closest.found || closest.gap >= p.miss_gap_cap); ++t)
+		{
+			Joints start = seed_q[v];
+			if (t == 0 && fixed_starts == 2)
+				start = neighbor;
+			else if (t > 0 && !(t == 1 && fixed_starts == 2))
+			{
+				state.setToRandomPositions(this->joint_group, rng);
+				state.copyJointGroupPositions(this->joint_group, start);
+			}
+			const closest_ik::Result r = closest_ik::Solve(this->scene, state, this->joint_group, this->tool_link, target, start, p.closest_ik_iters, p.closest_ik_margin, p.rot_metric_scale, p.manipulability_limit_sharpness);
+			if (r.found && r.gap < closest.gap)
+				closest = r;
+		}
+	});
+	this->closest_ik_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - closest_start).count();
+	for (size_t i = 0; i < misses.size(); ++i)
+	{
+		const closest_ik::Result& closest = closest_poses[i];
+		missed.push_back({static_cast<int>(misses[i]), closest.q, closest.found ? closest.pose_error : capped_gap});
+	}
+	return missed;
+}
+
+// The tour at `at`: IK and GTSP, closest poses for the missed viewpoints, then the score.
+TourSolution ObjectPlacementOptimizer::EvaluateObjectPosition(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed_q, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order)
+{
+	TourSolution out = this->SampleIkAndSolveGtsp(at, p, seed_q, initial_order, max_solutions, fixed_order);
+	out.missed_viewpoints = this->FindClosestPosesForMissedViewpoints(at, p, out, seed_q);
 
 	// Manipulability of the tour poses and the misses' closest poses: in the cost only while viewpoints are missed.
+	const double k = p.manipulability_limit_sharpness;
 	std::vector<double> ws;
 	for (const Joints& q : out.ik_poses)
 	{
 		ws.push_back(manipulability::Value(this->robot_state, this->joint_group, this->tool_link, q, k));
 		out.manipulability_sum += ws.back();
 	}
-	for (const MissedViewpoint& m : missed)
+	for (const MissedViewpoint& m : out.missed_viewpoints)
 		if (!m.closest_pose.empty())
 		{
 			ws.push_back(manipulability::Value(this->robot_state, this->joint_group, this->tool_link, m.closest_pose, k));
@@ -974,7 +980,6 @@ TourSolution ObjectPlacementOptimizer::SampleIkAndSolveGtsp(
 		}
 	out.softmin_manipulability = manipulability::SoftMin(ws, p.softmin_tau);
 
-	out.missed_viewpoints = std::move(missed);
 	for (const MissedViewpoint& m : out.missed_viewpoints)
 		out.miss_gap_sum += std::min(p.miss_gap_cap, scene_geometry::PoseGap(m.pose_error, p.rot_metric_scale));
 	out.miss_cost = p.miss_gap_weight * out.miss_gap_sum;
@@ -986,7 +991,7 @@ TourSolution ObjectPlacementOptimizer::SampleIkAndSolveGtsp(
 
 // For the manipulability jump: fresh IK poses per viewpoint, keeping each one's most manipulable pose. No GTSP: the jump
 // score ignores the viewpoint order and travel. Viewpoints in input order.
-TourSolution ObjectPlacementOptimizer::SolveMostManipulablePoses(const Position& at, const ObjectPlacementParams& p)
+TourSolution ObjectPlacementOptimizer::FindMostManipulablePoses(const Position& at, const ObjectPlacementParams& p)
 {
 	const std::vector<std::vector<Joints>> ik_poses = this->CollectIkPoses(at, p, this->ik_start_poses, p.max_solutions_per_candidate);
 	TourSolution out;
@@ -1023,11 +1028,11 @@ TourSolution ObjectPlacementOptimizer::QuickSolveTour(const Position& at, Object
 {
 	ik_sampling::ReseedRng(this->attempt_seed);
 	if (!this->quick_solve_start_from_current_ik)
-		return this->SampleIkAndSolveGtsp(
+		return this->EvaluateObjectPosition(
 			at, p, this->ik_start_poses, &this->current_tour.viewpoint_order, this->params.max_solutions_per_candidate,
 			this->fixed_order);
 	p.tracking = true;
-	return this->SampleIkAndSolveGtsp(at, p, this->ik_start_poses, &this->current_tour.viewpoint_order, 1, &this->locked_order);
+	return this->EvaluateObjectPosition(at, p, this->ik_start_poses, &this->current_tour.viewpoint_order, 1, &this->locked_order);
 }
 
 // More full solves at a fixed spot; keeps the lowest cost, never fewer viewpoints reached. Warm start: IK starts and
@@ -1035,14 +1040,14 @@ TourSolution ObjectPlacementOptimizer::QuickSolveTour(const Position& at, Object
 TourSolution ObjectPlacementOptimizer::RunGtspRestarts(const Position& at, TourSolution best_sol, int num_restarts, bool warm_start, const std::vector<int>* fixed_order)
 {
 	if (warm_start && this->can_plan && best_sol.planned_cost < 0.0)
-		best_sol.planned_cost = this->ComputePlannedTravel(at, best_sol);
+		best_sol.planned_cost = this->ComputeRealPlannedTravelCost(at, best_sol);
 	best_sol.weighted_cost_sum = this->ComputeWeightedCost(best_sol);
 	if (warm_start)
 		RCLCPP_INFO(this->node->get_logger(), "  GTSP restarts start: reachable %d/%d, joint dist + largest turn %.2f, planned travel %.2f rad", best_sol.num_reachable, this->num_viewpoint, best_sol.joint_distance_plus_turn, best_sol.planned_cost);
 	for (int i = 0; i < num_restarts && rclcpp::ok(); ++i)
 	{
 		const std::vector<Joints> ik_starts = warm_start ? GetIkStartPoses(best_sol, this->home_pose, this->num_viewpoint) : this->ik_start_poses;
-		TourSolution s = this->SampleIkAndSolveGtsp(at, this->params, ik_starts, &best_sol.viewpoint_order, warm_start ? this->params.gtsp_restart_ik_solutions : this->params.max_solutions_per_candidate, fixed_order);
+		TourSolution s = this->EvaluateObjectPosition(at, this->params, ik_starts, &best_sol.viewpoint_order, warm_start ? this->params.gtsp_restart_ik_solutions : this->params.max_solutions_per_candidate, fixed_order);
 		this->run_result.num_inner_solves += 1;
 		if (s.num_reachable < best_sol.num_reachable)
 		{
@@ -1051,7 +1056,7 @@ TourSolution ObjectPlacementOptimizer::RunGtspRestarts(const Position& at, TourS
 			continue;
 		}
 		if (warm_start && this->can_plan)
-			s.planned_cost = this->ComputePlannedTravel(at, s);
+			s.planned_cost = this->ComputeRealPlannedTravelCost(at, s);
 		s.weighted_cost_sum = this->ComputeWeightedCost(s);
 		const bool better = s.weighted_cost_sum < best_sol.weighted_cost_sum;
 		if (warm_start)
@@ -1064,7 +1069,7 @@ TourSolution ObjectPlacementOptimizer::RunGtspRestarts(const Position& at, TourS
 
 // Planned joint travel: every edge planned with OMPL. A failed edge counts its straight-line distance plus
 // unreachable_penalty.
-double ObjectPlacementOptimizer::ComputePlannedTravel(const Position& at, const TourSolution& sol)
+double ObjectPlacementOptimizer::ComputeRealPlannedTravelCost(const Position& at, const TourSolution& sol)
 {
 	scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
 	const std::vector<double> edges = PlanTourJointPathLengths(
@@ -1086,7 +1091,7 @@ TourSolution ObjectPlacementOptimizer::AddPlannedTravelToCost(const Position& at
 {
 	if (!this->use_planned_travel_in_cost || !sol.all_reachable || sol.planned_cost >= 0.0)
 		return sol;
-	sol.planned_cost = this->ComputePlannedTravel(at, sol);
+	sol.planned_cost = this->ComputeRealPlannedTravelCost(at, sol);
 	sol.weighted_cost_sum += sol.planned_cost;
 	return sol;
 }
@@ -1098,14 +1103,10 @@ double ObjectPlacementOptimizer::ComputeWeightedCost(const TourSolution& sol) co
 	return travel + this->params.unreachable_penalty * (this->num_viewpoint - sol.num_reachable) + sol.miss_cost - reach_phase_comfort;
 }
 
-// More viewpoints reached wins; cost breaks ties. While either side misses one, planned travel is left out: it jumps
-// when an arm pose switches family, and the gradient doesn't see it.
-bool ObjectPlacementOptimizer::IsBetter(const TourSolution& a, const TourSolution& b) const
+// Better if reached more viewpoints or cost is lower
+bool ObjectPlacementOptimizer::HasMoreReachedOrLowerCost(const TourSolution& a, const TourSolution& b) const
 {
-	const bool reach_phase = !a.all_reachable || !b.all_reachable;
-	auto cost = [&](const TourSolution& s)
-	{ return reach_phase && s.planned_cost >= 0.0 ? s.weighted_cost_sum - s.planned_cost : s.weighted_cost_sum; };
-	return a.num_reachable > b.num_reachable || (a.num_reachable == b.num_reachable && cost(a) < cost(b));
+	return a.num_reachable > b.num_reachable || (a.num_reachable == b.num_reachable && a.weighted_cost_sum < b.weighted_cost_sum);
 }
 
 // History entry, and the descent's best (most viewpoints reached, then cost).
@@ -1126,22 +1127,7 @@ void ObjectPlacementOptimizer::RecordHistoryAndBest(const Position& at, const To
 	}
 }
 
-void ObjectPlacementOptimizer::RememberLastPoses(const TourSolution& sol)
-{
-	for (size_t k = 0; k < sol.viewpoint_order.size(); ++k)
-	{
-		this->last_reached_poses[static_cast<size_t>(sol.viewpoint_order[k])] = sol.ik_poses[k];
-		this->last_closest_poses[static_cast<size_t>(sol.viewpoint_order[k])].clear();
-	}
-	for (const MissedViewpoint& m : sol.missed_viewpoints)
-		if (!m.closest_pose.empty())
-			this->last_closest_poses[static_cast<size_t>(m.viewpoint_index)] = m.closest_pose;
-}
-
-// Cost gradient w.r.t. the object position. Each pose follows its viewpoint as dq/dp = J^+ (the home pose doesn't
-// move); travel edges, comfort terms and miss gaps chain through that.
-// Slope of sum_weight x sum + softmin_weight x soft-min of the poses' manipulability w.r.t. the object position, as the
-// arm follows the viewpoints. Negated, like a cost gradient.
+// Move towards higher manipulability
 Eigen::Vector3d ObjectPlacementOptimizer::ComputeManipulabilityGradient(const std::vector<Joints>& poses, double sum_weight, double softmin_weight)
 {
 	const double k = this->params.manipulability_limit_sharpness;
@@ -1185,26 +1171,8 @@ Eigen::Vector3d ObjectPlacementOptimizer::ComputeCostGradient(const TourSolution
 	return g;
 }
 
-// ---------------------------------------------------------------------------------------------
-// Room-then-reach
-// ---------------------------------------------------------------------------------------------
-
-// Locked axes (min == max) get no share of a step.
-Eigen::Vector3d ObjectPlacementOptimizer::RemoveMotionOnLockedAxes(Eigen::Vector3d v) const
-{
-	const ObjectPlacementBounds& b = this->params.bounds;
-	if (b.x_min == b.x_max)
-		v(0) = 0.0;
-	if (b.y_min == b.y_max)
-		v(1) = 0.0;
-	if (b.z_min == b.z_max)
-		v(2) = 0.0;
-	return v;
-}
-
-// Unit direction that shrinks the target's position gap (zero if none). first: the full solve's gap if nearer.
-Eigen::Vector3d ObjectPlacementOptimizer::GetMoveDirectionToCloseGap(
-	int target, const TourSolution& here_at, bool first)
+// Move object towards closet IK for missed viewpoints
+Eigen::Vector3d ObjectPlacementOptimizer::GetMoveDirectionToCloseGap(int target, const TourSolution& here_at, bool first)
 {
 	auto gap_of = [&](const TourSolution& s) -> const scene_geometry::Vector6d* {
 		for (const MissedViewpoint& m : s.missed_viewpoints)
@@ -1220,10 +1188,11 @@ Eigen::Vector3d ObjectPlacementOptimizer::GetMoveDirectionToCloseGap(
 		scene_geometry::PoseGap(*full, this->params.rot_metric_scale) <
 			scene_geometry::PoseGap(*gap, this->params.rot_metric_scale))
 		gap = full;
-	const Eigen::Vector3d aim = -this->RemoveMotionOnLockedAxes(gap->head<3>());
+	const Eigen::Vector3d aim = -gap->head<3>();
 	return aim.norm() < 1e-9 ? Eigen::Vector3d::Zero() : Eigen::Vector3d(aim.normalized());
 }
 
+// Model stores IK pose, dq_dp, and each pose's margins
 room_margins::ArmModel ObjectPlacementOptimizer::BuildRoomMarginArmModel(const Position& at, const TourSolution& sol)
 {
 	scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
@@ -1244,8 +1213,8 @@ room_margins::ArmModel ObjectPlacementOptimizer::BuildRoomMarginArmModel(const P
 	return model;
 }
 
-// Viewpoint v's margins at pose q (object already placed): joint limits, stretch, collision pairs within
-// 10 cm; slopes with the arm following the viewpoint.
+// 1) Distance of each joint to its limit 2) Smallest singular value (stretch) 3) Distance to collision object
+// A 7-joint IK has 14 joint limit margin, 1 stretch margin, and a variable number of collision margins
 std::vector<room_margins::Margin> ObjectPlacementOptimizer::GetIkPoseMargins(int v, const Joints& q)
 {
 	const double kJointFloor = 0.05;	 // rad
@@ -1259,13 +1228,11 @@ std::vector<room_margins::Margin> ObjectPlacementOptimizer::GetIkPoseMargins(int
 	auto add = [&](const std::string& name, double value, double floor, const Eigen::VectorXd& joint_slope,
 				   const Eigen::Vector3d& direct)
 	{
-		margins.push_back(
-			{v, name, value, floor, this->RemoveMotionOnLockedAxes(dq_dp.transpose() * joint_slope + direct), joint_slope});
+		margins.push_back({v, name, value, floor, dq_dp.transpose() * joint_slope + direct, joint_slope});
 	};
 	for (int i = 0; i < dof; ++i)
 	{
-		const moveit::core::VariableBounds& b =
-			this->robot_model->getVariableBounds(this->joint_group->getVariableNames()[static_cast<size_t>(i)]);
+		const moveit::core::VariableBounds& b = this->robot_model->getVariableBounds(this->joint_group->getVariableNames()[static_cast<size_t>(i)]);
 		if (!b.position_bounded_)
 			continue;
 		const Eigen::VectorXd e = Eigen::VectorXd::Unit(dof, i);
@@ -1288,23 +1255,19 @@ std::vector<room_margins::Margin> ObjectPlacementOptimizer::GetIkPoseMargins(int
 	auto stretch = [this](const Joints& x) {
 		return Eigen::JacobiSVD<Eigen::MatrixXd>(manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, x)).singularValues().minCoeff();
 	};
-	add("stretch", stretch(q), kStretchFloor, slope_of(stretch),
-		Eigen::Vector3d::Zero());
+	add("stretch", stretch(q), kStretchFloor, slope_of(stretch), Eigen::Vector3d::Zero());
 	this->robot_state.setJointGroupPositions(this->joint_group, q);
 	this->robot_state.update();
 	collision_detection::DistanceRequest req = closest_ik::CloseRequest(this->robot_state, this->joint_group, kWindow);
-	const closest_ik::ClosePairs pairs =
-		closest_ik::FindClosePairs(this->scene, this->robot_state, this->joint_group, req, kWindow);
+	const closest_ik::ClosePairs pairs = closest_ik::FindClosePairs(this->scene, this->robot_state, this->joint_group, req, kWindow);
+
 	for (size_t i = 0; i < pairs.dists.size(); ++i)
-		add("collision " + pairs.names[i], pairs.dists[i], kCollisionFloor, pairs.gradients[i].transpose(),
-			pairs.object_slopes[i]);
+		add("collision " + pairs.names[i], pairs.dists[i], kCollisionFloor, pairs.gradients[i].transpose(), pairs.object_slopes[i]);
+
 	return margins;
 }
 
-// What ran out for viewpoint v, lost by moving the object by d from `at`: its margins that, by their slopes, run out
-// within the move.
-room_margins::Shortage ObjectPlacementOptimizer::GetMarginsThatRunOut(
-	int v, const room_margins::ArmModel& model, const Position& at, const Eigen::Vector3d& d)
+room_margins::Shortage ObjectPlacementOptimizer::GetMarginsThatRunOut(int v, const room_margins::ArmModel& model, const Position& at, const Eigen::Vector3d& d)
 {
 	const Eigen::Vector3d moved = ClampToBounds(at + d, this->params.bounds) - at;
 	room_margins::Shortage out;
@@ -1319,11 +1282,8 @@ room_margins::Shortage ObjectPlacementOptimizer::GetMarginsThatRunOut(
 	return out;
 }
 
-// Viewpoint v's roomier IK solution at `at`, if it is near a limit: `tries` candidates, half from random starts, half
-// sliding its pose along its self-motion (camera fixed) toward more room on its tightest margin. The best, if its
-// tightest margin beats the current one by at least one floor.
-std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(
-	int v, const Position& at, const room_margins::ArmModel& model, int tries)
+// Find another IKs for one viewpoint with more joint room
+std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(int v, const Position& at, const room_margins::ArmModel& model, int tries)
 {
 	const int resamples = tries / 2;
 	const int nudges = tries - resamples;
@@ -1343,8 +1303,7 @@ std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(
 			raise = m.joint_slope;
 		}
 	scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
-	const geometry_msgs::msg::Pose target =
-		scene_geometry::ToPoseMsg(scene_geometry::Translation(at) * this->viewpoints[static_cast<size_t>(v)]);
+	const geometry_msgs::msg::Pose target = scene_geometry::ToPoseMsg(scene_geometry::Translation(at) * this->viewpoints[static_cast<size_t>(v)]);
 	double best_score = now + 1.0;
 	std::optional<Joints> roomiest;
 	std::string how;
@@ -1367,11 +1326,9 @@ std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(
 		this->robot_state.copyJointGroupPositions(this->joint_group, q);
 		consider(q, "resampled");
 	}
-	const Joints& q0 = model.q[static_cast<size_t>(v)];
+	const Joints& q0 = model.q[static_cast<size_t>(v)]; 
 	const Eigen::MatrixXd J = manipulability::ToolJacobian(this->robot_state, this->joint_group, this->tool_link, q0);
-	const Eigen::VectorXd slide = (Eigen::MatrixXd::Identity(J.cols(), J.cols()) -
-								   scene_geometry::DampedPinv(J, this->params.jacobian_damping) * J) *
-		raise;
+	const Eigen::VectorXd slide = (Eigen::MatrixXd::Identity(J.cols(), J.cols()) - scene_geometry::DampedPinv(J, this->params.jacobian_damping) * J) * raise;
 	for (int i = 0; i < nudges && slide.norm() > 1e-9; ++i)
 	{
 		Joints q = q0;
@@ -1396,7 +1353,7 @@ std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Logging and progress markers
+// Logging and Visualization
 // ---------------------------------------------------------------------------------------------
 
 // Live markers: object mesh, every move so far (orange kinematic, white jump, cyan reachability), -gradient arrow, viewpoints (green reached, red missed), and
@@ -1415,8 +1372,7 @@ void ObjectPlacementOptimizer::PublishProgressMarkers(const Eigen::Vector3d& neg
 
 	if (!this->params.progress_mesh_path.empty())
 	{
-		visualization_msgs::msg::Marker mesh =
-			marker_utils::MakeMarker("object_placement_current", visualization_msgs::msg::Marker::MESH_RESOURCE, stamp);
+		visualization_msgs::msg::Marker mesh = marker_utils::MakeMarker("object_placement_current", visualization_msgs::msg::Marker::MESH_RESOURCE, stamp);
 		mesh.mesh_resource = "file://" + this->params.progress_mesh_path;
 		mesh.mesh_use_embedded_materials = false;
 		mesh.pose = scene_geometry::ToPoseMsg(xform * this->object_pose);
@@ -1425,8 +1381,7 @@ void ObjectPlacementOptimizer::PublishProgressMarkers(const Eigen::Vector3d& neg
 		markers.markers.push_back(mesh);
 	}
 
-	visualization_msgs::msg::Marker vps =
-		marker_utils::MakeMarker("object_placement_viewpoints", visualization_msgs::msg::Marker::SPHERE_LIST, stamp);
+	visualization_msgs::msg::Marker vps = marker_utils::MakeMarker("object_placement_viewpoints", visualization_msgs::msg::Marker::SPHERE_LIST, stamp);
 	vps.scale.x = vps.scale.y = vps.scale.z = 0.01;
 	for (size_t v = 0; v < this->viewpoints.size(); ++v)
 	{
@@ -1434,18 +1389,15 @@ void ObjectPlacementOptimizer::PublishProgressMarkers(const Eigen::Vector3d& neg
 			this->current_tour.missed_viewpoints.begin(), this->current_tour.missed_viewpoints.end(),
 			[&](const MissedViewpoint& m) { return m.viewpoint_index == static_cast<int>(v); });
 		vps.points.push_back(scene_geometry::ToPoint((xform * this->viewpoints[v]).translation()));
-		vps.colors.push_back(
-			missed ? marker_utils::Rgba(0.9f, 0.1f, 0.1f, 1.0f) : marker_utils::Rgba(0.1f, 0.9f, 0.1f, 1.0f));
+		vps.colors.push_back(missed ? marker_utils::Rgba(0.9f, 0.1f, 0.1f, 1.0f) : marker_utils::Rgba(0.1f, 0.9f, 0.1f, 1.0f));
 	}
 	markers.markers.push_back(vps);
 
 	if (!this->move_history.empty())
 	{
-		visualization_msgs::msg::Marker lines =
-			marker_utils::MakeMarker("object_placement_trail", visualization_msgs::msg::Marker::LINE_LIST, stamp);
+		visualization_msgs::msg::Marker lines = marker_utils::MakeMarker("object_placement_trail", visualization_msgs::msg::Marker::LINE_LIST, stamp);
 		lines.scale.x = 0.004;
-		visualization_msgs::msg::Marker crumbs =
-			marker_utils::MakeMarker("object_placement_history", visualization_msgs::msg::Marker::SPHERE_LIST, stamp);
+		visualization_msgs::msg::Marker crumbs = marker_utils::MakeMarker("object_placement_history", visualization_msgs::msg::Marker::SPHERE_LIST, stamp);
 		crumbs.scale.x = crumbs.scale.y = crumbs.scale.z = 0.012;
 		for (const MoveSegment& m : this->move_history)
 		{
@@ -1465,8 +1417,7 @@ void ObjectPlacementOptimizer::PublishProgressMarkers(const Eigen::Vector3d& neg
 	const double gnorm = neg_grad.norm();
 	if (gnorm > 1e-9)
 	{
-		visualization_msgs::msg::Marker arrow =
-			marker_utils::MakeMarker("object_placement_descent_dir", visualization_msgs::msg::Marker::ARROW, stamp);
+		visualization_msgs::msg::Marker arrow = marker_utils::MakeMarker("object_placement_descent_dir", visualization_msgs::msg::Marker::ARROW, stamp);
 		arrow.scale.x = 0.006;
 		arrow.scale.y = 0.014;
 		arrow.color = marker_utils::Rgba(0.1f, 0.5f, 1.0f, 0.95f);
@@ -1474,8 +1425,7 @@ void ObjectPlacementOptimizer::PublishProgressMarkers(const Eigen::Vector3d& neg
 		markers.markers.push_back(arrow);
 	}
 
-	visualization_msgs::msg::Marker gaps =
-		marker_utils::MakeMarker("object_placement_miss_gap", visualization_msgs::msg::Marker::LINE_LIST, stamp);
+	visualization_msgs::msg::Marker gaps = marker_utils::MakeMarker("object_placement_miss_gap", visualization_msgs::msg::Marker::LINE_LIST, stamp);
 	gaps.scale.x = 0.003;
 	gaps.color = marker_utils::Rgba(1.0f, 0.2f, 1.0f, 1.0f);
 	visualization_msgs::msg::MarkerArray arms;
@@ -1486,15 +1436,13 @@ void ObjectPlacementOptimizer::PublishProgressMarkers(const Eigen::Vector3d& neg
 			continue;
 		ghost.setJointGroupPositions(this->joint_group, m.closest_pose);
 		ghost.update();
-		ghost.getRobotMarkers(
-			arms, ghost.getRobotModel()->getLinkModelNamesWithCollisionGeometry(), marker_utils::Rgba(0.9f, 0.2f, 0.2f, 0.35f),
-			"object_placement_miss_ik", rclcpp::Duration(0, 0));
+		ghost.getRobotMarkers(arms, ghost.getRobotModel()->getLinkModelNamesWithCollisionGeometry(), marker_utils::Rgba(0.9f, 0.2f, 0.2f, 0.35f), "object_placement_miss_ik", rclcpp::Duration(0, 0));
 		gaps.points.push_back(scene_geometry::ToPoint(ghost.getGlobalLinkTransform("tool0").translation()));
-		gaps.points.push_back(
-			scene_geometry::ToPoint((xform * this->viewpoints[static_cast<size_t>(m.viewpoint_index)]).translation()));
+		gaps.points.push_back(scene_geometry::ToPoint((xform * this->viewpoints[static_cast<size_t>(m.viewpoint_index)]).translation()));
 	}
 	if (!gaps.points.empty())
 		markers.markers.push_back(gaps);
+		
 	for (visualization_msgs::msg::Marker& m : arms.markers)
 	{
 		m.header.frame_id = "world";

@@ -73,7 +73,7 @@ Step SolveStep(const Joints& start_pose, const std::vector<LinearizedPose>& pose
 	for (int v = 0; v < num_variables; ++v)
 	{
 		const bool frozen = v >= 3 && static_cast<size_t>(v - 3) < limits.frozen_poses.size() && limits.frozen_poses[static_cast<size_t>(v - 3)];
-		const double bound = v < 3 ? limits.max_object_step * limits.free_axes(v) : frozen ? 0.0 : limits.max_self_motion;
+		const double bound = v < 3 ? limits.max_object_step : frozen ? 0.0 : limits.max_self_motion;
 		triplets.emplace_back(static_cast<int>(lower.size()), v, 1.0);
 		lower.push_back(-bound);
 		upper.push_back(bound);

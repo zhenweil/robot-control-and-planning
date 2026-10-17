@@ -121,24 +121,24 @@ private:
 
 	// --- Solving and scoring ---
 	TourSolution QuickSolveTour(const Position& at, ObjectPlacementParams p);
-	TourSolution SolveMostManipulablePoses(const Position& at, const ObjectPlacementParams& p);
+	TourSolution FindMostManipulablePoses(const Position& at, const ObjectPlacementParams& p);
 	TourSolution RunGtspRestarts(const Position& at, TourSolution best_sol, int num_restarts, bool warm_start, const std::vector<int>* fixed_order);
 	std::vector<std::vector<Joints>> CollectIkPoses(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, int max_solutions);
+	std::vector<MissedViewpoint> FindClosestPosesForMissedViewpoints(const Position& at, const ObjectPlacementParams& p, const TourSolution& tour, const std::vector<Joints>& seed_q);
+	TourSolution EvaluateObjectPosition(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
 	TourSolution SampleIkAndSolveGtsp(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
 
 	// Compute gradient
 	Eigen::Vector3d ComputeCostGradient(const TourSolution& sol, const ObjectPlacementParams& p); // Cost=closest_IK_gap + manipulability. Used for closest IK move
 	Eigen::Vector3d ComputeManipulabilityGradient(const std::vector<Joints>& poses, double sum_weight, double softmin_weight);
 
-	void RememberLastPoses(const TourSolution& sol);
 	double ComputeWeightedCost(const TourSolution& sol) const;
-	bool IsBetter(const TourSolution& a, const TourSolution& b) const;
 	void RecordHistoryAndBest(const Position& at, const TourSolution& sol);
-	double ComputePlannedTravel(const Position& at, const TourSolution& sol);
 	TourSolution AddPlannedTravelToCost(const Position& at, TourSolution sol);
+	double ComputeRealPlannedTravelCost(const Position& at, const TourSolution& sol);
+	bool HasMoreReachedOrLowerCost(const TourSolution& a, const TourSolution& b) const;
 
 	// --- Room-then-reach ---
-	Eigen::Vector3d RemoveMotionOnLockedAxes(Eigen::Vector3d v) const;
 	std::vector<room_margins::Margin> GetIkPoseMargins(int v, const Joints& q);
 	room_margins::ArmModel BuildRoomMarginArmModel(const Position& at, const TourSolution& sol);
 	Eigen::Vector3d GetMoveDirectionToCloseGap(int target, const TourSolution& here_at, bool first);
