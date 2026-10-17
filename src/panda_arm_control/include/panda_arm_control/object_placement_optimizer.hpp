@@ -140,6 +140,7 @@ private:
 	TourSolution RefineTour(const Position& at, TourSolution best_sol, int num_solves);
 	std::vector<std::vector<Joints>> CollectIkPoses(
 		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed, int max_solutions);
+	TourSolution SolveMostManipulablePoses(const Position& at, const BaseGradientParams& p);
 	TourSolution SolveTourBestOf(
 		const Position& at, const BaseGradientParams& p, const std::vector<int>* initial_order,
 		const std::vector<int>* fixed_order);

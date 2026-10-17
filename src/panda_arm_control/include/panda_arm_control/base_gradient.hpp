@@ -67,6 +67,7 @@ struct BaseGradientParams
 	int descent_num_restart = 3;
 	// Before each restart: climb the reached viewpoints' manipulability (sum + this x soft-min) from the stuck spot.
 	double jump_softmin_weight = 100.0;
+	int jump_max_moves = 10;  // moves per manipulability jump
 	// Outer loop on a reachability map (reachability_map.hpp; build it first with reachability_map.launch.py): once every
 	// viewpoint is reached, step up the soft-min over all viewpoints of how well the arm reaches their position and
 	// approach direction (no IK), solve again from there, keep the lower cost. The map settings below must match the ones
@@ -81,7 +82,7 @@ struct BaseGradientParams
 	double reach_map_tau = 0.05;  // soft-min temperature (map values are 0..1)
 	double reach_map_limit_sharpness = 20.0;  // map samples count by their joint-limit room; 0 = all count 1
 	int reach_map_seed = 42;
-	int max_kinematic_moves = 20;  // per reach attempt (also caps the manipulability jump's climb)
+	int max_kinematic_moves = 20;  // per reach attempt
 	double initial_step = 0.02;
 	double step_shrink = 0.25;
 	int max_line_search_iters = 4;

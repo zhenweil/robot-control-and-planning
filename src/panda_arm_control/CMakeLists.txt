@@ -114,17 +114,28 @@ add_executable(reachability_climb
 	src/reachability_climb.cpp
 	)
 
+# Viewpoints with no robot reachability check, for base_gradient's tour_input_dir.
+add_executable(viewpoint_generator
+	src/mesh_utils.cpp
+	src/potential_field_sampler.cpp
+	src/real_cost_planning.cpp
+	src/viewpoint_io.cpp
+	src/viewpoint_generation.cpp
+	src/viewpoint_generator_node.cpp
+	)
+
 # Random-sampling placement baseline (separate from base_gradient).
 add_executable(random_placement
 	src/gtsp.cpp
 	src/ik_sampling.cpp
 	src/joint_travel.cpp
+	src/reachability_map.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
 	src/random_placement_node.cpp
 	)
 
-foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement reachability_climb)
+foreach(viewpoint_planner_target viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement reachability_climb viewpoint_generator)
 	target_include_directories(${viewpoint_planner_target} PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		)
@@ -163,7 +174,7 @@ install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement build_reachability_map reachability_climb
+install(TARGETS panda_arm_control viewpoint_planner_rkga viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement base_gradient random_placement build_reachability_map reachability_climb viewpoint_generator
 	DESTINATION lib/${PROJECT_NAME}
 	)
 

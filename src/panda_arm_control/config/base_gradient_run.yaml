@@ -4,9 +4,9 @@
 /**:
   ros__parameters:
     # Start position and bounds
-    bg_initial_x: 0.2
+    bg_initial_x: 0.4
     bg_initial_y: 0.0
-    bg_initial_z: 0.0
+    bg_initial_z: 0.55
     bg_x_min: -0.6
     bg_x_max: 0.6
     bg_y_min: -0.6
@@ -17,6 +17,7 @@
     # Descent
     bg_descent_num_restart: 3                # descents; each restart first jumps up the reached viewpoints' manipulability
     bg_jump_softmin_weight: 100.0            # jump score: sum of manipulability + this x soft-min
+    bg_jump_max_moves: 10                    # moves per manipulability jump
     bg_reach_outer_iterations: 5             # after all reached + refined: steps up the reachability map, each re-solved; 0 = off
     bg_reach_outer_step: 0.1                 # m, halved when a step does not lower the cost
     bg_stop_when_all_reached: false

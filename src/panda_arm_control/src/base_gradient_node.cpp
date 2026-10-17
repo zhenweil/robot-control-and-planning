@@ -66,6 +66,7 @@ struct Params
 	int bg_gtsp_num_restart = 2;  // min-of-N inner solves wherever a committed cost matters
 
 	double bg_jump_softmin_weight = 100.0;
+	int bg_jump_max_moves = 10;
 	int bg_reach_outer_iterations = 0;
 	double bg_reach_outer_step = 0.1;
 	std::string bg_reach_map_file;
@@ -280,6 +281,7 @@ private:
 		this->declareIfNeeded("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->declareIfNeeded("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
 		this->declareIfNeeded("bg_jump_softmin_weight", this->params.bg_jump_softmin_weight);
+		this->declareIfNeeded("bg_jump_max_moves", this->params.bg_jump_max_moves);
 		this->declareIfNeeded("bg_reach_outer_iterations", this->params.bg_reach_outer_iterations);
 		this->declareIfNeeded("bg_reach_outer_step", this->params.bg_reach_outer_step);
 		this->declareIfNeeded("bg_reach_map_file", this->params.bg_reach_map_file);
@@ -365,6 +367,7 @@ private:
 		this->get_parameter("bg_gtsp_num_restart", this->params.bg_gtsp_num_restart);
 		this->get_parameter("bg_gtsp_two_opt_rounds", this->params.bg_gtsp_two_opt_rounds);
 		this->get_parameter("bg_jump_softmin_weight", this->params.bg_jump_softmin_weight);
+		this->get_parameter("bg_jump_max_moves", this->params.bg_jump_max_moves);
 		this->get_parameter("bg_reach_outer_iterations", this->params.bg_reach_outer_iterations);
 		this->get_parameter("bg_reach_outer_step", this->params.bg_reach_outer_step);
 		this->get_parameter("bg_reach_map_file", this->params.bg_reach_map_file);
@@ -474,6 +477,7 @@ private:
 		bg.gtsp_num_restart = this->params.bg_gtsp_num_restart;
 		bg.gtsp_two_opt_rounds = this->params.bg_gtsp_two_opt_rounds;
 		bg.jump_softmin_weight = this->params.bg_jump_softmin_weight;
+		bg.jump_max_moves = this->params.bg_jump_max_moves;
 		bg.reach_outer_iterations = this->params.bg_reach_outer_iterations;
 		bg.reach_outer_step = this->params.bg_reach_outer_step;
 		bg.reach_map_file = this->params.bg_reach_map_file;

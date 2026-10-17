@@ -1,12 +1,13 @@
-// Random-sampling baseline for object placement: draws object positions uniformly in a box until the time / sample
-// budget runs out. At each, the tour is solved like base_gradient (IK poses, GTSP, OMPL-planned travel); keeps the one
-// reaching the most viewpoints, then the least planned travel, and refines it. Own node, shares only the tour modules.
+// Random-sampling baseline for object placement: draws object positions in a box (uniformly, or weighted by the robot-only
+// reachability score) until the time / sample budget runs out. At each, the tour is solved like base_gradient (IK poses,
+// GTSP, OMPL-planned travel); keeps the one reaching the most viewpoints, then the least planned travel, and refines it.
 
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <optional>
 #include <random>
 #include <string>
 #include <thread>
@@ -27,6 +28,7 @@
 #include "panda_arm_control/gtsp.hpp"
 #include "panda_arm_control/ik_sampling.hpp"
 #include "panda_arm_control/joint_travel.hpp"
+#include "panda_arm_control/reachability_map.hpp"
 #include "panda_arm_control/real_cost_planning.hpp"
 #include "panda_arm_control/viewpoint_io.hpp"
 
@@ -44,6 +46,57 @@ struct PlacementTour
 	std::vector<Joints> ik_poses;  // parallel to viewpoint_order
 	double planned_travel = std::numeric_limits<double>::infinity();
 };
+
+// Robot-only reachability score on a grid over the sampling box: per point, the share of approach directions the tool
+// reaches, averaged over a ball of ball_radius (about the object's size). No viewpoints involved.
+struct ReachabilityGrid
+{
+	Eigen::Vector3d lo = Eigen::Vector3d::Zero();
+	double spacing = 0.04;  // m
+	Eigen::Array3i dims = Eigen::Array3i::Zero();
+	std::vector<double> scores;  // [x][y][z]
+};
+
+ReachabilityGrid ComputeReachabilityGrid(const ReachabilityMap& map, const Eigen::Vector3d& lo, const Eigen::Vector3d& hi, double spacing, double ball_radius)
+{
+	ReachabilityGrid grid;
+	grid.lo = lo;
+	grid.spacing = spacing;
+	grid.dims = (((hi - lo) / spacing).array().floor() + 1.0).cast<int>();
+	auto get_index = [&](int x, int y, int z) { return (static_cast<size_t>(x) * grid.dims.y() + static_cast<size_t>(y)) * grid.dims.z() + static_cast<size_t>(z); };
+	std::vector<double> dexterity(static_cast<size_t>(grid.dims.prod()), 0.0);
+	for (int x = 0; x < grid.dims.x(); ++x)
+		for (int y = 0; y < grid.dims.y(); ++y)
+			for (int z = 0; z < grid.dims.z(); ++z)
+			{
+				const Eigen::Vector3d point = lo + spacing * Eigen::Vector3d(x, y, z);
+				int num_reached = 0;
+				for (size_t bin = 0; bin < map.NumDirections(); ++bin)
+					num_reached += map.Value(static_cast<int>(bin), point).value > 0.0 ? 1 : 0;
+				dexterity[get_index(x, y, z)] = static_cast<double>(num_reached) / static_cast<double>(map.NumDirections());
+			}
+	const int ball_cells = static_cast<int>(std::floor(ball_radius / spacing));
+	grid.scores.assign(dexterity.size(), 0.0);
+	for (int x = 0; x < grid.dims.x(); ++x)
+		for (int y = 0; y < grid.dims.y(); ++y)
+			for (int z = 0; z < grid.dims.z(); ++z)
+			{
+				double sum = 0.0;
+				int count = 0;
+				for (int dx = -ball_cells; dx <= ball_cells; ++dx)
+					for (int dy = -ball_cells; dy <= ball_cells; ++dy)
+						for (int dz = -ball_cells; dz <= ball_cells; ++dz)
+						{
+							const Eigen::Array3i cell(x + dx, y + dy, z + dz);
+							if (dx * dx + dy * dy + dz * dz > ball_cells * ball_cells || (cell < 0).any() || (cell >= grid.dims).any())
+								continue;
+							sum += dexterity[get_index(cell.x(), cell.y(), cell.z())];
+							++count;
+						}
+				grid.scores[get_index(x, y, z)] = sum / count;
+			}
+	return grid;
+}
 
 geometry_msgs::msg::Pose ToPoseMsg(const Eigen::Isometry3d& t)
 {
@@ -124,6 +177,9 @@ public:
 		const int seed = static_cast<int>(param<int64_t>("random_seed", 42));
 		const double time_budget = param<double>("rp_time_budget_sec", 90.0);
 		const int max_samples = static_cast<int>(param<int64_t>("rp_max_samples", 0));  // 0 = no limit
+		// true: positions drawn in proportion to the robot-only reachability score (needs the reachability map); false: uniform.
+		const bool weighted_by_reachability = param<bool>("rp_weighted_by_reachability", false);
+		const double reachability_ball_radius = param<double>("rp_reachability_ball_radius", 0.1);  // m, about the object's size
 
 		if (mesh_path.empty())
 			mesh_path = ament_index_cpp::get_package_share_directory("panda_arm_control") + "/meshes/bunny_holding_eggs.stl";
@@ -242,8 +298,46 @@ public:
 				(a.num_reachable == b.num_reachable && a.planned_travel < b.planned_travel);
 		};
 
+		// Weighted sampling: score grid from the reachability map (same file and settings as base_gradient's), computed before the clock starts.
+		ReachabilityGrid reachability_grid;
+		std::discrete_distribution<size_t> pick_grid_point;
+		if (weighted_by_reachability)
+		{
+			ReachabilityMap::Options map_options;
+			map_options.samples = static_cast<int>(param<int64_t>("bg_reach_map_samples", map_options.samples));
+			map_options.self_collision = param<bool>("bg_reach_map_self_collision", map_options.self_collision);
+			map_options.voxel = param<double>("bg_reach_map_voxel", map_options.voxel);
+			map_options.directions = static_cast<int>(param<int64_t>("bg_reach_map_directions", map_options.directions));
+			map_options.limit_sharpness = param<double>("bg_reach_map_limit_sharpness", map_options.limit_sharpness);
+			map_options.seed = static_cast<int>(param<int64_t>("bg_reach_map_seed", map_options.seed));
+			std::string map_path = param<std::string>("bg_reach_map_file", "");
+			if (map_path.empty())
+				map_path = ReachabilityMap::DefaultPath(group_name);
+			const std::optional<ReachabilityMap> reachability_map = ReachabilityMap::Load(map_path, model, group_name, "tool0", map_options);
+			if (!reachability_map)
+			{
+				RCLCPP_ERROR(get_logger(), "no reachability map built with these settings at %s (ros2 launch panda_arm_control reachability_map.launch.py)", map_path.c_str());
+				return;
+			}
+			const auto grid_start = std::chrono::steady_clock::now();
+			reachability_grid = ComputeReachabilityGrid(*reachability_map, lo, hi, map_options.voxel, reachability_ball_radius);
+			pick_grid_point = std::discrete_distribution<size_t>(reachability_grid.scores.begin(), reachability_grid.scores.end());
+			RCLCPP_INFO(get_logger(), "sampling weighted by robot-only reachability: %d grid points, ball radius %.2f m, grid computed in %.1f s (not counted in the budget)", reachability_grid.dims.prod(), reachability_ball_radius, std::chrono::duration<double>(std::chrono::steady_clock::now() - grid_start).count());
+		}
+
 		std::mt19937 rng(static_cast<unsigned int>(seed));
 		std::uniform_real_distribution<double> ux(lo.x(), hi.x()), uy(lo.y(), hi.y()), uz(lo.z(), hi.z());
+		std::uniform_real_distribution<double> jitter(-0.5 * reachability_grid.spacing, 0.5 * reachability_grid.spacing);
+		// Weighted: a grid point by score, then a uniform point in its cell. Uniform: anywhere in the box.
+		auto draw_position = [&]() -> Eigen::Vector3d
+		{
+			if (!weighted_by_reachability)
+				return Eigen::Vector3d(ux(rng), uy(rng), uz(rng));
+			const size_t index = pick_grid_point(rng);
+			const Eigen::Vector3d cell(static_cast<double>(index / static_cast<size_t>(reachability_grid.dims.y() * reachability_grid.dims.z())), static_cast<double>((index / static_cast<size_t>(reachability_grid.dims.z())) % static_cast<size_t>(reachability_grid.dims.y())), static_cast<double>(index % static_cast<size_t>(reachability_grid.dims.z())));
+			const Eigen::Vector3d offset(jitter(rng), jitter(rng), jitter(rng));
+			return (reachability_grid.lo + reachability_grid.spacing * cell + offset).cwiseMax(lo).cwiseMin(hi);
+		};
 		const auto t0 = std::chrono::steady_clock::now();
 		auto elapsed = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };
 		const std::vector<Joints> home_seeds(tour.size(), home);
@@ -252,7 +346,7 @@ public:
 		int samples = 0, samples_reaching_all = 0;
 		while (rclcpp::ok() && elapsed() < time_budget && (max_samples <= 0 || samples < max_samples))
 		{
-			const Eigen::Vector3d at(ux(rng), uy(rng), uz(rng));
+			const Eigen::Vector3d at = draw_position();
 			ik_sampling::ReseedRng(seed + samples);
 			const PlacementTour sample_tour = solve_tour(at, home_seeds, max_ik_solutions, num_tour_solves, {});
 			++samples;

@@ -134,8 +134,7 @@ BaseGradientResult ObjectPlacementOptimizer::Optimize()
 	this->run_result.total_weighted_cost = final_tour.weighted_cost_sum - this->params.unreachable_penalty * (this->num_viewpoint - final_tour.num_reachable);
 	for (size_t k = 0; k < final_tour.ik_poses.size(); ++k)
 		this->run_result.total_joint_path_length += joint_travel::JointDistance(k == 0 ? this->home_pose : final_tour.ik_poses[k - 1], final_tour.ik_poses[k], this->counted_joint_indices);
-	
-		this->run_result.num_reachable = final_tour.num_reachable;
+	this->run_result.num_reachable = final_tour.num_reachable;
 	this->run_result.ok = best_result.all_reachable;
 
 	scene_geometry::MoveObject(
@@ -662,6 +661,7 @@ Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, c
 	p.travel_gradient = false;
 	p.miss_gap_weight = 0.0;
 	p.gaps_min_reached = std::numeric_limits<int>::max();
+	p.max_solutions_per_candidate = 2;  // fewer IK poses per viewpoint: the jump only needs a manipulable one
 	auto score = [&](const TourSolution& s)
 	{ return s.manipulability_sum + p.softmin_manipulability_weight * s.softmin_manipulability; };
 	auto log_step = [&](int iter, double step)
@@ -681,10 +681,10 @@ Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, c
 	this->track_current_poses = true;
 	this->ik_start_poses = GetIkStartPoses(warm, this->home_pose, this->num_viewpoint);
 	ik_sampling::ReseedRng(this->attempt_seed);
-	this->current_tour = this->SolveTourBestOf(this->current_position, p, &warm.viewpoint_order, nullptr);
+	this->current_tour = this->SolveMostManipulablePoses(this->current_position, p);
 	log_step(0, 0.0);
 	this->stall_count = 0;
-	for (int iter = 0; iter < this->params.max_kinematic_moves && rclcpp::ok(); ++iter)
+	for (int iter = 0; iter < this->params.jump_max_moves && rclcpp::ok(); ++iter)
 	{
 		const Eigen::Vector3d g = this->RemoveMotionOnLockedAxes(this->ComputeCostGradient(this->current_tour, p));
 		if (g.norm() < 1e-9)
@@ -708,8 +708,9 @@ Position ObjectPlacementOptimizer::RunManipulabilityJump(const Position& from, c
 		}
 		if (!step)
 			break;
+		// Fresh IK at the new spot can find more manipulable poses than the tracked probe; keep the better.
 		ik_sampling::ReseedRng(this->attempt_seed);
-		TourSolution committed = this->SolveTourBestOf(step->next_position, p, &step->tour_solution.viewpoint_order, nullptr);
+		TourSolution committed = this->SolveMostManipulablePoses(step->next_position, p);
 		if (score(step->tour_solution) > score(committed))
 			committed = step->tour_solution;
 		if (score(committed) <= score(this->current_tour))
@@ -951,6 +952,40 @@ TourSolution ObjectPlacementOptimizer::SolveTour(
 	out.weighted_cost_sum = -p.manipulability_weight * out.manipulability_sum -
 		p.softmin_manipulability_weight * out.softmin_manipulability +
 		p.unreachable_penalty * (this->num_viewpoint - out.num_reachable) + out.miss_cost;
+	return out;
+}
+
+// For the manipulability jump: fresh IK poses per viewpoint, keeping each one's most manipulable pose. No GTSP: the jump
+// score ignores the viewpoint order and travel. Viewpoints in input order.
+TourSolution ObjectPlacementOptimizer::SolveMostManipulablePoses(const Position& at, const BaseGradientParams& p)
+{
+	const std::vector<std::vector<Joints>> ik_poses = this->CollectIkPoses(at, p, this->ik_start_poses, p.max_solutions_per_candidate);
+	TourSolution out;
+	std::vector<double> manipulabilities;
+	for (int v = 0; v < this->num_viewpoint; ++v)
+	{
+		double best_manipulability = -std::numeric_limits<double>::infinity();
+		const Joints* best_pose = nullptr;
+		for (const Joints& q : ik_poses[static_cast<size_t>(v)])
+		{
+			const double manipulability = manipulability::Value(this->robot_state, this->joint_group, this->tool_link, q, p.manipulability_limit_sharpness);
+			if (manipulability > best_manipulability)
+			{
+				best_manipulability = manipulability;
+				best_pose = &q;
+			}
+		}
+		if (!best_pose)
+			continue;
+		out.viewpoint_order.push_back(v);
+		out.ik_poses.push_back(*best_pose);
+		manipulabilities.push_back(best_manipulability);
+		out.manipulability_sum += best_manipulability;
+	}
+	out.num_reachable = static_cast<int>(out.viewpoint_order.size());
+	out.all_reachable = out.num_reachable == this->num_viewpoint;
+	if (p.softmin_manipulability_weight > 0.0)
+		out.softmin_manipulability = manipulability::SoftMin(manipulabilities, p.softmin_tau);
 	return out;
 }
 
