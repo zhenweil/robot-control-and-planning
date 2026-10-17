@@ -47,7 +47,7 @@ struct TourSolution
 	double planned_cost = -1.0; // OMPL-planned joint travel; -1 = not planned
 	double weighted_cost_sum = 0.0;
 	double manipulability_sum = 0.0;
-	double straight_line_travel = 0.0;	
+	double joint_distance_plus_turn = 0.0;  // GTSP edge cost sum: joint distance + largest single-joint turn per edge	
 	double softmin_manipulability = 0.0;
 
 	int num_reachable = 0;

@@ -194,10 +194,10 @@ ReachAttemptResult ObjectPlacementOptimizer::ReachAllViewpoints(const Position& 
 			 d.weighted_cost_sum < best_attempt.weighted_cost_sum);
 		RCLCPP_INFO(
 			this->node->get_logger(),
-			"reach attempt %d/%d done: total cost=%.4f  travel+miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, "
+			"reach attempt %d/%d done: total cost=%.4f  joint dist + largest turn + miss=%.2f  sum_w=%.3f  reachable %d/%d  abs (%.4f, "
 			"%.4f, %.4f) m%s",
 			r + 1, num_tries, d.weighted_cost_sum,
-			d.tour_solution.straight_line_travel +
+			d.tour_solution.joint_distance_plus_turn +
 				this->params.unreachable_penalty * (this->num_viewpoint - d.tour_solution.num_reachable),
 			d.tour_solution.manipulability_sum, d.tour_solution.num_reachable, this->num_viewpoint, d.position.x(),
 			d.position.y(), d.position.z(), (r > 0 && improved) ? "  <-- new best" : "");
@@ -741,10 +741,10 @@ void ObjectPlacementOptimizer::LogRefineAtFirstReach()
 	const TourSolution refined = this->RefineTour(this->current_position, start, this->params.refine_at_reach);
 	RCLCPP_INFO(
 		this->node->get_logger(),
-		"  reach attempt %d: refined %d solves at first all-reached abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  "
-		"real %.2f -> %.2f",
+		"  reach attempt %d: refined %d solves at first all-reached abs (%.4f, %.4f, %.4f) m: joint dist + largest turn %.2f -> %.2f  "
+		"planned travel %.2f -> %.2f",
 		this->attempt_index + 1, this->params.refine_at_reach, this->current_position.x(), this->current_position.y(),
-		this->current_position.z(), start.straight_line_travel, refined.straight_line_travel, start.planned_cost,
+		this->current_position.z(), start.joint_distance_plus_turn, refined.joint_distance_plus_turn, start.planned_cost,
 		refined.planned_cost);
 }
 
@@ -783,12 +783,12 @@ void ObjectPlacementOptimizer::RefineBestTour()
 		reordered += (k >= start.viewpoint_order.size() || start.viewpoint_order[k] != s.viewpoint_order[k]) ? 1 : 0;
 	RCLCPP_INFO(
 		this->node->get_logger(),
-		"  reach attempt %d: refined %d solves at final abs (%.4f, %.4f, %.4f) m: travel %.2f -> %.2f  real %.2f -> "
+		"  reach attempt %d: refined %d solves at final abs (%.4f, %.4f, %.4f) m: joint dist + largest turn %.2f -> %.2f  planned travel %.2f -> "
 		"%.2f  "
 		"order changed at %d/%zu positions  reconfigurations %d -> %d:%s",
 		this->attempt_index + 1, this->params.refine_solves, this->best_in_attempt.position.x(),
-		this->best_in_attempt.position.y(), this->best_in_attempt.position.z(), start.straight_line_travel,
-		s.straight_line_travel, start.planned_cost, s.planned_cost, reordered, s.viewpoint_order.size(),
+		this->best_in_attempt.position.y(), this->best_in_attempt.position.z(), start.joint_distance_plus_turn,
+		s.joint_distance_plus_turn, start.planned_cost, s.planned_cost, reordered, s.viewpoint_order.size(),
 		joint_travel::CountReconfigs(
 			PrependHomePose(this->home_pose, start.ik_poses), this->params.reconfig_threshold, this->counted_joint_indices),
 		joint_travel::CountReconfigs(
@@ -919,7 +919,7 @@ TourSolution ObjectPlacementOptimizer::SolveTour(
 	out.ik_poses = std::move(tour.poses);
 	out.num_reachable = static_cast<int>(out.viewpoint_order.size());
 	out.all_reachable = out.num_reachable == this->num_viewpoint;
-	out.straight_line_travel =
+	out.joint_distance_plus_turn =
 		joint_travel::TravelCost(PrependHomePose(this->home_pose, out.ik_poses), p.edge_weights, this->counted_joint_indices);
 
 	// Manipulability of the tour poses and the misses' closest poses: in the cost only while viewpoints are missed.
@@ -1026,7 +1026,7 @@ TourSolution ObjectPlacementOptimizer::RefineTour(const Position& at, TourSoluti
 	if (this->can_plan && best_sol.planned_cost < 0.0)
 		best_sol.planned_cost = this->ComputePlannedTravel(at, best_sol);
 	best_sol.weighted_cost_sum = this->ComputeWeightedCost(best_sol);
-	RCLCPP_INFO(this->node->get_logger(), "  refine start: reachable %d/%d, straight-line travel %.2f, planned travel %.2f rad", best_sol.num_reachable, this->num_viewpoint, best_sol.straight_line_travel, best_sol.planned_cost);
+	RCLCPP_INFO(this->node->get_logger(), "  refine start: reachable %d/%d, joint dist + largest turn %.2f, planned travel %.2f rad", best_sol.num_reachable, this->num_viewpoint, best_sol.joint_distance_plus_turn, best_sol.planned_cost);
 	for (int i = 0; i < num_solves && rclcpp::ok(); ++i)
 	{
 		const std::vector<int>* lock = this->params.lock_input_order ? &this->input_order
@@ -1045,7 +1045,7 @@ TourSolution ObjectPlacementOptimizer::RefineTour(const Position& at, TourSoluti
 			s.planned_cost = this->ComputePlannedTravel(at, s);
 		s.weighted_cost_sum = this->ComputeWeightedCost(s);
 		const bool better = s.weighted_cost_sum < best_sol.weighted_cost_sum;
-		RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: straight-line travel %.2f, planned travel %.2f rad vs %.2f best%s", i + 1, num_solves, s.straight_line_travel, s.planned_cost, best_sol.planned_cost, better ? "  <-- new best" : "");
+		RCLCPP_INFO(this->node->get_logger(), "  refine solve %d/%d: joint dist + largest turn %.2f, planned travel %.2f rad vs %.2f best%s", i + 1, num_solves, s.joint_distance_plus_turn, s.planned_cost, best_sol.planned_cost, better ? "  <-- new best" : "");
 		if (better)
 			best_sol = std::move(s);
 	}
