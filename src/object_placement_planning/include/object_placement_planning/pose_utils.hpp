@@ -5,8 +5,7 @@
 #include <Eigen/Geometry>
 #include <geometry_msgs/msg/pose.hpp>
 
-// Port of camera_rotation_from_view_dir() from
-// src/path_planning_py/path_planning_py/read_viewpoint_and_publish.py
+// Port of camera_rotation_from_view_dir() from the removed path_planning_py package (read_viewpoint_and_publish.py).
 //
 // Camera local +Z axis points along view_dir_world.
 inline Eigen::Matrix3d CameraRotationFromViewDir(
