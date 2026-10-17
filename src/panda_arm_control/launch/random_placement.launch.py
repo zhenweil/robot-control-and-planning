@@ -19,7 +19,7 @@ def generate_launch_description():
         DeclareLaunchArgument("random_seed", default_value="42", description="Seeds the sampler and the IK restarts."),
         DeclareLaunchArgument("time_budget_sec", default_value="90.0", description="Stop after this many seconds."),
         DeclareLaunchArgument("max_samples", default_value="0", description="Stop after this many samples (0 = no limit)."),
-        DeclareLaunchArgument("stop_when_all_reached", default_value="false", description="Refine the first position reaching every viewpoint, then stop."),
+        DeclareLaunchArgument("stop_when_all_reached", default_value="false", description="GTSP restarts at the first position reaching every viewpoint, then stop."),
         DeclareLaunchArgument("weighted_by_reachability", default_value="false", description="Sample in proportion to the robot-only reachability score (needs the reachability map)."),
         DeclareLaunchArgument("output_dir", default_value="/tmp/random_placement_output"),
         DeclareLaunchArgument("tour_input_dir", default_value="/tmp/viewpoint_planner_output"),

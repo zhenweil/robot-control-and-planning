@@ -1,6 +1,6 @@
 // Random-sampling baseline for object placement: draws object positions in a box (uniformly, or weighted by the robot-only
 // reachability score) until the time / sample budget runs out. At each, the tour is solved like base_gradient (IK poses,
-// GTSP, OMPL-planned travel); keeps the one reaching the most viewpoints, then the least planned travel, and refines it.
+// GTSP, OMPL-planned travel); keeps the one reaching the most viewpoints, then the least planned travel, and runs GTSP restarts there.
 
 #include <algorithm>
 #include <chrono>
@@ -183,7 +183,7 @@ public:
 		// true: positions drawn in proportion to the robot-only reachability score (needs the reachability map); false: uniform.
 		const bool weighted_by_reachability = param<bool>("rp_weighted_by_reachability", false);
 		const double reachability_ball_radius = param<double>("rp_reachability_ball_radius", 0.1);  // m, about the object's size
-		const bool stop_when_all_reached = param<bool>("rp_stop_when_all_reached", false);  // true: refine the first position reaching all, then stop
+		const bool stop_when_all_reached = param<bool>("rp_stop_when_all_reached", false);  // true: GTSP restarts at the first position reaching all, then stop
 
 		if (mesh_path.empty())
 			mesh_path = ament_index_cpp::get_package_share_directory("panda_arm_control") + "/meshes/bunny_holding_eggs.stl";
@@ -212,8 +212,8 @@ public:
 		const int ik_retries_per_point = static_cast<int>(param<int64_t>("bg_ik_retries_per_point", 14));
 		const int num_tour_solves = std::max(1, static_cast<int>(param<int64_t>("bg_gtsp_num_restart", 2)));
 		const int two_opt_rounds = static_cast<int>(param<int64_t>("bg_gtsp_two_opt_rounds", 5));
-		const int refine_solves = static_cast<int>(param<int64_t>("bg_refine_solves", 0));
-		const int refine_ik_solutions = static_cast<int>(param<int64_t>("bg_refine_ik_solutions", 8));
+		const int gtsp_restarts = static_cast<int>(param<int64_t>("bg_gtsp_restarts", 0));
+		const int gtsp_restart_ik_solutions = static_cast<int>(param<int64_t>("bg_gtsp_restart_ik_solutions", 8));
 		const double planning_time = param<double>("bg_real_cost_planning_time", 0.5);
 		const int planning_attempts = static_cast<int>(param<int64_t>("bg_real_cost_attempts", 3));
 		const double unreachable_penalty = param<double>("bg_unreachable_penalty", 50.0);
@@ -366,20 +366,20 @@ public:
 		const double sampling_secs = elapsed();
 		RCLCPP_INFO(get_logger(), "%d samples in %.1f s, %d reach all viewpoints", samples, sampling_secs, samples_reaching_all);
 
-		// Refine the best like base_gradient: more full solves there, seeded from its poses, with more IK choices.
-		const double travel_before_refine = best.planned_travel;
-		for (int i = 0; i < refine_solves && best.num_reachable == n && rclcpp::ok(); ++i)
+		// GTSP restarts at the best, like base_gradient: more full solves there, seeded from its poses, with more IK choices.
+		const double travel_before_restarts = best.planned_travel;
+		for (int i = 0; i < gtsp_restarts && best.num_reachable == n && rclcpp::ok(); ++i)
 		{
 			std::vector<Joints> seeds = home_seeds;
 			for (size_t k = 0; k < best.viewpoint_order.size(); ++k)
 				seeds[static_cast<size_t>(best.viewpoint_order[k])] = best.ik_poses[k];
-			const PlacementTour refined = solve_tour(best.position, seeds, refine_ik_solutions, 1, best.viewpoint_order);
-			if (is_better(refined, best))
-				best = refined;
+			const PlacementTour restarted = solve_tour(best.position, seeds, gtsp_restart_ik_solutions, 1, best.viewpoint_order);
+			if (is_better(restarted, best))
+				best = restarted;
 		}
-		if (refine_solves > 0 && best.num_reachable == n)
-			RCLCPP_INFO(get_logger(), "refined %d solves: planned travel %.2f -> %.2f rad", refine_solves,
-				travel_before_refine, best.planned_travel);
+		if (gtsp_restarts > 0 && best.num_reachable == n)
+			RCLCPP_INFO(get_logger(), "%d GTSP restarts: planned travel %.2f -> %.2f rad", gtsp_restarts,
+				travel_before_restarts, best.planned_travel);
 
 		const double secs = elapsed();
 		if (best.num_reachable == n)

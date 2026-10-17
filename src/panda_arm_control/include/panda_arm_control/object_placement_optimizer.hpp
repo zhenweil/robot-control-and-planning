@@ -1,7 +1,7 @@
 #pragma once
 // Object placement: finds the object position (abs x, y, z; orientation stays nominal) from which the arm reaches
 // every viewpoint with the least tour travel. Kinematic moves (gradient steps) inside reach attempts; a manipulability
-// jump before each new reach attempt; refine and tour-placement once every viewpoint is reached.
+// jump before each new reach attempt; GTSP restarts and tour-placement once every viewpoint is reached.
 
 #include <chrono>
 #include <limits>
@@ -37,17 +37,17 @@ struct MissedViewpoint
 // The tour at one object position: what the optimizer minimizes.
 struct TourSolution
 {
+	std::vector<Joints> ik_poses;  // parallel to viewpoint_order: chosen IK pose
 	std::vector<int> viewpoint_order;  // viewpoint indices in visiting order
 	std::vector<MissedViewpoint> missed_viewpoints;
-	std::vector<Joints> ik_poses;  // parallel to viewpoint_order: chosen IK pose
-	
-	double miss_gap_sum = 0.0; // sum of missed viewpoints' capped gaps (m)
+
 	double miss_cost = 0.0; // miss_gap_weight * miss_gap_sum
+	double miss_gap_sum = 0.0; // sum of missed viewpoints' capped gaps (m)
 	double planned_cost = -1.0; // OMPL-planned joint travel; -1 = not planned
 	double weighted_cost_sum = 0.0;
 	double manipulability_sum = 0.0;
-	double joint_distance_plus_turn = 0.0;  // GTSP edge cost sum: joint distance + largest single-joint turn per edge	
 	double softmin_manipulability = 0.0;
+	double joint_distance_plus_turn = 0.0;  // GTSP edge cost sum: joint distance + largest single-joint turn per edge	
 
 	int num_reachable = 0;
 	bool all_reachable = false;
@@ -65,13 +65,13 @@ struct ReachAttemptResult
 // A move found by the line search or room-then-reach: where, its quick solve, and the step length.
 struct MoveCandidate
 {
-	TourSolution tour_solution;  // quick solve at next_position
-	double step_length = 0.0;  // m
 	Position next_position;
+	double step_length = 0.0;  // m
+	TourSolution tour_solution;  // quick solve at next_position
 };
 
 // Every move of the object, kept for RViz.
-enum class MoveKind
+enum class MoveType
 {
 	KinematicRoomMove,
 	ManipulabilityJump
@@ -79,8 +79,8 @@ enum class MoveKind
 
 struct MoveSegment
 {
+	MoveType type;
 	Position from, to;
-	MoveKind kind;
 };
 
 // The position moved inside the bounds, axis by axis.
@@ -88,9 +88,6 @@ Position ClampToBounds(Position p, const BaseGradientBounds& b);
 
 // Viewpoints reached in `from` but not in `to`.
 std::vector<int> GetLostViewpoints(const TourSolution& from, const TourSolution& to);
-
-// " 3 7 12", or " none".
-std::string FormatIndexList(const std::vector<int>& v);
 
 // Where IK starts for each viewpoint: its pose in `sol`, else fallback (home).
 std::vector<Joints> GetIkStartPoses(const TourSolution& sol, const Joints& fallback, int num_viewpoint);
@@ -119,7 +116,7 @@ private:
 	// --- Reach and improve ---
 	bool ResetAndSolveAtStart(const Position& start, int restart_in, const TourSolution* warm);
 	ReachAttemptResult ReachAllViewpoints(const Position& from);
-	void ImproveCost(int iter);
+	void RefineGtspAndPlacement(int iter);
 
 	void PrepareReachViewpoints();
 	bool TryReachViewpoints(int iter);
@@ -128,14 +125,14 @@ private:
 	std::optional<MoveCandidate> TryKinematicRoomMove();
 	std::optional<TourSolution> ConfirmWithFullSolve(const MoveCandidate& step);
 	bool CommitMove(const MoveCandidate& step, TourSolution committed, int iter, const Eigen::Vector3d& g);
-	void LogRefineAtFirstReach();
-	void RefineBestTour();
+	void LogGtspRestartsAtFirstReach();
+	void RestartGtsp();
 	void OptimizeTourAndPlacement();
 
 	// --- Solving and scoring ---
 	TourSolution QuickSolveTour(const Position& at, BaseGradientParams p);
 	TourSolution QuickSolveTour(const Position& at, int gaps_min_reached = 0);
-	TourSolution RefineTour(const Position& at, TourSolution best_sol, int num_solves);
+	TourSolution RunGtspRestarts(const Position& at, TourSolution best_sol, int num_restarts);
 	std::vector<std::vector<Joints>> CollectIkPoses(
 		const Position& at, const BaseGradientParams& p, const std::vector<Joints>& seed, int max_solutions);
 	TourSolution SolveMostManipulablePoses(const Position& at, const BaseGradientParams& p);
@@ -211,7 +208,7 @@ private:
 	std::vector<Joints> last_reached_poses;  // each viewpoint's joints when last reached
 	std::vector<Joints> last_closest_poses;  // each missed viewpoint's last closest pose: keeps its gap continuous
 	bool track_current_poses = true;  // quick solves follow the current poses (reach phase) or re-solve fresh (after)
-	bool logged_refine_at_first_reach = false;
+	bool logged_gtsp_restarts_at_first_reach = false;
 	std::chrono::steady_clock::time_point reach_deadline;
 
 	// --- Per kinematic move ---

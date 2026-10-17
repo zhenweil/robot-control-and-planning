@@ -79,8 +79,8 @@ struct Params
 	double bg_convergence_tolerance_cost = 1e-3;
 	int bg_patience = 3;
 	bool bg_stop_when_all_reached = false;
-	int bg_refine_solves = 0;
-	int bg_refine_ik_solutions = 8;
+	int bg_gtsp_restarts = 0;
+	int bg_gtsp_restart_ik_solutions = 8;
 	int bg_tour_placement_iterations = 0;
 	int bg_tour_placement_rounds = 1;
 	double bg_tour_placement_object_step = 0.02;
@@ -96,7 +96,7 @@ struct Params
 	bool bg_room_then_reach = false;
 	double bg_reach_time_limit = 0.0;
 	bool bg_trace_line_search = false;
-	int bg_refine_at_reach = 0;
+	int bg_gtsp_restarts_at_reach = 0;
 
 	bool bg_fd_gradient_check = false;
 	double bg_fd_epsilon = 1e-4;
@@ -289,8 +289,8 @@ private:
 		this->declareIfNeeded("bg_convergence_tolerance_cost", this->params.bg_convergence_tolerance_cost);
 		this->declareIfNeeded("bg_patience", this->params.bg_patience);
 		this->declareIfNeeded("bg_stop_when_all_reached", this->params.bg_stop_when_all_reached);
-		this->declareIfNeeded("bg_refine_solves", this->params.bg_refine_solves);
-		this->declareIfNeeded("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
+		this->declareIfNeeded("bg_gtsp_restarts", this->params.bg_gtsp_restarts);
+		this->declareIfNeeded("bg_gtsp_restart_ik_solutions", this->params.bg_gtsp_restart_ik_solutions);
 		this->declareIfNeeded("bg_tour_placement_iterations", this->params.bg_tour_placement_iterations);
 		this->declareIfNeeded("bg_tour_placement_rounds", this->params.bg_tour_placement_rounds);
 		this->declareIfNeeded("bg_tour_placement_object_step", this->params.bg_tour_placement_object_step);
@@ -306,7 +306,7 @@ private:
 		this->declareIfNeeded("bg_room_then_reach", this->params.bg_room_then_reach);
 		this->declareIfNeeded("bg_reach_time_limit", this->params.bg_reach_time_limit);
 		this->declareIfNeeded("bg_trace_line_search", this->params.bg_trace_line_search);
-		this->declareIfNeeded("bg_refine_at_reach", this->params.bg_refine_at_reach);
+		this->declareIfNeeded("bg_gtsp_restarts_at_reach", this->params.bg_gtsp_restarts_at_reach);
 		this->declareIfNeeded("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
 		this->declareIfNeeded("bg_fd_epsilon", this->params.bg_fd_epsilon);
 		this->declareIfNeeded("ik_timeout", this->params.ik_timeout);
@@ -368,8 +368,8 @@ private:
 		this->get_parameter("bg_convergence_tolerance_cost", this->params.bg_convergence_tolerance_cost);
 		this->get_parameter("bg_patience", this->params.bg_patience);
 		this->get_parameter("bg_stop_when_all_reached", this->params.bg_stop_when_all_reached);
-		this->get_parameter("bg_refine_solves", this->params.bg_refine_solves);
-		this->get_parameter("bg_refine_ik_solutions", this->params.bg_refine_ik_solutions);
+		this->get_parameter("bg_gtsp_restarts", this->params.bg_gtsp_restarts);
+		this->get_parameter("bg_gtsp_restart_ik_solutions", this->params.bg_gtsp_restart_ik_solutions);
 		this->get_parameter("bg_tour_placement_iterations", this->params.bg_tour_placement_iterations);
 		this->get_parameter("bg_tour_placement_rounds", this->params.bg_tour_placement_rounds);
 		this->get_parameter("bg_tour_placement_object_step", this->params.bg_tour_placement_object_step);
@@ -385,7 +385,7 @@ private:
 		this->get_parameter("bg_room_then_reach", this->params.bg_room_then_reach);
 		this->get_parameter("bg_reach_time_limit", this->params.bg_reach_time_limit);
 		this->get_parameter("bg_trace_line_search", this->params.bg_trace_line_search);
-		this->get_parameter("bg_refine_at_reach", this->params.bg_refine_at_reach);
+		this->get_parameter("bg_gtsp_restarts_at_reach", this->params.bg_gtsp_restarts_at_reach);
 		this->get_parameter("bg_fd_gradient_check", this->params.bg_fd_gradient_check);
 		this->get_parameter("bg_fd_epsilon", this->params.bg_fd_epsilon);
 		this->get_parameter("ik_timeout", this->params.ik_timeout);
@@ -471,8 +471,8 @@ private:
 		bg.convergence_tolerance_cost = this->params.bg_convergence_tolerance_cost;
 		bg.patience = this->params.bg_patience;
 		bg.stop_when_all_reached = this->params.bg_stop_when_all_reached;
-		bg.refine_solves = this->params.bg_refine_solves;
-		bg.refine_ik_solutions = this->params.bg_refine_ik_solutions;
+		bg.gtsp_restarts = this->params.bg_gtsp_restarts;
+		bg.gtsp_restart_ik_solutions = this->params.bg_gtsp_restart_ik_solutions;
 		bg.tour_placement_iterations = this->params.bg_tour_placement_iterations;
 		bg.tour_placement_rounds = this->params.bg_tour_placement_rounds;
 		bg.tour_placement_object_step = this->params.bg_tour_placement_object_step;
@@ -488,7 +488,7 @@ private:
 		bg.room_then_reach = this->params.bg_room_then_reach;
 		bg.reach_time_limit = this->params.bg_reach_time_limit;
 		bg.trace_line_search = this->params.bg_trace_line_search;
-		bg.refine_at_reach = this->params.bg_refine_at_reach;
+		bg.gtsp_restarts_at_reach = this->params.bg_gtsp_restarts_at_reach;
 		bg.random_seed = this->params.random_seed;
 		bg.fd_gradient_check = this->params.bg_fd_gradient_check;
 		bg.fd_epsilon = this->params.bg_fd_epsilon;

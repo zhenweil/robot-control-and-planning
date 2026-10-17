@@ -108,11 +108,11 @@ def generate_launch_description():
         "stop_when_all_reached", default_value="false", description="End each descent once every viewpoint is reached."
     )
     stop_when_all_reached = ParameterValue(LaunchConfiguration("stop_when_all_reached"), value_type=bool)
-    refine_solves_arg = DeclareLaunchArgument(
-        "refine_solves", default_value="0",
+    gtsp_restarts_arg = DeclareLaunchArgument(
+        "gtsp_restarts", default_value="0",
         description="Extra full solves at each descent's result, warm-started from its best solution.",
     )
-    refine_solves = ParameterValue(LaunchConfiguration("refine_solves"), value_type=int)
+    gtsp_restarts = ParameterValue(LaunchConfiguration("gtsp_restarts"), value_type=int)
     travel_gradient_arg = DeclareLaunchArgument(
         "travel_gradient", default_value="true",
         description="false: the descent direction ignores tour travel (the cost still includes it).",
@@ -134,7 +134,7 @@ def generate_launch_description():
     lock_input_order = ParameterValue(LaunchConfiguration("lock_input_order"), value_type=bool)
     real_cost_planning_time_arg = DeclareLaunchArgument(
         "real_cost_planning_time", default_value="0.0",
-        description="> 0: refine picks tours by real cost (OMPL-planned joint travel); seconds per planning attempt.",
+        description="> 0: GTSP restarts pick tours by real cost (OMPL-planned joint travel); seconds per planning attempt.",
     )
     real_cost_planning_time = ParameterValue(LaunchConfiguration("real_cost_planning_time"), value_type=float)
     real_cost_attempts_arg = DeclareLaunchArgument(
@@ -151,11 +151,11 @@ def generate_launch_description():
         description="Log every line-search probe and full solve against the current point.",
     )
     trace_line_search = ParameterValue(LaunchConfiguration("trace_line_search"), value_type=bool)
-    refine_at_reach_arg = DeclareLaunchArgument(
-        "refine_at_reach", default_value="0",
-        description="Log N refine solves at the first all-reached placement; the descent then continues.",
+    gtsp_restarts_at_reach_arg = DeclareLaunchArgument(
+        "gtsp_restarts_at_reach", default_value="0",
+        description="Log N GTSP restarts at the first all-reached placement; the descent then continues.",
     )
-    refine_at_reach = ParameterValue(LaunchConfiguration("refine_at_reach"), value_type=int)
+    gtsp_restarts_at_reach = ParameterValue(LaunchConfiguration("gtsp_restarts_at_reach"), value_type=int)
 
     # Object position bounds, abs (m, base frame). Defaults: nominal (0.5, 0, 0.15) +-0.6 in x/y, z locked.
     position_bound_args = []
@@ -236,7 +236,7 @@ def generate_launch_description():
         # Stop after this many consecutive iterations that each gain < bg_convergence_tolerance_cost.
         "bg_patience": 3,
         "bg_stop_when_all_reached": stop_when_all_reached,
-        "bg_refine_solves": refine_solves,
+        "bg_gtsp_restarts": gtsp_restarts,
         "bg_travel_gradient": travel_gradient,
         "bg_freeze_order": freeze_order,
         "bg_lock_input_order": lock_input_order,
@@ -244,7 +244,7 @@ def generate_launch_description():
         "bg_real_cost_attempts": real_cost_attempts,
         "bg_planned_travel_in_cost": planned_travel_in_cost,
         "bg_trace_line_search": trace_line_search,
-        "bg_refine_at_reach": refine_at_reach,
+        "bg_gtsp_restarts_at_reach": gtsp_restarts_at_reach,
         "bg_fd_gradient_check": fd_gradient_check,
         "bg_fd_epsilon": 1e-4,
         "ik_timeout": ik_timeout,
@@ -336,7 +336,7 @@ def generate_launch_description():
             descent_num_restart_arg,
             max_kinematic_moves_arg,
             stop_when_all_reached_arg,
-            refine_solves_arg,
+            gtsp_restarts_arg,
             travel_gradient_arg,
             miss_gap_weight_arg,
             freeze_order_arg,
@@ -345,7 +345,7 @@ def generate_launch_description():
             real_cost_attempts_arg,
             planned_travel_in_cost_arg,
             trace_line_search_arg,
-            refine_at_reach_arg,
+            gtsp_restarts_at_reach_arg,
             *position_bound_args,
             *initial_position_args,
             output_dir_arg,

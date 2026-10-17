@@ -21,10 +21,10 @@
     bg_stop_when_all_reached: true
     bg_reach_time_limit: 120.0              # s per descent to reach every viewpoint, then stuck; 0 = none
     bg_reach_patience: 3                     # reach iterations without gaining a viewpoint, then stuck (jump + restart)
-    bg_refine_solves: 3                      # after all reached: full solves, kept by lowest cost (planned travel, comfort)
-    bg_refine_ik_solutions: 8                # IK solutions per viewpoint in those solves
-    bg_tour_placement_iterations: 30         # after refine: QP steps moving the object + each pose's self-motion; 0 = off
-    bg_tour_placement_rounds: 3              # refine then tour-placement, repeated this many times
+    bg_gtsp_restarts: 3                      # after all reached: full solves, kept by lowest cost (planned travel, comfort)
+    bg_gtsp_restart_ik_solutions: 8          # IK solutions per viewpoint in those solves
+    bg_tour_placement_iterations: 30         # after GTSP restarts: QP steps moving the object + each pose's self-motion; 0 = off
+    bg_tour_placement_rounds: 3              # GTSP restarts then tour-placement, repeated this many times
     bg_tour_placement_object_step: 0.02      # m per axis per step, halved on a rejected step
     bg_tour_placement_self_motion_step: 0.3  # rad along each pose's self-motion per step
     bg_tour_placement_joint_margin: 0.05     # rad kept from joint limits

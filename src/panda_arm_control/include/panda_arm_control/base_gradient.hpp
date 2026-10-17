@@ -79,16 +79,16 @@ struct BaseGradientParams
 	bool stop_when_all_reached = false;  // end each descent as soon as every viewpoint is reached
 	double reach_time_limit = 0.0;  // s per descent to reach every viewpoint; then it counts as stuck. 0 = none
 	int reach_patience = 3;  // reach-phase iterations without gaining a viewpoint before the descent counts as stuck
-	int refine_solves = 0;  // extra full solves at each descent's result, warm-started from the best so far
-	// After refine: QP steps moving the object and each tour pose along its self-motion (order and IK branches fixed) to
+	int gtsp_restarts = 0;  // extra full solves at each descent's result, warm-started from the best so far
+	// After GTSP restarts: QP steps moving the object and each tour pose along its self-motion (order and IK branches fixed) to
 	// shorten the tour's joint distance; kept if planned travel drops. 0 = off.
 	int tour_placement_iterations = 0;
-	int tour_placement_rounds = 1;  // refine then tour-placement, repeated this many times
+	int tour_placement_rounds = 1;  // GTSP restarts then tour-placement, repeated this many times
 	double tour_placement_object_step = 0.02;  // m per axis, halved when a step is rejected
 	double tour_placement_self_motion_step = 0.3;  // rad per pose, halved with the object step
 	double tour_placement_joint_margin = 0.05;  // rad kept from each joint limit
-	int refine_ik_solutions = 8;  // IK solutions per viewpoint in refine solves: more same-branch choices for GTSP
-	// Reconfiguration: a move turning any joint (joint 7 aside) more than this; refine logs how many are left.
+	int gtsp_restart_ik_solutions = 8;  // IK solutions per viewpoint in GTSP restarts: more same-branch choices for GTSP
+	// Reconfiguration: a move turning any joint (joint 7 aside) more than this; GTSP restarts log how many are left.
 	double reconfig_threshold = 1.0;
 	bool travel_gradient = true;  // false: the descent direction ignores tour travel
 	bool freeze_order = false;  // once all viewpoints are reached, keep the viewpoint order fixed
@@ -107,7 +107,7 @@ struct BaseGradientParams
 	// rejected on count anyway); 0 = never
 	int gaps_min_reached = 0;
 	bool trace_line_search = false;  // log every line-search probe and full solve against the current point
-	int refine_at_reach = 0;  // log N refine solves at the first all-reached placement (descent continues)
+	int gtsp_restarts_at_reach = 0;  // log N GTSP restarts at the first all-reached placement (descent continues)
 
 	int random_seed = 42;
 	// Log the analytic gradient next to a central-difference estimate every outer iteration.
