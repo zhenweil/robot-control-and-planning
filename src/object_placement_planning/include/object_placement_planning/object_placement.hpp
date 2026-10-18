@@ -49,6 +49,7 @@ struct ObjectPlacementParams
 	double closest_ik_margin = 0.02;
 	int closest_ik_iters = 60;
 	int closest_ik_starts = 5;
+	double exact_ik_finish_gap = 0.05;	 // m (rotation at rot_metric_scale): a miss closer than this gets exact IK from its closest pose
 	// IK for reached viewpoints: "kdl" (MoveIt's KDL plugin) or "closest" (closest_ik's exact stage, same solver as the
 	// misses' closest poses). With "closest": ignore_camera_roll frees the camera's spin about its axis (also in the
 	// misses' gaps), and an exact pose must keep exact_ik_margin (m) clearance (0 = collision-free only).
@@ -92,7 +93,6 @@ struct ObjectPlacementParams
 	double tour_placement_object_step = 0.02;  // m per axis, halved when a step is rejected
 	double tour_placement_self_motion_step = 0.3;  // rad per pose, halved with the object step
 	double tour_placement_joint_margin = 0.05;  // rad kept from each joint limit
-	bool count_exact_closest_ik_as_reached = false;	 // a miss whose closest IK is exact counts as reached (robust to unlucky IK)
 	int gtsp_restart_ik_solutions = 8;  // IK solutions per viewpoint in GTSP restarts: more same-branch choices for GTSP
 	// Reconfiguration: a move turning any joint (joint 7 aside) more than this; GTSP restarts log how many are left.
 	double reconfig_threshold = 1.0;
@@ -107,6 +107,7 @@ struct ObjectPlacementParams
 	// to raise the margins (joint limit, reach, stretch, collision) that ran out for them, then aim again.
 	bool room_then_reach = false;
 	int room_max_targets = 3;
+	bool room_for_missed_viewpoint = true;	 // room-then-reach: when aiming stops closing a missed viewpoint's gap, move to open what blocks its closest pose
 	// Before a restart: > 0 runs up to restart_room_max_moves room-then-reach moves that may lose this many reached
 	// viewpoints, instead of the manipulability jump (0).
 	int restart_room_max_lost_viewpoints = 0;

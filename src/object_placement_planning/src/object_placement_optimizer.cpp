@@ -227,6 +227,20 @@ ReachAttemptResult ObjectPlacementOptimizer::ReachAllViewpoints(const Position& 
 				this->params.unreachable_penalty * (this->num_viewpoint - d.tour_solution.num_reachable),
 			d.tour_solution.manipulability_sum, d.tour_solution.num_reachable, this->num_viewpoint, d.position.x(),
 			d.position.y(), d.position.z(), (r > 0 && improved) ? "  <-- new best" : "");
+		for (const MissedViewpoint& m : d.tour_solution.missed_viewpoints)
+		{
+			const Eigen::Vector3d target = (scene_geometry::Translation(d.position) * this->viewpoints[static_cast<size_t>(m.viewpoint_index)]).translation();
+			// Joints of the closest pose within 0.05 rad of a limit.
+			std::string joints_at_limit;
+			for (size_t k = 0; k < m.closest_pose.size(); ++k)
+			{
+				const std::string& name = this->joint_group->getVariableNames()[k];
+				const moveit::core::VariableBounds& bounds = this->robot_model->getVariableBounds(name);
+				if (bounds.position_bounded_ && std::min(m.closest_pose[k] - bounds.min_position_, bounds.max_position_ - m.closest_pose[k]) < 0.05)
+					joints_at_limit += " " + name + "=" + std::to_string(m.closest_pose[k]);
+			}
+			RCLCPP_INFO(this->node->get_logger(), "  missed viewpoint %d at abs (%.3f, %.3f, %.3f) m: closest IK off by %.3f m, %.1f deg; joints at a limit:%s", m.viewpoint_index, target.x(), target.y(), target.z(), m.pose_error.head<3>().norm(), m.pose_error.tail<3>().norm() * 180.0 / M_PI, joints_at_limit.empty() ? " none" : joints_at_limit.c_str());
+		}
 		if (improved)
 			best_attempt = d;
 		if (best_attempt.all_reachable)
@@ -420,10 +434,19 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove(int 
 		const int target = miss.viewpoint_index;
 		Position at = this->current_position;
 		TourSolution here_at = this->quick_solve_tour;
+		bool room_for_target = false;  // this round opens what blocks the target instead of aiming at it
 		for (int round = 0; round < kMaxRounds; ++round)
 		{
-			// Aim: a full step at the target.
-			const Eigen::Vector3d aim = this->GetMoveDirectionToCloseGap(target, here_at, round == 0);
+			// Aim: a full step at the target; or, after aiming stopped closing its gap, a step that opens what blocks it.
+			Eigen::Vector3d aim = this->GetMoveDirectionToCloseGap(target, here_at, round == 0);
+			if (room_for_target)
+			{
+				// Open what blocks the target while keeping the reached viewpoints' room.
+				std::vector<room_margins::Margin> margins = this->BuildRoomMarginArmModel(at, here_at).margins;
+				const std::vector<room_margins::Margin> target_margins = this->GetMissedPoseMargins(target, at, here_at);
+				margins.insert(margins.end(), target_margins.begin(), target_margins.end());
+				aim = room_margins::MostRoomDirection(margins, step);
+			}
 			if (aim.norm() < 1e-9)
 				break;
 			const Position cand = ClampToBounds(at + step * aim, this->params.bounds);
@@ -432,14 +455,20 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove(int 
 			const int num_lost_from_start = static_cast<int>(GetLostViewpoints(this->quick_solve_tour, candidate_tour).size());
 			// max_lost > 0 (before a restart): reaching the target while losing at most max_lost counts.
 			const bool reaches_target = std::find(candidate_tour.viewpoint_order.begin(), candidate_tour.viewpoint_order.end(), target) != candidate_tour.viewpoint_order.end();
+			const std::string aim_name = room_for_target ? "room for target" : "aim";
 			if (max_lost == 0 ? (num_lost_from_start == 0 && candidate_tour.num_reachable > this->quick_solve_tour.num_reachable) : (reaches_target && num_lost_from_start <= max_lost))
 			{
-				this->TraceRoomMove("aim", target, cand, candidate_tour, "accepted");
+				this->TraceRoomMove(aim_name, target, cand, candidate_tour, "accepted");
 				return MoveCandidate{cand, step, this->AddPlannedTravelToCost(cand, std::move(candidate_tour))};
 			}
 			if (max_lost == 0 ? lost.empty() : num_lost_from_start <= max_lost)
 			{
-				this->TraceRoomMove("aim", target, cand, candidate_tour, "walk on");
+				this->TraceRoomMove(aim_name, target, cand, candidate_tour, "walk on");
+				// Aiming that closed less than a fifth of the gap: next round opens what blocks the target, then aims again.
+				const scene_geometry::Vector6d* gap_before = FindMissedPoseError(here_at, target);
+				const scene_geometry::Vector6d* gap_after = FindMissedPoseError(candidate_tour, target);
+				const bool stalled = gap_before && gap_after && scene_geometry::PoseGap(*gap_after, this->params.rot_metric_scale) > 0.8 * scene_geometry::PoseGap(*gap_before, this->params.rot_metric_scale);
+				room_for_target = this->params.room_for_missed_viewpoint && !room_for_target && stalled;
 				at = cand;
 				here_at = std::move(candidate_tour);
 				continue;
@@ -460,6 +489,9 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove(int 
 				return true;
 			};
 			std::vector<room_margins::Margin> short_margins;
+			// The target's own blockers join, so backing up doesn't close them further.
+			if (this->params.room_for_missed_viewpoint)
+				short_margins = this->GetMissedPoseMargins(target, at, here_at);
 			std::vector<bool> joined(static_cast<size_t>(this->num_viewpoint), false);
 			// Adds what ran out for viewpoint v on the move to `to`.
 			auto add_shortage = [&](int v, const Position& to) {
@@ -476,7 +508,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove(int 
 			std::string why;
 			for (int v : lost)
 				why += add_shortage(v, cand);
-			this->TraceRoomMove("aim", target, cand, candidate_tour, "back up (" + why + " )");
+			this->TraceRoomMove(aim_name, target, cand, candidate_tour, "back up (" + why + " )");
 			Eigen::Vector3d room = room_margins::MostRoomDirection(short_margins, step);
 			// Viewpoints the move would run out join in, after the same pose swap.
 			for (int pass = 0; pass < 3 && room.norm() > 1e-9; ++pass)
@@ -547,6 +579,10 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove(int 
 			if (!moved)
 				break;
 		}
+		// Before a restart (max_lost > 0): keep where the walk got to even if the target is still missed, so the next
+		// try starts there instead of at the stuck spot.
+		if (max_lost > 0 && at != this->current_position)
+			return MoveCandidate{at, (at - this->current_position).norm(), this->AddPlannedTravelToCost(at, std::move(here_at))};
 	}
 	return std::nullopt;
 }
@@ -943,8 +979,8 @@ std::vector<std::vector<Joints>> ObjectPlacementOptimizer::CollectIkPoses(const 
 		}
 		for (int attempt = 0; (!p.tracking || (sols.empty() && !missed_now[v])) && attempt < max_sol * 3 + p.ik_retries_per_point && static_cast<int>(sols.size()) < max_sol; ++attempt)
 		{
-			if (sols.empty() && attempt >= 4)
-				break;	// out of reach: every miss costs a full IK call
+			if (sols.empty() && attempt >= (p.tracking ? 1 : 0))
+				break;	// missed after ik_attempts tries: more random rounds rarely find it
 			state.setToRandomPositions(this->joint_group, rng);
 			if (!this->SolveExactIk(state, target, p.ik_attempts, p, rng))
 				continue;
@@ -1041,6 +1077,18 @@ std::vector<MissedViewpoint> ObjectPlacementOptimizer::FindClosestPosesForMissed
 			if (r.found && r.gap < closest.gap)
 				closest = r;
 		}
+		// A near miss: exact IK from the closest pose needs no clearance, so it often closes the last centimeters.
+		if (closest.found && !closest.exact && closest.gap < p.exact_ik_finish_gap)
+		{
+			state.setJointGroupPositions(this->joint_group, closest.q);
+			if (this->SolveExactIk(state, target, 1, p, rng))
+			{
+				state.copyJointGroupPositions(this->joint_group, closest.q);
+				closest.exact = true;
+				closest.gap = 0.0;
+				closest.pose_error.setZero();
+			}
+		}
 	});
 	this->closest_ik_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - closest_start).count();
 	for (size_t i = 0; i < misses.size(); ++i)
@@ -1058,7 +1106,7 @@ TourSolution ObjectPlacementOptimizer::EvaluateObjectPosition(const Position& at
 	TourSolution out = this->SampleIkAndSolveGtsp(at, p, seed_q, initial_order, max_solutions, fixed_order, &ik_poses);
 	out.missed_viewpoints = this->FindClosestPosesForMissedViewpoints(at, p, out, seed_q);
 	// A miss whose closest pose is exact was missed by chance: count it as reached and solve the GTSP again with it.
-	if (p.count_exact_closest_ik_as_reached && std::any_of(out.missed_viewpoints.begin(), out.missed_viewpoints.end(), [](const MissedViewpoint& m) { return m.exact; }))
+	if (std::any_of(out.missed_viewpoints.begin(), out.missed_viewpoints.end(), [](const MissedViewpoint& m) { return m.exact; }))
 	{
 		std::vector<MissedViewpoint> still_missed;
 		for (const MissedViewpoint& m : out.missed_viewpoints)
@@ -1303,6 +1351,18 @@ Eigen::Vector3d ObjectPlacementOptimizer::GetMoveDirectionToCloseGap(int target,
 		gap = full;
 	const Eigen::Vector3d aim = -gap->head<3>();
 	return aim.norm() < 1e-9 ? Eigen::Vector3d::Zero() : Eigen::Vector3d(aim.normalized());
+}
+
+// Margins of a missed viewpoint's closest pose (joint limits, stretch, collisions): what blocks it. Empty if none.
+std::vector<room_margins::Margin> ObjectPlacementOptimizer::GetMissedPoseMargins(int target, const Position& at, const TourSolution& tour)
+{
+	for (const MissedViewpoint& m : tour.missed_viewpoints)
+		if (m.viewpoint_index == target && !m.closest_pose.empty())
+		{
+			scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
+			return this->GetIkPoseMargins(target, m.closest_pose);
+		}
+	return {};
 }
 
 // Model stores IK pose, dq_dp, and each pose's margins

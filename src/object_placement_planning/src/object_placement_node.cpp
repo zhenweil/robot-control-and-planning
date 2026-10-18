@@ -57,8 +57,8 @@ struct Params
 	double closest_ik_margin = 0.02;
 	int closest_ik_iters = 60;
 	int closest_ik_starts = 5;
+	double exact_ik_finish_gap = 0.05;
 	std::string ik_solver = "kdl";
-	bool count_exact_closest_ik_as_reached = false;
 	bool ignore_camera_roll = false;
 	double exact_ik_margin = 0.0;
 	double unreachable_penalty = 50.0;
@@ -72,6 +72,7 @@ struct Params
 	int jump_max_moves = 10;
 	int reach_patience = 3;
 	int room_max_targets = 3;
+	bool room_for_missed_viewpoint = true;
 	int restart_room_max_lost_viewpoints = 0;
 	bool restart_switch_posture = false;
 	int restart_room_max_moves = 3;
@@ -273,8 +274,8 @@ private:
 		this->declareIfNeeded("closest_ik_margin", this->params.closest_ik_margin);
 		this->declareIfNeeded("closest_ik_iters", this->params.closest_ik_iters);
 		this->declareIfNeeded("closest_ik_starts", this->params.closest_ik_starts);
+		this->declareIfNeeded("exact_ik_finish_gap", this->params.exact_ik_finish_gap);
 		this->declareIfNeeded("ik_solver", this->params.ik_solver);
-		this->declareIfNeeded("count_exact_closest_ik_as_reached", this->params.count_exact_closest_ik_as_reached);
 		this->declareIfNeeded("ignore_camera_roll", this->params.ignore_camera_roll);
 		this->declareIfNeeded("exact_ik_margin", this->params.exact_ik_margin);
 		this->declareIfNeeded("unreachable_penalty", this->params.unreachable_penalty);
@@ -286,6 +287,7 @@ private:
 		this->declareIfNeeded("jump_max_moves", this->params.jump_max_moves);
 		this->declareIfNeeded("reach_patience", this->params.reach_patience);
 		this->declareIfNeeded("room_max_targets", this->params.room_max_targets);
+		this->declareIfNeeded("room_for_missed_viewpoint", this->params.room_for_missed_viewpoint);
 		this->declareIfNeeded("restart_room_max_lost_viewpoints", this->params.restart_room_max_lost_viewpoints);
 		this->declareIfNeeded("restart_switch_posture", this->params.restart_switch_posture);
 		this->declareIfNeeded("restart_room_max_moves", this->params.restart_room_max_moves);
@@ -355,8 +357,8 @@ private:
 		this->get_parameter("closest_ik_margin", this->params.closest_ik_margin);
 		this->get_parameter("closest_ik_iters", this->params.closest_ik_iters);
 		this->get_parameter("closest_ik_starts", this->params.closest_ik_starts);
+		this->get_parameter("exact_ik_finish_gap", this->params.exact_ik_finish_gap);
 		this->get_parameter("ik_solver", this->params.ik_solver);
-		this->get_parameter("count_exact_closest_ik_as_reached", this->params.count_exact_closest_ik_as_reached);
 		this->get_parameter("ignore_camera_roll", this->params.ignore_camera_roll);
 		this->get_parameter("exact_ik_margin", this->params.exact_ik_margin);
 		this->get_parameter("unreachable_penalty", this->params.unreachable_penalty);
@@ -368,6 +370,7 @@ private:
 		this->get_parameter("jump_max_moves", this->params.jump_max_moves);
 		this->get_parameter("reach_patience", this->params.reach_patience);
 		this->get_parameter("room_max_targets", this->params.room_max_targets);
+		this->get_parameter("room_for_missed_viewpoint", this->params.room_for_missed_viewpoint);
 		this->get_parameter("restart_room_max_lost_viewpoints", this->params.restart_room_max_lost_viewpoints);
 		this->get_parameter("restart_switch_posture", this->params.restart_switch_posture);
 		this->get_parameter("restart_room_max_moves", this->params.restart_room_max_moves);
@@ -459,8 +462,8 @@ private:
 		bg.closest_ik_margin = this->params.closest_ik_margin;
 		bg.closest_ik_iters = this->params.closest_ik_iters;
 		bg.closest_ik_starts = this->params.closest_ik_starts;
+		bg.exact_ik_finish_gap = this->params.exact_ik_finish_gap;
 		bg.ik_solver = this->params.ik_solver;
-		bg.count_exact_closest_ik_as_reached = this->params.count_exact_closest_ik_as_reached;
 		bg.ignore_camera_roll = this->params.ignore_camera_roll;
 		bg.exact_ik_margin = this->params.exact_ik_margin;
 		bg.unreachable_penalty = this->params.unreachable_penalty;
@@ -474,6 +477,7 @@ private:
 		bg.jump_max_moves = this->params.jump_max_moves;
 		bg.reach_patience = this->params.reach_patience;
 		bg.room_max_targets = this->params.room_max_targets;
+		bg.room_for_missed_viewpoint = this->params.room_for_missed_viewpoint;
 		bg.restart_room_max_lost_viewpoints = this->params.restart_room_max_lost_viewpoints;
 		bg.restart_switch_posture = this->params.restart_switch_posture;
 		bg.restart_room_max_moves = this->params.restart_room_max_moves;

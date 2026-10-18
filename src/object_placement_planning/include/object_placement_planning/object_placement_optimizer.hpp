@@ -155,6 +155,7 @@ private:
 	std::vector<room_margins::Margin> GetIkPoseMargins(int v, const Joints& q);
 	room_margins::ArmModel BuildRoomMarginArmModel(const Position& at, const TourSolution& sol);
 	Eigen::Vector3d GetMoveDirectionToCloseGap(int target, const TourSolution& here_at, bool first);
+	std::vector<room_margins::Margin> GetMissedPoseMargins(int target, const Position& at, const TourSolution& tour);
 	std::optional<Joints> FindRoomierPose(int v, const Position& at, const room_margins::ArmModel& model, int tries);
 	room_margins::Shortage GetMarginsThatRunOut(int v, const room_margins::ArmModel& model, const Position& at, const Eigen::Vector3d& d);
 
