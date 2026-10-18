@@ -127,7 +127,7 @@
   </joint>
 
   <!-- Camera placeholder, as panda_hand in panda_arm_moveit: a thin cylinder from the flange (wrist_3_link, whose frame is
-       UR's tool0 frame) to tool0. -->
+       UR's tool0 frame) to tool0; 5 cm long and 1 cm wide here (10 cm and 2 cm on the other arms) for the UR3e's short reach. -->
   <joint name="camera_joint" type="fixed">
     <parent link="wrist_3_link"/>
     <child link="camera"/>
@@ -135,19 +135,19 @@
   </joint>
   <link name="camera">
     <visual>
-      <origin xyz="0 0 0.05" rpy="0 0 0"/>
-      <geometry><cylinder radius="0.01" length="0.1"/></geometry>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.005" length="0.05"/></geometry>
       <material name="ur_dark_grey"/>
     </visual>
     <collision>
-      <origin xyz="0 0 0.05" rpy="0 0 0"/>
-      <geometry><cylinder radius="0.01" length="0.1"/></geometry>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.005" length="0.05"/></geometry>
     </collision>
   </link>
   <joint name="tool0_joint" type="fixed">
     <parent link="camera"/>
     <child link="tool0"/>
-    <origin xyz="0 0 0.1034" rpy="0 0 0"/>
+    <origin xyz="0 0 0.0534" rpy="0 0 0"/>
   </joint>
   <link name="tool0"/>
 </robot>

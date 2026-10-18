@@ -7,12 +7,12 @@
     </group>
     <!-- tool0 at the Panda home's tool0 orientation and x/y, lowered to z = 0.30 m: the UR3e can't reach the Panda's 0.51 m. -->
     <group_state name="home" group="ur_manipulator">
-        <joint name="shoulder_pan_joint" value="-0.4976"/>
-        <joint name="shoulder_lift_joint" value="-1.7135"/>
-        <joint name="elbow_joint" value="1.2512"/>
-        <joint name="wrist_1_joint" value="-1.1872"/>
-        <joint name="wrist_2_joint" value="-1.5281"/>
-        <joint name="wrist_3_joint" value="-2.0671"/>
+        <joint name="shoulder_pan_joint" value="-0.4889"/>
+        <joint name="shoulder_lift_joint" value="-1.7634"/>
+        <joint name="elbow_joint" value="1.5398"/>
+        <joint name="wrist_1_joint" value="-1.4262"/>
+        <joint name="wrist_2_joint" value="-1.5288"/>
+        <joint name="wrist_3_joint" value="-2.0584"/>
     </group_state>
     <virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="base_link"/>
     <disable_collisions link1="base_link_inertia" link2="shoulder_link" reason="Adjacent"/>

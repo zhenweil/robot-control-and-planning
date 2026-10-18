@@ -54,7 +54,7 @@ ROBOTS = {
         "controllers": "config/moveit_controllers.yaml",
         "group": "ur_manipulator",
         "base_link": "base_link",
-        "home": {"shoulder_pan_joint": -0.4976, "shoulder_lift_joint": -1.7135, "elbow_joint": 1.2512, "wrist_1_joint": -1.1872, "wrist_2_joint": -1.5281, "wrist_3_joint": -2.0671},
+        "home": {"shoulder_pan_joint": -0.4889, "shoulder_lift_joint": -1.7634, "elbow_joint": 1.5398, "wrist_1_joint": -1.4262, "wrist_2_joint": -1.5288, "wrist_3_joint": -2.0584},
     },
 }
 
