@@ -3,11 +3,12 @@
 # ROS domain and log folder. Appends one CSV row per start to OUT; a start already in OUT is skipped (resumable).
 #
 # Usage: run_list.sh LIST OUT [NW=6] [SEED=42]
-# Env:   METHOD=object_placement|random_placement   (default object_placement)
+# Env:   METHOD=object_placement|random_placement|sgd_placement   (default object_placement)
 #        BASEYAML=<params yaml>                  (default: the package's config/object_placement_run.yaml)
-#        TIME_BUDGET=<s>                         (random_placement only, default 90)
+#        TIME_BUDGET=<s>                         (random_placement and sgd_placement, default 90)
 #        TIMEOUT=<s>                             (per start, default 900)
 #        ROBOT=panda|kinova|xarm7|ur5e|ur3e      (default panda)
+#        TOUR_INPUT_DIR=<dir>                    (viewpoints; default: the launch file's 38 checked ones)
 set -u
 LIST=$1; OUT=$2; NW=${3:-6}; SEED=${4:-42}
 METHOD=${METHOD:-object_placement}
@@ -16,6 +17,7 @@ BASE=${BASEYAML:-$WS/src/object_placement_planning/config/object_placement_run.y
 TIME_BUDGET=${TIME_BUDGET:-90}
 TIMEOUT=${TIMEOUT:-900}
 ROBOT=${ROBOT:-panda}
+TOUR_INPUT_DIR=${TOUR_INPUT_DIR:-}
 WORK=$(dirname "$OUT")/work
 mkdir -p "$WORK"
 [ -f "$OUT" ] || echo "x,y,z,reached,final_x,final_y,final_z,seconds,log" > "$OUT"
@@ -36,7 +38,8 @@ worker() {
     sed -e "s/initial_x: .*/initial_x: $x/" -e "s/initial_y: .*/initial_y: $y/" \
         -e "s/initial_z: .*/initial_z: $z/" "$BASE" > "$yaml"
     local args="params_file:=$yaml random_seed:=$SEED robot:=$ROBOT"
-    [ "$METHOD" = random_placement ] && args="$args time_budget_sec:=$TIME_BUDGET"
+    [ -n "$TOUR_INPUT_DIR" ] && args="$args tour_input_dir:=$TOUR_INPUT_DIR"
+    [ "$METHOD" != object_placement ] && args="$args time_budget_sec:=$TIME_BUDGET"
     local before; before=$(ls -t "$ROS_LOG_DIR"/${METHOD}_*.log 2>/dev/null | head -1)
     local t0; t0=$(date +%s)
     setsid ros2 launch object_placement_planning "$METHOD.launch.py" $args > /dev/null 2>&1 &

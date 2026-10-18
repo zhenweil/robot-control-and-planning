@@ -106,7 +106,19 @@ add_executable(random_placement
 	src/random_placement_node.cpp
 	)
 
-foreach(viewpoint_planner_target viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement viewpoint_generator)
+# SGD placement baseline (Mayer and Althoff 2026), separate from object_placement.
+add_executable(sgd_placement
+	src/closest_ik.cpp
+	src/gtsp.cpp
+	src/joint_travel.cpp
+	src/manipulability.cpp
+	src/real_cost_planning.cpp
+	src/scene_geometry.cpp
+	src/viewpoint_io.cpp
+	src/sgd_placement_node.cpp
+	)
+
+foreach(viewpoint_planner_target viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement viewpoint_generator)
 	target_include_directories(${viewpoint_planner_target} PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		)
@@ -145,7 +157,7 @@ install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement build_reachability_map viewpoint_generator
+install(TARGETS viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement build_reachability_map viewpoint_generator
 	DESTINATION lib/${PROJECT_NAME}
 	)
 
