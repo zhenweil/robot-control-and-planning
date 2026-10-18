@@ -173,9 +173,21 @@ ReachAttemptResult ObjectPlacementOptimizer::ReachAllViewpoints(const Position& 
 	ReachAttemptResult best_attempt;
 	for (int r = 0; r < num_tries && rclcpp::ok(); ++r)
 	{	
-		// First run start from input position. Later run at a manipulability jump from the best attempt so far
-		const Position start = r == 0 ? from : this->RunManipulabilityJump(best_attempt.position, best_attempt.tour_solution, r);
-		if (this->ResetAndSolveAtStart(start, r, r == 0 ? nullptr : &best_attempt.tour_solution))
+		// The first try starts at the input position. Later tries start from the best attempt: at the same spot with the
+		// reached viewpoints switched to other arm postures (restart_switch_posture), moved by room-then-reach that may
+		// lose some reached viewpoints (restart_room_max_lost_viewpoints > 0), or moved by a manipulability jump.
+		Position start = from;
+		TourSolution switched_tour;
+		const TourSolution* warm = r == 0 ? nullptr : &best_attempt.tour_solution;
+		if (r > 0 && this->params.restart_switch_posture)
+		{
+			start = best_attempt.position;
+			switched_tour = this->SwitchArmPostures(best_attempt.position, best_attempt.tour_solution, r);
+			warm = &switched_tour;
+		}
+		else if (r > 0)
+			start = this->params.restart_room_max_lost_viewpoints > 0 ? this->RunLossyRoomThenReach(best_attempt.position, best_attempt.tour_solution, r) : this->RunManipulabilityJump(best_attempt.position, best_attempt.tour_solution, r);
+		if (this->ResetAndSolveAtStart(start, r, warm))
 		{
 			// Kinematic moves while any viewpoint is missed.
 			int moves_used = 0;
@@ -385,7 +397,7 @@ void ObjectPlacementOptimizer::TraceRoomMove(const std::string& what, int target
 // Room then reach. For each missed viewpoint (smallest gap first), aim a full step at it: reached with nothing lost is
 // accepted, nothing lost walks on. If reached viewpoints are lost, back up instead along the move that most raises the
 // margins that ran out for them (kept off the other viewpoints' limits), then aim again.
-std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
+std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove(int max_lost)
 {
 	const int kMaxRounds = 6;
 	const int kMaxReplans = 3;
@@ -417,12 +429,15 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 			const Position cand = ClampToBounds(at + step * aim, this->params.bounds);
 			TourSolution candidate_tour = this->TestCandidateMove(here_at, cand);
 			const std::vector<int> lost = GetLostViewpoints(here_at, candidate_tour);
-			if (GetLostViewpoints(this->quick_solve_tour, candidate_tour).empty() && candidate_tour.num_reachable > this->quick_solve_tour.num_reachable)
+			const int num_lost_from_start = static_cast<int>(GetLostViewpoints(this->quick_solve_tour, candidate_tour).size());
+			// max_lost > 0 (before a restart): reaching the target while losing at most max_lost counts.
+			const bool reaches_target = std::find(candidate_tour.viewpoint_order.begin(), candidate_tour.viewpoint_order.end(), target) != candidate_tour.viewpoint_order.end();
+			if (max_lost == 0 ? (num_lost_from_start == 0 && candidate_tour.num_reachable > this->quick_solve_tour.num_reachable) : (reaches_target && num_lost_from_start <= max_lost))
 			{
 				this->TraceRoomMove("aim", target, cand, candidate_tour, "accepted");
 				return MoveCandidate{cand, step, this->AddPlannedTravelToCost(cand, std::move(candidate_tour))};
 			}
-			if (lost.empty())
+			if (max_lost == 0 ? lost.empty() : num_lost_from_start <= max_lost)
 			{
 				this->TraceRoomMove("aim", target, cand, candidate_tour, "walk on");
 				at = cand;
@@ -502,14 +517,16 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove()
 				const Position back = ClampToBounds(at + size * room, this->params.bounds);
 				TourSolution room_move_tour = this->TestCandidateMove(here_at, back);
 				const std::vector<int> back_lost = GetLostViewpoints(here_at, room_move_tour);
+				const int back_lost_from_start = static_cast<int>(GetLostViewpoints(this->quick_solve_tour, room_move_tour).size());
+				const bool room_reaches_target = std::find(room_move_tour.viewpoint_order.begin(), room_move_tour.viewpoint_order.end(), target) != room_move_tour.viewpoint_order.end();
 				char what[64];
 				std::snprintf(what, sizeof(what), "room (%+.2f, %+.2f, %+.2f) x %.3f m", room(0), room(1), room(2), size);
-				if (GetLostViewpoints(this->quick_solve_tour, room_move_tour).empty() && room_move_tour.num_reachable > this->quick_solve_tour.num_reachable)
+				if (max_lost == 0 ? (back_lost_from_start == 0 && room_move_tour.num_reachable > this->quick_solve_tour.num_reachable) : (room_reaches_target && back_lost_from_start <= max_lost))
 				{
 					this->TraceRoomMove(what, target, back, room_move_tour, "gained, accepted");
 					return MoveCandidate{back, size, this->AddPlannedTravelToCost(back, std::move(room_move_tour))};
 				}
-				if (back_lost.empty())
+				if (max_lost == 0 ? back_lost.empty() : back_lost_from_start <= max_lost)
 				{
 					this->TraceRoomMove(what, target, back, room_move_tour, "moved");
 					at = back;
@@ -599,6 +616,57 @@ double ObjectPlacementOptimizer::GetJumpScore(const TourSolution& tour) const
 void ObjectPlacementOptimizer::LogJumpStep(int restart_in, int iter, double step)
 {
 	RCLCPP_INFO(this->node->get_logger(), "jump %d iter %d: abs (%.4f, %.4f, %.4f) m  reachable %d/%d  manipulability score %.4f (sum_w %.3f, soft-min %.4f)  step %.4f m", restart_in + 1, iter, this->current_position.x(), this->current_position.y(), this->current_position.z(), this->current_tour.num_reachable, this->num_viewpoint, this->GetJumpScore(this->current_tour), this->current_tour.manipulability_sum, this->current_tour.softmin_manipulability, step);
+}
+
+// Before a restart: the tour with each reached viewpoint moved to another IK solution at the same spot, the restart'th
+// most different from its current pose (joint distance), so the next try starts in other arm postures (elbow, wrist).
+TourSolution ObjectPlacementOptimizer::SwitchArmPostures(const Position& at, const TourSolution& tour, int restart_in)
+{
+	TourSolution switched = tour;
+	const std::vector<std::vector<Joints>> ik_poses = this->CollectIkPoses(at, this->params, GetIkStartPoses(tour, this->home_pose, this->num_viewpoint), this->params.gtsp_restart_ik_solutions);
+	const std::vector<int> all_joints = joint_travel::AllJoints(static_cast<int>(this->home_pose.size()));
+	int num_switched = 0;
+	for (size_t k = 0; k < tour.viewpoint_order.size(); ++k)
+	{
+		std::vector<std::pair<double, Joints>> others;  // joint distance from the current pose, pose
+		for (const Joints& q : ik_poses[static_cast<size_t>(tour.viewpoint_order[k])])
+		{
+			const double distance = joint_travel::JointDistance(q, tour.ik_poses[k], all_joints);
+			if (distance > 0.5)  // rad: another posture, not the same one found again
+				others.push_back({distance, q});
+		}
+		if (others.empty())
+			continue;
+		std::sort(others.begin(), others.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+		switched.ik_poses[k] = others[static_cast<size_t>(restart_in - 1) % others.size()].second;
+		++num_switched;
+	}
+	RCLCPP_INFO(this->node->get_logger(), "restart %d: %d of %d reached viewpoints start from another arm posture at abs (%.4f, %.4f, %.4f) m", restart_in + 1, num_switched, static_cast<int>(tour.viewpoint_order.size()), at.x(), at.y(), at.z());
+	return switched;
+}
+
+// Before a restart, instead of the manipulability jump: room-then-reach moves from the best attempt that may lose up
+// to restart_room_max_lost_viewpoints reached viewpoints, guided by the missed ones. Returns where the next try starts.
+Position ObjectPlacementOptimizer::RunLossyRoomThenReach(const Position& from, const TourSolution& warm, int restart_in)
+{
+	if (!this->ResetAndSolveAtStart(from, restart_in, &warm))
+		return from;
+	for (int move = 0; move < this->params.restart_room_max_moves && !this->current_tour.all_reachable && rclcpp::ok(); ++move)
+	{
+		this->move_start = std::chrono::steady_clock::now();
+		this->ik_seconds = 0.0;
+		this->closest_ik_seconds = 0.0;
+		this->PrepareReachViewpoints();
+		const std::optional<MoveCandidate> step = this->TryKinematicRoomMove(this->params.restart_room_max_lost_viewpoints);
+		if (!step)
+			break;
+		RCLCPP_INFO(this->node->get_logger(), "restart %d lossy room-then-reach move %d: abs (%.4f, %.4f, %.4f) m, reachable %d -> %d", restart_in + 1, move + 1, step->next_position.x(), step->next_position.y(), step->next_position.z(), this->current_tour.num_reachable, step->tour_solution.num_reachable);
+		this->move_history.push_back({MoveType::KinematicRoomMove, this->current_position, step->next_position});
+		this->current_position = step->next_position;
+		this->current_tour = step->tour_solution;
+		this->PublishProgressMarkers(Eigen::Vector3d::Zero());
+	}
+	return this->current_position;
 }
 
 // Gradient ascent on the reached viewpoints' manipulability (sum + jump_softmin_weight x soft-min), whatever is
@@ -891,9 +959,18 @@ std::vector<std::vector<Joints>> ObjectPlacementOptimizer::CollectIkPoses(const 
 }
 
 // Collects IK poses for every viewpoint, then solves the GTSP over the reached ones (or follows the fixed order).
-TourSolution ObjectPlacementOptimizer::SampleIkAndSolveGtsp(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed_q, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order)
+TourSolution ObjectPlacementOptimizer::SampleIkAndSolveGtsp(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed_q, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order, std::vector<std::vector<Joints>>* ik_poses_out)
 {
-	gtsp::Solver tour_solver(this->CollectIkPoses(at, p, seed_q, max_solutions), this->home_pose, p.edge_weights, p.gtsp_two_opt_rounds);
+	std::vector<std::vector<Joints>> ik_poses = this->CollectIkPoses(at, p, seed_q, max_solutions);
+	if (ik_poses_out)
+		*ik_poses_out = ik_poses;
+	return this->SolveGtspOverIkPoses(std::move(ik_poses), p, initial_order, fixed_order);
+}
+
+// GTSP over the viewpoints with IK poses (or the fixed order): one pose per reached viewpoint and the visiting order.
+TourSolution ObjectPlacementOptimizer::SolveGtspOverIkPoses(std::vector<std::vector<Joints>> ik_poses, const ObjectPlacementParams& p, const std::vector<int>* initial_order, const std::vector<int>* fixed_order)
+{
+	gtsp::Solver tour_solver(std::move(ik_poses), this->home_pose, p.edge_weights, p.gtsp_two_opt_rounds);
 	tour_solver.SetTravelJoints(this->counted_joint_indices);
 	gtsp::Tour tour = fixed_order ? tour_solver.SolveFixedOrder(*fixed_order) : initial_order ? tour_solver.Solve(*initial_order) : tour_solver.Solve();
 	TourSolution out;
@@ -969,7 +1046,7 @@ std::vector<MissedViewpoint> ObjectPlacementOptimizer::FindClosestPosesForMissed
 	for (size_t i = 0; i < misses.size(); ++i)
 	{
 		const closest_ik::Result& closest = closest_poses[i];
-		missed.push_back({static_cast<int>(misses[i]), closest.q, closest.found ? closest.pose_error : capped_gap});
+		missed.push_back({static_cast<int>(misses[i]), closest.q, closest.found ? closest.pose_error : capped_gap, closest.exact});
 	}
 	return missed;
 }
@@ -977,8 +1054,23 @@ std::vector<MissedViewpoint> ObjectPlacementOptimizer::FindClosestPosesForMissed
 // The tour at `at`: IK and GTSP, closest poses for the missed viewpoints, then the score.
 TourSolution ObjectPlacementOptimizer::EvaluateObjectPosition(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed_q, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order)
 {
-	TourSolution out = this->SampleIkAndSolveGtsp(at, p, seed_q, initial_order, max_solutions, fixed_order);
+	std::vector<std::vector<Joints>> ik_poses;
+	TourSolution out = this->SampleIkAndSolveGtsp(at, p, seed_q, initial_order, max_solutions, fixed_order, &ik_poses);
 	out.missed_viewpoints = this->FindClosestPosesForMissedViewpoints(at, p, out, seed_q);
+	// A miss whose closest pose is exact was missed by chance: count it as reached and solve the GTSP again with it.
+	if (p.count_exact_closest_ik_as_reached && std::any_of(out.missed_viewpoints.begin(), out.missed_viewpoints.end(), [](const MissedViewpoint& m) { return m.exact; }))
+	{
+		std::vector<MissedViewpoint> still_missed;
+		for (const MissedViewpoint& m : out.missed_viewpoints)
+		{
+			if (m.exact)
+				ik_poses[static_cast<size_t>(m.viewpoint_index)].push_back(m.closest_pose);
+			else
+				still_missed.push_back(m);
+		}
+		out = this->SolveGtspOverIkPoses(std::move(ik_poses), p, &out.viewpoint_order, fixed_order);
+		out.missed_viewpoints = std::move(still_missed);
+	}
 
 	// Manipulability of the tour poses and the misses' closest poses: in the cost only while viewpoints are missed.
 	const double k = p.manipulability_limit_sharpness;

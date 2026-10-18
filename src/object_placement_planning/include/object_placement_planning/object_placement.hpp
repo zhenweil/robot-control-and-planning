@@ -92,6 +92,7 @@ struct ObjectPlacementParams
 	double tour_placement_object_step = 0.02;  // m per axis, halved when a step is rejected
 	double tour_placement_self_motion_step = 0.3;  // rad per pose, halved with the object step
 	double tour_placement_joint_margin = 0.05;  // rad kept from each joint limit
+	bool count_exact_closest_ik_as_reached = false;	 // a miss whose closest IK is exact counts as reached (robust to unlucky IK)
 	int gtsp_restart_ik_solutions = 8;  // IK solutions per viewpoint in GTSP restarts: more same-branch choices for GTSP
 	// Reconfiguration: a move turning any joint (joint 7 aside) more than this; GTSP restarts log how many are left.
 	double reconfig_threshold = 1.0;
@@ -105,7 +106,12 @@ struct ObjectPlacementParams
 	// Room-then-reach: when stuck with misses, aim at a missed viewpoint; if that loses reached viewpoints, back off
 	// to raise the margins (joint limit, reach, stretch, collision) that ran out for them, then aim again.
 	bool room_then_reach = false;
-	int room_max_targets = 3;  // missed viewpoints room-then-reach tries per call, closest first; 0 = all
+	int room_max_targets = 3;
+	// Before a restart: > 0 runs up to restart_room_max_moves room-then-reach moves that may lose this many reached
+	// viewpoints, instead of the manipulability jump (0).
+	int restart_room_max_lost_viewpoints = 0;
+	bool restart_switch_posture = false;  // restarts stay at the best spot with the reached viewpoints in other arm postures
+	int restart_room_max_moves = 3;  // missed viewpoints room-then-reach tries per call, closest first; 0 = all
 	bool tracking = false;  // internal: set on the params copy used for tracked solves
 	// internal: a solve reaching fewer viewpoints than this skips the missed ones' closest-IK gaps (a probe that is
 	// rejected on count anyway); 0 = never

@@ -6,7 +6,7 @@
     # Start position and bounds
     initial_x: 0.2
     initial_y: 0.0
-    initial_z: 0.0
+    initial_z: 0.6
     x_min: 0.2
     x_max: 0.6
     y_min: -0.6
@@ -30,6 +30,9 @@
     reconfig_threshold: 1.0               # rad: a move turning any joint (joint 7 aside) more than this is a reconfiguration
     room_then_reach: true                 # when stuck: aim at a missed viewpoint; if reached ones are lost, back off for what ran out
     room_max_targets: 3                   # missed viewpoints room-then-reach tries per call, closest first; 0 = all
+    restart_room_max_lost_viewpoints: 0   # before a restart: room-then-reach that may lose this many reached viewpoints, instead of the manipulability jump (0)
+    restart_room_max_moves: 3             # such moves before the restart
+    restart_switch_posture: false         # restarts stay at the best spot, reached viewpoints start from other arm postures
     trace_line_search: false
     initial_step: 0.05                    # m: largest object move per iteration (first probe)
     step_shrink: 0.5                     # each failed probe tries step * this
@@ -47,6 +50,7 @@
     manipulability_limit_sharpness: 20.0  # joints near a limit count less in manipulability; 0 = plain
     miss_gap_weight: 200.0
     closest_ik_starts: 5                  # closest-IK starts per missed viewpoint (only runs while viewpoints are missed)
+    count_exact_closest_ik_as_reached: false  # a miss whose closest IK is exact counts as reached (robust to unlucky IK)
     ik_solver: closest                    # kdl, or closest: one solver for exact and closest IK
     ignore_camera_roll: true              # closest solver only: the camera's spin about its axis is free
     exact_ik_margin: 0.0                  # closest solver only: m clearance an exact IK pose keeps; 0 = collision-free only

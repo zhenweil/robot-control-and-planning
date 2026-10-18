@@ -35,6 +35,7 @@ struct MissedViewpoint
 	int viewpoint_index;
 	Joints closest_pose;  // empty if none
 	scene_geometry::Vector6d pose_error;  // from closest_pose to the viewpoint; capped if none
+	bool exact = false;	 // closest IK reached it exactly: the regular IK missed it by chance
 };
 
 // The tour at one object position: what the optimizer minimizes.
@@ -114,11 +115,13 @@ private:
 	// Lower level functions
 	void PrepareReachViewpoints();
 	bool TryReachViewpoints(int iter); // Try to reach all viewpoints one attempt
-	std::optional<MoveCandidate> TryKinematicRoomMove();
+	std::optional<MoveCandidate> TryKinematicRoomMove(int max_lost = 0);
 	std::optional<MoveCandidate> LineSearch(const Eigen::Vector3d& dir);
 	std::optional<TourSolution> ConfirmImprovementWithFullSolve(const MoveCandidate& step);
 	bool CommitMoveAndCheckConvergence(const MoveCandidate& step, TourSolution committed, int iter, const Eigen::Vector3d& g); // Actually move the object
 	Position RunManipulabilityJump(const Position& from, const TourSolution& warm, int restart_in);
+	Position RunLossyRoomThenReach(const Position& from, const TourSolution& warm, int restart_in);
+	TourSolution SwitchArmPostures(const Position& at, const TourSolution& tour, int restart_in);
 	double GetJumpScore(const TourSolution& tour) const;
 	void OptimizeTourAndPlacement();
 	void RestartGtsp();
@@ -133,7 +136,8 @@ private:
 	std::vector<std::vector<Joints>> CollectIkPoses(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, int max_solutions);
 	std::vector<MissedViewpoint> FindClosestPosesForMissedViewpoints(const Position& at, const ObjectPlacementParams& p, const TourSolution& tour, const std::vector<Joints>& seed_q);
 	TourSolution EvaluateObjectPosition(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
-	TourSolution SampleIkAndSolveGtsp(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order);
+	TourSolution SampleIkAndSolveGtsp(const Position& at, const ObjectPlacementParams& p, const std::vector<Joints>& seed, const std::vector<int>* initial_order, int max_solutions, const std::vector<int>* fixed_order, std::vector<std::vector<Joints>>* ik_poses_out = nullptr);
+	TourSolution SolveGtspOverIkPoses(std::vector<std::vector<Joints>> ik_poses, const ObjectPlacementParams& p, const std::vector<int>* initial_order, const std::vector<int>* fixed_order);
 
 	// Compute gradient
 	Eigen::Vector3d ComputeCostGradient(const TourSolution& sol, const ObjectPlacementParams& p); // Cost=closest_IK_gap + manipulability. Used for closest IK move
