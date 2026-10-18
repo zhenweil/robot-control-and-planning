@@ -31,6 +31,18 @@ Position ClampToBounds(Position p, const ObjectPlacementBounds& b)
 	return p;
 }
 
+// Drops the parts of unit `dir` that push out of the box from a spot on its edge, so a step moves fully along the rest.
+Eigen::Vector3d KeepDirectionInsideBounds(const Position& at, Eigen::Vector3d dir, const ObjectPlacementBounds& b)
+{
+	const double kOnEdge = 1e-6;  // m
+	const Eigen::Vector3d lo(b.x_min, b.y_min, b.z_min);
+	const Eigen::Vector3d hi(b.x_max, b.y_max, b.z_max);
+	for (int i = 0; i < 3; ++i)
+		if ((at(i) <= lo(i) + kOnEdge && dir(i) < 0.0) || (at(i) >= hi(i) - kOnEdge && dir(i) > 0.0))
+			dir(i) = 0.0;
+	return dir.norm() < 1e-9 ? Eigen::Vector3d(Eigen::Vector3d::Zero()) : Eigen::Vector3d(dir.normalized());
+}
+
 std::vector<int> GetLostViewpoints(const TourSolution& from, const TourSolution& to)
 {
 	std::vector<int> lost;
@@ -323,7 +335,7 @@ bool ObjectPlacementOptimizer::TryReachViewpoints(int iter)
 		return false;
 	}
 	this->PrepareReachViewpoints();
-	std::optional<MoveCandidate> step = this->LineSearch(-g / gnorm);
+	std::optional<MoveCandidate> step = this->LineSearch(KeepDirectionInsideBounds(this->current_position, -g / gnorm, this->params.bounds));
 	if (!step && this->params.room_then_reach && !this->quick_solve_tour.missed_viewpoints.empty())
 		step = this->TryKinematicRoomMove();
 	std::optional<TourSolution> committed;
@@ -376,6 +388,8 @@ void ObjectPlacementOptimizer::PrepareReachViewpoints()
 // the quick solve merely failed to find doesn't block the step).
 std::optional<MoveCandidate> ObjectPlacementOptimizer::LineSearch(const Eigen::Vector3d& dir)
 {
+	if (dir.norm() < 1e-9)
+		return std::nullopt;  // every downhill part points out of the box
 	ObjectPlacementParams probe_params = this->params;
 	probe_params.gaps_min_reached = this->quick_solve_tour.num_reachable;  // a probe reaching fewer is rejected anyway, so it skips miss gaps
 	double step = this->params.initial_step;
@@ -447,6 +461,7 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove(int 
 				margins.insert(margins.end(), target_margins.begin(), target_margins.end());
 				aim = room_margins::MostRoomDirection(margins, step);
 			}
+			aim = KeepDirectionInsideBounds(at, aim, this->params.bounds);
 			if (aim.norm() < 1e-9)
 				break;
 			const Position cand = ClampToBounds(at + step * aim, this->params.bounds);
@@ -546,7 +561,10 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove(int 
 			for (int plan = 0; plan <= kMaxReplans && !moved && room.norm() > 1e-9; ++plan)
 			{
 				const double size = plan < kMaxReplans ? step : 0.5 * step;
-				const Position back = ClampToBounds(at + size * room, this->params.bounds);
+				const Eigen::Vector3d room_inside = KeepDirectionInsideBounds(at, room, this->params.bounds);
+				if (room_inside.norm() < 1e-9)
+					break;
+				const Position back = ClampToBounds(at + size * room_inside, this->params.bounds);
 				TourSolution room_move_tour = this->TestCandidateMove(here_at, back);
 				const std::vector<int> back_lost = GetLostViewpoints(here_at, room_move_tour);
 				const int back_lost_from_start = static_cast<int>(GetLostViewpoints(this->quick_solve_tour, room_move_tour).size());
