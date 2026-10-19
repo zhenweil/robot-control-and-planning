@@ -266,8 +266,8 @@ def generate_launch_description():
     # launch (don't combine with panda_arm.launch.py, which already publishes these).
     def make_robot_nodes(context):
         robot = robots.GetRobot(LaunchConfiguration("robot").perform(context))
-        moveit_config = robots.GetMoveItConfig(robot)
         params_file = LaunchConfiguration("params_file").perform(context)
+        moveit_config = robots.ShrinkJointRanges(robots.GetMoveItConfig(robot), robots.GetJointMargin(os.path.expanduser(params_file)))
         extra = [os.path.expanduser(params_file)] if params_file else []
         object_placement_node = Node(
             package="object_placement_planning",

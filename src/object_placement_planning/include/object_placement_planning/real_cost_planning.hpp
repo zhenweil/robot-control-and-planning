@@ -12,6 +12,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include "object_placement_planning/joint_travel.hpp"
 #include "object_placement_planning/viewpoint_types.hpp"
 
 // Self-contained PlanningSceneMonitor, not synced with any external move_group, with the object
@@ -131,6 +132,22 @@ std::vector<double> PlanTourJointPathLengths(
 	double planning_time,
 	int num_planning_attempts,
 	bool count_last_joint = true);
+
+// Each group joint's speed and acceleration limits from the model (joint_limits.yaml) into weights.
+void SetJointSpeedLimits(const moveit::core::RobotModelConstPtr& robot_model, const std::string& group_name, joint_travel::EdgeWeights& weights);
+
+// Execution time of each tour edge, the arm stopping at every pose: a straight joint-space move if collision-free, else
+// the fastest of num_planning_attempts OMPL paths timed with TOTG, both under the joint speed and acceleration limits.
+// -1 for an edge that failed.
+std::vector<double> PlanTourEdgeTimes(
+	const rclcpp::Node::SharedPtr& node,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::vector<std::vector<double>>& waypoint_joints,
+	const std::vector<double>& start_reference_joints,
+	const std::string& group_name,
+	double planning_time,
+	int num_planning_attempts);
 
 // Plans each consecutive leg of selected from start_reference_joints, retrying num_planning_attempts
 // times per leg and keeping the shortest -- affordable since it's only selected.size() calls.

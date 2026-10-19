@@ -43,6 +43,15 @@ Eigen::Vector3d KeepDirectionInsideBounds(const Position& at, Eigen::Vector3d di
 	return dir.norm() < 1e-9 ? Eigen::Vector3d(Eigen::Vector3d::Zero()) : Eigen::Vector3d(dir.normalized());
 }
 
+// Step sizes first, 2*first, 4*first, ... while below full; none when first is 0.
+std::vector<double> GetGrowingStepSizes(double first, double full)
+{
+	std::vector<double> sizes;
+	for (double size = first; size > 0.0 && size < full - 1e-9; size *= 2.0)
+		sizes.push_back(size);
+	return sizes;
+}
+
 std::vector<int> GetLostViewpoints(const TourSolution& from, const TourSolution& to)
 {
 	std::vector<int> lost;
@@ -108,6 +117,24 @@ const scene_geometry::Vector6d* FindMissedPoseError(const TourSolution& tour, in
 	return nullptr;
 }
 
+// Each end of tour edge k (into pose k) with the other end's pose as IK start; home is fixed, so after it only pose k.
+std::vector<std::pair<int, Joints>> GetNeighborPostureStarts(const TourSolution& tour, int edge, const Joints& home)
+{
+	const size_t k = static_cast<size_t>(edge);
+	std::vector<std::pair<int, Joints>> starts = {{tour.viewpoint_order[k], k == 0 ? home : tour.ik_poses[k - 1]}};
+	if (k > 0)
+		starts.push_back({tour.viewpoint_order[k - 1], tour.ik_poses[k]});
+	return starts;
+}
+
+// Step sizes for a move: the growing small ones, then the full one.
+std::vector<double> GetMoveStepSizes(const ObjectPlacementParams& p)
+{
+	std::vector<double> sizes = GetGrowingStepSizes(p.reach_first_step, p.initial_step);
+	sizes.push_back(p.initial_step);
+	return sizes;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Setup and the run
 // ---------------------------------------------------------------------------------------------
@@ -169,8 +196,8 @@ ObjectPlacementResult ObjectPlacementOptimizer::Optimize()
 	scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(this->object_translation_nominal, this->object_rotation_nominal));
 	if (this->run_result.ok)
 		RCLCPP_INFO(
-			this->node->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned travel %.2f rad.",
-			this->run_result.x, this->run_result.y, this->run_result.z, this->num_viewpoint, final_tour.planned_cost);
+			this->node->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned travel %.2f %s.",
+			this->run_result.x, this->run_result.y, this->run_result.z, this->num_viewpoint, final_tour.planned_cost, this->params.travel_cost_is_time ? "s" : "rad");
 	else
 		RCLCPP_WARN(
 			this->node->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses.",
@@ -311,12 +338,16 @@ void ObjectPlacementOptimizer::RefineGtspAndPlacement(int iter)
 		for (; iter < this->params.max_kinematic_moves && rclcpp::ok(); ++iter)
 			if (!this->TryReachViewpoints(iter))
 				break;
+	this->LogPostureAndMargins("all reached", this->best_in_attempt.position, this->best_in_attempt.tour_solution);
+	this->ReduceReconfigurations();
+	this->RaiseMargins();
 	for (int round = 1; round <= std::max(1, this->params.tour_placement_rounds) && rclcpp::ok(); ++round)
 	{
 		RCLCPP_INFO(this->node->get_logger(), "  round %d/%d: GTSP restarts, then tour-placement", round, std::max(1, this->params.tour_placement_rounds));
 		this->RestartGtsp();
 		this->OptimizeTourAndPlacement();
 	}
+	this->LogPostureAndMargins("final", this->best_in_attempt.position, this->best_in_attempt.tour_solution);
 }
 
 // One move of the object: gradient line search, else TryKinematicRoomMove (room-then-reach) while viewpoints are
@@ -392,6 +423,18 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::LineSearch(const Eigen::V
 		return std::nullopt;  // every downhill part points out of the box
 	ObjectPlacementParams probe_params = this->params;
 	probe_params.gaps_min_reached = this->quick_solve_tour.num_reachable;  // a probe reaching fewer is rejected anyway, so it skips miss gaps
+	// While viewpoints are missed, small steps first: the first that reaches more is taken, so the object moves no further than needed.
+	if (!this->quick_solve_tour.all_reachable)
+		for (double size : GetGrowingStepSizes(this->params.reach_first_step, this->params.initial_step))
+		{
+			const Position cand = ClampToBounds(this->current_position + size * dir, this->params.bounds);
+			TourSolution probe = this->QuickSolveTour(cand, probe_params);
+			this->run_result.num_inner_solves += 1;
+			if (this->params.trace_line_search)
+				RCLCPP_INFO(this->node->get_logger(), "    small probe step=%.4f m abs (%.4f, %.4f, %.4f): reached %d vs %d here", size, cand.x(), cand.y(), cand.z(), probe.num_reachable, this->quick_solve_tour.num_reachable);
+			if (probe.num_reachable > this->quick_solve_tour.num_reachable)
+				return MoveCandidate{cand, size, this->AddPlannedTravelToCost(cand, std::move(probe))};
+		}
 	double step = this->params.initial_step;
 	for (int ls = 0; ls < this->params.max_line_search_iters; ++ls)
 	{
@@ -420,6 +463,17 @@ void ObjectPlacementOptimizer::TraceRoomMove(const std::string& what, int target
 {
 	if (this->params.trace_line_search)
 		RCLCPP_INFO(this->node->get_logger(), "    %s for vp %d abs (%.4f, %.4f, %.4f): reached %d vs %d here -> %s", what.c_str(), target, cand.x(), cand.y(), cand.z(), candidate_tour.num_reachable, this->quick_solve_tour.num_reachable, verdict.c_str());
+}
+
+// A room-then-reach move is taken if it reaches more with nothing lost; before a restart (max_lost > 0), if it reaches
+// the target while losing at most max_lost.
+bool ObjectPlacementOptimizer::IsRoomMoveAccepted(const TourSolution& candidate_tour, int target, int max_lost) const
+{
+	const int num_lost_from_start = static_cast<int>(GetLostViewpoints(this->quick_solve_tour, candidate_tour).size());
+	if (max_lost == 0)
+		return num_lost_from_start == 0 && candidate_tour.num_reachable > this->quick_solve_tour.num_reachable;
+	const bool reaches_target = std::find(candidate_tour.viewpoint_order.begin(), candidate_tour.viewpoint_order.end(), target) != candidate_tour.viewpoint_order.end();
+	return reaches_target && num_lost_from_start <= max_lost;
 }
 
 // Room then reach. For each missed viewpoint (smallest gap first), aim a full step at it: reached with nothing lost is
@@ -464,14 +518,23 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove(int 
 			aim = KeepDirectionInsideBounds(at, aim, this->params.bounds);
 			if (aim.norm() < 1e-9)
 				break;
+			const std::string aim_name = room_for_target ? "room for target" : "aim";
+			// Small steps first: the first accepted one is taken, so the object moves no further than needed.
+			for (double size : GetGrowingStepSizes(this->params.reach_first_step, step))
+			{
+				const Position small = ClampToBounds(at + size * aim, this->params.bounds);
+				TourSolution small_tour = this->TestCandidateMove(here_at, small);
+				if (this->IsRoomMoveAccepted(small_tour, target, max_lost))
+				{
+					this->TraceRoomMove(aim_name + " small step", target, small, small_tour, "accepted");
+					return MoveCandidate{small, size, this->AddPlannedTravelToCost(small, std::move(small_tour))};
+				}
+			}
 			const Position cand = ClampToBounds(at + step * aim, this->params.bounds);
 			TourSolution candidate_tour = this->TestCandidateMove(here_at, cand);
 			const std::vector<int> lost = GetLostViewpoints(here_at, candidate_tour);
 			const int num_lost_from_start = static_cast<int>(GetLostViewpoints(this->quick_solve_tour, candidate_tour).size());
-			// max_lost > 0 (before a restart): reaching the target while losing at most max_lost counts.
-			const bool reaches_target = std::find(candidate_tour.viewpoint_order.begin(), candidate_tour.viewpoint_order.end(), target) != candidate_tour.viewpoint_order.end();
-			const std::string aim_name = room_for_target ? "room for target" : "aim";
-			if (max_lost == 0 ? (num_lost_from_start == 0 && candidate_tour.num_reachable > this->quick_solve_tour.num_reachable) : (reaches_target && num_lost_from_start <= max_lost))
+			if (this->IsRoomMoveAccepted(candidate_tour, target, max_lost))
 			{
 				this->TraceRoomMove(aim_name, target, cand, candidate_tour, "accepted");
 				return MoveCandidate{cand, step, this->AddPlannedTravelToCost(cand, std::move(candidate_tour))};
@@ -568,10 +631,9 @@ std::optional<MoveCandidate> ObjectPlacementOptimizer::TryKinematicRoomMove(int 
 				TourSolution room_move_tour = this->TestCandidateMove(here_at, back);
 				const std::vector<int> back_lost = GetLostViewpoints(here_at, room_move_tour);
 				const int back_lost_from_start = static_cast<int>(GetLostViewpoints(this->quick_solve_tour, room_move_tour).size());
-				const bool room_reaches_target = std::find(room_move_tour.viewpoint_order.begin(), room_move_tour.viewpoint_order.end(), target) != room_move_tour.viewpoint_order.end();
 				char what[64];
 				std::snprintf(what, sizeof(what), "room (%+.2f, %+.2f, %+.2f) x %.3f m", room(0), room(1), room(2), size);
-				if (max_lost == 0 ? (back_lost_from_start == 0 && room_move_tour.num_reachable > this->quick_solve_tour.num_reachable) : (room_reaches_target && back_lost_from_start <= max_lost))
+				if (this->IsRoomMoveAccepted(room_move_tour, target, max_lost))
 				{
 					this->TraceRoomMove(what, target, back, room_move_tour, "gained, accepted");
 					return MoveCandidate{back, size, this->AddPlannedTravelToCost(back, std::move(room_move_tour))};
@@ -844,7 +906,7 @@ void ObjectPlacementOptimizer::OptimizeTourAndPlacement()
 	std::vector<Joints> poses = this->best_in_attempt.tour_solution.ik_poses;
 	double distance = GetJointDistanceFromHome(this->home_pose, poses, this->counted_joint_indices);
 	int num_accepted = 0;
-	for (int iter = 0; iter < this->params.tour_placement_iterations && object_step > 1e-4 && rclcpp::ok(); ++iter)
+	for (int iter = 0; iter < this->params.tour_placement_iterations && std::max(object_step, self_motion_step) > 1e-4 && rclcpp::ok(); ++iter)
 	{
 		std::vector<tour_placement::LinearizedPose> linearized;
 		for (const Joints& q : poses)
@@ -915,8 +977,8 @@ void ObjectPlacementOptimizer::OptimizeTourAndPlacement()
 	optimized.joint_distance_plus_turn = joint_travel::TravelCost(PrependHomePose(this->home_pose, poses), this->params.edge_weights, this->counted_joint_indices);
 	optimized.planned_cost = this->can_plan ? this->ComputeRealPlannedTravelCost(position, optimized) : -1.0;
 	optimized.weighted_cost_sum = this->ComputeWeightedCost(optimized);
-	const bool kept = optimized.weighted_cost_sum < this->best_in_attempt.weighted_cost_sum;
-	RCLCPP_INFO(this->node->get_logger(), "  tour-placement (%.1f s): planned travel %.2f -> %.2f rad%s", std::chrono::duration<double>(std::chrono::steady_clock::now() - tour_placement_start).count(), this->best_in_attempt.tour_solution.planned_cost, optimized.planned_cost, kept ? "" : "  -- not kept");
+	const bool kept = optimized.weighted_cost_sum < this->best_in_attempt.weighted_cost_sum && this->IsPostureNoWorse(position, optimized, this->best_in_attempt.position, this->best_in_attempt.tour_solution);
+	RCLCPP_INFO(this->node->get_logger(), "  tour-placement (%.1f s): planned travel %.2f -> %.2f %s%s", std::chrono::duration<double>(std::chrono::steady_clock::now() - tour_placement_start).count(), this->best_in_attempt.tour_solution.planned_cost, optimized.planned_cost, this->params.travel_cost_is_time ? "s" : "rad", kept ? "" : "  -- not kept");
 	if (!kept)
 		return;
 	this->move_history.push_back({MoveType::KinematicRoomMove, this->best_in_attempt.position, position});
@@ -1228,7 +1290,7 @@ TourSolution ObjectPlacementOptimizer::RunGtspRestartsAndEvaluate(const Position
 		best_sol.planned_cost = this->ComputeRealPlannedTravelCost(at, best_sol);
 	best_sol.weighted_cost_sum = this->ComputeWeightedCost(best_sol);
 	if (warm_start)
-		RCLCPP_INFO(this->node->get_logger(), "  GTSP restarts start: reachable %d/%d, joint dist + largest turn %.2f, planned travel %.2f rad", best_sol.num_reachable, this->num_viewpoint, best_sol.joint_distance_plus_turn, best_sol.planned_cost);
+		RCLCPP_INFO(this->node->get_logger(), "  GTSP restarts start: reachable %d/%d, joint dist + largest turn %.2f, planned travel %.2f %s", best_sol.num_reachable, this->num_viewpoint, best_sol.joint_distance_plus_turn, best_sol.planned_cost, this->params.travel_cost_is_time ? "s" : "rad");
 	for (int i = 0; i < num_restarts && rclcpp::ok(); ++i)
 	{
 		const std::vector<Joints> ik_starts = warm_start ? GetIkStartPoses(best_sol, this->home_pose, this->num_viewpoint) : this->ik_start_poses;
@@ -1243,9 +1305,9 @@ TourSolution ObjectPlacementOptimizer::RunGtspRestartsAndEvaluate(const Position
 		if (warm_start && this->can_plan)
 			s.planned_cost = this->ComputeRealPlannedTravelCost(at, s);
 		s.weighted_cost_sum = this->ComputeWeightedCost(s);
-		const bool better = s.weighted_cost_sum < best_sol.weighted_cost_sum;
+		const bool better = s.weighted_cost_sum < best_sol.weighted_cost_sum && (!warm_start || this->IsPostureNoWorse(at, s, at, best_sol));
 		if (warm_start)
-			RCLCPP_INFO(this->node->get_logger(), "  GTSP restart %d/%d: joint dist + largest turn %.2f, planned travel %.2f rad vs %.2f best%s", i + 1, num_restarts, s.joint_distance_plus_turn, s.planned_cost, best_sol.planned_cost, better ? "  <-- new best" : "");
+			RCLCPP_INFO(this->node->get_logger(), "  GTSP restart %d/%d: joint dist + largest turn %.2f, planned travel %.2f %s vs %.2f best%s", i + 1, num_restarts, s.joint_distance_plus_turn, s.planned_cost, this->params.travel_cost_is_time ? "s" : "rad", best_sol.planned_cost, better ? "  <-- new best" : "");
 		if (better)
 			best_sol = std::move(s);
 	}
@@ -1257,6 +1319,15 @@ TourSolution ObjectPlacementOptimizer::RunGtspRestartsAndEvaluate(const Position
 double ObjectPlacementOptimizer::ComputeRealPlannedTravelCost(const Position& at, const TourSolution& sol)
 {
 	scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
+	if (this->params.travel_cost_is_time)
+	{
+		// Execution time, stopping at every pose; a failed edge counts its straight-move time plus the penalty.
+		const std::vector<double> times = PlanTourEdgeTimes(this->node, this->robot_model, this->scene, sol.ik_poses, this->home_pose, this->group_name, this->params.real_cost_planning_time, this->params.real_cost_attempts);
+		double total = 0.0;
+		for (size_t k = 0; k < sol.ik_poses.size(); ++k)
+			total += (k < times.size() && times[k] >= 0.0) ? times[k] : joint_travel::StraightMoveTime(k == 0 ? this->home_pose : sol.ik_poses[k - 1], sol.ik_poses[k], this->params.edge_weights.max_velocity, this->params.edge_weights.max_acceleration) + this->params.unreachable_penalty;
+		return total;
+	}
 	const std::vector<double> edges = PlanTourJointPathLengths(
 		this->node, this->robot_model, this->scene, sol.ik_poses, this->home_pose, this->group_name,
 		this->params.real_cost_planning_time, this->params.real_cost_attempts,
@@ -1538,6 +1609,358 @@ std::optional<Joints> ObjectPlacementOptimizer::FindRoomierPose(int v, const Pos
 			this->node->get_logger(), "    vp %d near a limit (smallest margin %.2f floors, %s): %s", v, now, tightest.c_str(),
 			roomiest ? (how + " IK with " + std::to_string(best_score) + " floors swapped in").c_str() : "no roomier IK");
 	return roomiest;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fewer reconfigurations and more margin (after all reached)
+// ---------------------------------------------------------------------------------------------
+
+int ObjectPlacementOptimizer::CountReconfigurations(const TourSolution& tour) const
+{
+	return joint_travel::CountReconfigs(PrependHomePose(this->home_pose, tour.ik_poses), this->params.reconfig_threshold, this->counted_joint_indices);
+}
+
+// Tour indices k whose edge into pose k (from home when k = 0) is a reconfiguration.
+std::vector<int> ObjectPlacementOptimizer::GetReconfigurationEdges(const TourSolution& tour) const
+{
+	std::vector<int> edges;
+	for (size_t k = 0; k < tour.ik_poses.size(); ++k)
+	{
+		const Joints& previous = k == 0 ? this->home_pose : tour.ik_poses[k - 1];
+		if (joint_travel::MaxJointTurn(previous, tour.ik_poses[k], this->counted_joint_indices) > this->params.reconfig_threshold)
+			edges.push_back(static_cast<int>(k));
+	}
+	return edges;
+}
+
+// For each reconfiguration edge, IK of each end started from the other end's pose (it stays in that posture if it can);
+// the GTSP, order fixed, then picks among these and the current poses. The object doesn't move.
+TourSolution ObjectPlacementOptimizer::MatchNeighborPostures(const Position& at, TourSolution tour)
+{
+	if (!tour.all_reachable)
+		return tour;
+	const int kPasses = 3;	// a swapped pose changes its neighbors' edges
+	scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
+	for (int pass = 0; pass < kPasses; ++pass)
+	{
+		const std::vector<int> edges = this->GetReconfigurationEdges(tour);
+		if (edges.empty())
+			break;
+		std::vector<std::vector<Joints>> candidate_poses(static_cast<size_t>(this->num_viewpoint));
+		for (size_t k = 0; k < tour.viewpoint_order.size(); ++k)
+			candidate_poses[static_cast<size_t>(tour.viewpoint_order[k])].push_back(tour.ik_poses[k]);
+		std::vector<std::pair<int, Joints>> starts;
+		for (const int edge : edges)
+			for (std::pair<int, Joints>& start : GetNeighborPostureStarts(tour, edge, this->home_pose))
+				starts.push_back(std::move(start));
+		std::vector<closest_ik::Result> results(starts.size());
+		const uint32_t base_seed = static_cast<uint32_t>(ik_sampling::SeededRng().uniformInteger(1, 1 << 30));
+		RunInParallel(this->robot_state, starts.size(), base_seed, [&](size_t i, moveit::core::RobotState& state, random_numbers::RandomNumberGenerator& rng)
+		{
+			results[i] = this->SolveFromNeighborPose(state, rng, scene_geometry::Translation(at) * this->viewpoints[static_cast<size_t>(starts[i].first)], starts[i].second);
+		});
+		for (size_t i = 0; i < starts.size(); ++i)
+			if (results[i].exact && joint_travel::MaxJointTurn(starts[i].second, results[i].q, this->counted_joint_indices) <= this->params.reconfig_threshold)
+				candidate_poses[static_cast<size_t>(starts[i].first)].push_back(results[i].q);
+		TourSolution matched = this->SolveGtspOverIkPoses(std::move(candidate_poses), this->params, nullptr, &tour.viewpoint_order);
+		if (!matched.all_reachable || this->CountReconfigurations(matched) >= this->CountReconfigurations(tour))
+			break;
+		tour = std::move(matched);
+	}
+	return tour;
+}
+
+// Full solve at `at` keeping from's viewpoint order (so its edges stay the same), IK started from its poses, then
+// neighbor postures matched.
+TourSolution ObjectPlacementOptimizer::EvaluateWithFixedOrder(const Position& at, const TourSolution& from)
+{
+	ik_sampling::ReseedRng(this->attempt_seed);
+	const TourSolution tour = this->EvaluateObjectPosition(at, this->params, GetIkStartPoses(from, this->home_pose, this->num_viewpoint), &from.viewpoint_order, this->params.max_solutions_per_candidate, &from.viewpoint_order);
+	this->run_result.num_inner_solves += 1;
+	return this->MatchNeighborPostures(at, tour);
+}
+
+// IK of a viewpoint from a neighbor's pose that stays near it: step-by-step closest IK (no exact stage, whose long steps
+// jump postures), finished by exact IK when close.
+closest_ik::Result ObjectPlacementOptimizer::SolveFromNeighborPose(moveit::core::RobotState& state, random_numbers::RandomNumberGenerator& rng, const Eigen::Isometry3d& target, const Joints& start)
+{
+	closest_ik::Options options = this->GetClosestIkOptions(this->params, false);
+	options.try_exact_first = false;
+	closest_ik::Result result = closest_ik::Solve(this->scene, state, this->joint_group, this->tool_link, target, start, options);
+	if (!result.found || result.exact || result.gap >= this->params.exact_ik_finish_gap)
+		return result;
+	state.setJointGroupPositions(this->joint_group, result.q);
+	if (this->SolveExactIk(state, target, 1, this->params, rng))
+	{
+		state.copyJointGroupPositions(this->joint_group, result.q);
+		result.exact = true;
+		result.gap = 0.0;
+		result.pose_error.setZero();
+	}
+	return result;
+}
+
+// How far edge k is from one posture: closest IK of each end from the other end's pose, kept only if it stays in that
+// posture. Not found if neither does.
+closest_ik::Result ObjectPlacementOptimizer::GetPostureGap(const Position& at, const TourSolution& tour, int edge)
+{
+	scene_geometry::MoveObject(this->scene, scene_geometry::Translation(at) * this->object_pose);
+	closest_ik::Result best;
+	std::string trace;
+	for (const auto& [viewpoint_index, start] : GetNeighborPostureStarts(tour, edge, this->home_pose))
+	{
+		const Eigen::Isometry3d target = scene_geometry::Translation(at) * this->viewpoints[static_cast<size_t>(viewpoint_index)];
+		const closest_ik::Result result = this->SolveFromNeighborPose(this->robot_state, ik_sampling::SeededRng(), target, start);
+		const double turn = result.found ? joint_travel::MaxJointTurn(start, result.q, this->counted_joint_indices) : -1.0;
+		if (result.found && result.gap < best.gap && turn <= this->params.reconfig_threshold)
+			best = result;
+		char line[160];
+		if (result.found)
+			std::snprintf(line, sizeof(line), " vp %d from the neighbor's pose: %s gap %.3f, largest turn %.2f rad%s;", viewpoint_index, result.exact ? "exact," : "", result.gap, turn, turn > this->params.reconfig_threshold ? " (left the posture)" : "");
+		else
+			std::snprintf(line, sizeof(line), " vp %d from the neighbor's pose: no collision-free pose;", viewpoint_index);
+		trace += line;
+	}
+	if (this->params.trace_line_search)
+		RCLCPP_INFO(this->node->get_logger(), "    edge %d (largest turn %.2f rad):%s", edge, joint_travel::MaxJointTurn(edge == 0 ? this->home_pose : tour.ik_poses[static_cast<size_t>(edge) - 1], tour.ik_poses[static_cast<size_t>(edge)], this->counted_joint_indices), trace.c_str());
+	return best;
+}
+
+// The margins without collision pairs on the camera side (its standoff from the object is the viewpoint planner's).
+std::vector<room_margins::Margin> ObjectPlacementOptimizer::RemoveCameraMargins(std::vector<room_margins::Margin> all) const
+{
+	std::set<std::string> camera_side = closest_ik::ToolSideLinks(this->tool_link);
+	camera_side.erase(moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(this->tool_link)->getName());
+	std::vector<room_margins::Margin> margins;
+	const std::string kCollision = "collision ";
+	for (room_margins::Margin& m : all)
+	{
+		// Collision margins are named "collision <link> - <link>".
+		const size_t split = m.name.find(" - ");
+		const bool camera = m.name.rfind(kCollision, 0) == 0 && split != std::string::npos && (camera_side.count(m.name.substr(kCollision.size(), split - kCollision.size())) || camera_side.count(m.name.substr(split + 3)));
+		if (!camera)
+			margins.push_back(std::move(m));
+	}
+	return margins;
+}
+
+// Arm margins of all tour poses.
+std::vector<room_margins::Margin> ObjectPlacementOptimizer::GetArmMargins(const Position& at, const TourSolution& tour)
+{
+	return this->RemoveCameraMargins(this->BuildRoomMarginArmModel(at, tour).margins);
+}
+
+// Smallest arm margin over all tour poses, in floors.
+double ObjectPlacementOptimizer::GetSmallestMargin(const Position& at, const TourSolution& tour)
+{
+	return room_margins::Tightest(this->GetArmMargins(at, tour));
+}
+
+// With these stages on, a later lower-cost solve must not add a reconfiguration or pull the smallest margin below
+// min(target, before).
+bool ObjectPlacementOptimizer::IsPostureNoWorse(const Position& candidate_at, const TourSolution& candidate, const Position& reference_at, const TourSolution& reference)
+{
+	if (this->params.reduce_reconfigurations && this->CountReconfigurations(candidate) > this->CountReconfigurations(reference))
+		return false;
+	if (!this->params.raise_margins)
+		return true;
+	return this->GetSmallestMargin(candidate_at, candidate) >= std::min(this->params.margin_target_floors, this->GetSmallestMargin(reference_at, reference)) - 1e-9;
+}
+
+// Fewer reconfigurations. First IK in the neighbor's posture (no move). Then the edge closest to one posture moves the
+// object along its gap: small steps first, kept once a reconfiguration goes; a full step that only shrinks the gap walks
+// on. A move never loses a viewpoint, adds a reconfiguration, or pulls the smallest margin below min(target, now).
+void ObjectPlacementOptimizer::ReduceReconfigurations()
+{
+	if (!this->params.reduce_reconfigurations || !this->best_in_attempt.all_reachable)
+		return;
+	const int kWalkRounds = 4;	// full steps that only shrink one edge's gap
+	const auto stage_start = std::chrono::steady_clock::now();
+	Position at = this->best_in_attempt.position;
+	const int before = this->CountReconfigurations(this->best_in_attempt.tour_solution);
+	TourSolution tour = this->MatchNeighborPostures(at, this->best_in_attempt.tour_solution);
+	int reconfigurations = this->CountReconfigurations(tour);
+	const int after_match = reconfigurations;
+	double margin = this->GetSmallestMargin(at, tour);
+	std::set<int> given_up;  // edges (tour index; the order stays fixed) whose gap stopped closing
+	int moves = 0;
+	while (moves < this->params.reconfiguration_max_moves && reconfigurations > 0 && rclcpp::ok())
+	{
+		// The edge closest to one posture.
+		int edge = -1;
+		closest_ik::Result gap;
+		for (const int k : this->GetReconfigurationEdges(tour))
+		{
+			if (given_up.count(k))
+				continue;
+			const closest_ik::Result result = this->GetPostureGap(at, tour, k);
+			if (result.found && !result.exact && result.gap < gap.gap)
+			{
+				edge = k;
+				gap = result;
+			}
+		}
+		if (edge < 0)
+			break;
+		bool removed = false;
+		for (int round = 0; round < kWalkRounds && !removed && moves < this->params.reconfiguration_max_moves; ++round)
+		{
+			const Eigen::Vector3d aim = KeepDirectionInsideBounds(at, -gap.pose_error.head<3>(), this->params.bounds);
+			if (aim.norm() < 1e-9)
+				break;
+			std::optional<std::pair<Position, TourSolution>> full_step;
+			for (const double size : GetMoveStepSizes(this->params))
+			{
+				const Position candidate_at = ClampToBounds(at + size * aim, this->params.bounds);
+				TourSolution candidate = this->EvaluateWithFixedOrder(candidate_at, tour);
+				if (!candidate.all_reachable)
+				{
+					if (this->params.trace_line_search)
+						RCLCPP_INFO(this->node->get_logger(), "    edge %d, %.3f m: reaches %d/%d -- rejected", edge, size, candidate.num_reachable, this->num_viewpoint);
+					continue;
+				}
+				const int count = this->CountReconfigurations(candidate);
+				const double candidate_margin = this->GetSmallestMargin(candidate_at, candidate);
+				if (this->params.trace_line_search)
+					RCLCPP_INFO(this->node->get_logger(), "    edge %d, %.3f m: reconfigurations %d vs %d, smallest margin %.2f vs %.2f floors", edge, size, count, reconfigurations, candidate_margin, margin);
+				if (count > reconfigurations || candidate_margin < std::min(this->params.margin_target_floors, margin) - 1e-9)
+					continue;
+				if (count == reconfigurations)
+				{
+					if (size == this->params.initial_step)
+						full_step = std::make_pair(candidate_at, std::move(candidate));
+					continue;
+				}
+				RCLCPP_INFO(this->node->get_logger(), "  reconfiguration move %d: edge %d, %.3f m to abs (%.4f, %.4f, %.4f): reconfigurations %d -> %d, smallest margin %.2f floors", moves + 1, edge, size, candidate_at.x(), candidate_at.y(), candidate_at.z(), reconfigurations, count, candidate_margin);
+				at = candidate_at;
+				tour = std::move(candidate);
+				reconfigurations = count;
+				margin = candidate_margin;
+				removed = true;
+				++moves;
+				break;
+			}
+			if (removed || !full_step)
+				break;
+			// Walk on only while the gap closes.
+			const closest_ik::Result next_gap = this->GetPostureGap(full_step->first, full_step->second, edge);
+			if (!next_gap.found || next_gap.gap >= gap.gap)
+				break;
+			RCLCPP_INFO(this->node->get_logger(), "  reconfiguration move %d: edge %d, walk on to abs (%.4f, %.4f, %.4f): gap %.3f -> %.3f", moves + 1, edge, full_step->first.x(), full_step->first.y(), full_step->first.z(), gap.gap, next_gap.gap);
+			at = full_step->first;
+			tour = std::move(full_step->second);
+			margin = this->GetSmallestMargin(at, tour);
+			gap = next_gap;
+			++moves;
+		}
+		if (!removed)
+			given_up.insert(edge);
+	}
+	RCLCPP_INFO(this->node->get_logger(), "  reconfigurations (%.1f s): %d -> %d by IK in the neighbor's posture -> %d by %d object moves, %.3f m from where all were reached", std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_start).count(), before, after_match, reconfigurations, moves, (at - this->best_in_attempt.position).norm());
+	this->CommitPostureStage(at, std::move(tour));
+}
+
+// More margin. Poses under the target swap to roomier IK here; then the object moves along the direction that most
+// raises the margins under the target (small steps first, kept if the smallest margin rises). Never loses a viewpoint
+// or adds a reconfiguration.
+void ObjectPlacementOptimizer::RaiseMargins()
+{
+	if (!this->params.raise_margins || !this->best_in_attempt.all_reachable)
+		return;
+	const int kSwapTries = 10;
+	const auto stage_start = std::chrono::steady_clock::now();
+	Position at = this->best_in_attempt.position;
+	TourSolution tour = this->best_in_attempt.tour_solution;
+	const int reconfigurations = this->CountReconfigurations(tour);
+	const double before = this->GetSmallestMargin(at, tour);
+	double margin = before;
+	int moves = 0;
+	while (rclcpp::ok())
+	{
+		room_margins::ArmModel model = this->BuildRoomMarginArmModel(at, tour);
+		model.margins = this->RemoveCameraMargins(std::move(model.margins));
+		for (size_t k = 0; k < tour.viewpoint_order.size(); ++k)
+		{
+			const int v = tour.viewpoint_order[k];
+			if (room_margins::Tightest(room_margins::MarginsOf(model, v)) >= this->params.margin_target_floors)
+				continue;
+			const std::optional<Joints> roomier = this->FindRoomierPose(v, at, model, kSwapTries);
+			if (!roomier)
+				continue;
+			TourSolution swapped = tour;
+			swapped.ik_poses[k] = *roomier;
+			if (this->CountReconfigurations(swapped) <= reconfigurations)
+				tour = std::move(swapped);
+		}
+		model = this->BuildRoomMarginArmModel(at, tour);
+		model.margins = this->RemoveCameraMargins(std::move(model.margins));
+		margin = room_margins::Tightest(model.margins);
+		if (margin >= this->params.margin_target_floors || moves >= this->params.margin_max_moves)
+			break;
+		std::vector<room_margins::Margin> short_margins;
+		for (const room_margins::Margin& m : model.margins)
+			if (m.value / m.floor < this->params.margin_target_floors)
+				short_margins.push_back(m);
+		const Eigen::Vector3d direction = KeepDirectionInsideBounds(at, room_margins::MostRoomDirection(short_margins, this->params.initial_step), this->params.bounds);
+		if (direction.norm() < 1e-9)
+			break;
+		bool moved = false;
+		for (const double size : GetMoveStepSizes(this->params))
+		{
+			const Position candidate_at = ClampToBounds(at + size * direction, this->params.bounds);
+			TourSolution candidate = this->EvaluateWithFixedOrder(candidate_at, tour);
+			if (!candidate.all_reachable || this->CountReconfigurations(candidate) > reconfigurations)
+				continue;
+			const double candidate_margin = this->GetSmallestMargin(candidate_at, candidate);
+			if (candidate_margin <= margin)
+				continue;
+			RCLCPP_INFO(this->node->get_logger(), "  margin move %d: %.3f m to abs (%.4f, %.4f, %.4f): smallest margin %.2f -> %.2f floors", moves + 1, size, candidate_at.x(), candidate_at.y(), candidate_at.z(), margin, candidate_margin);
+			at = candidate_at;
+			tour = std::move(candidate);
+			moved = true;
+			++moves;
+			break;
+		}
+		if (!moved)
+			break;
+	}
+	RCLCPP_INFO(this->node->get_logger(), "  margins (%.1f s): smallest %.2f -> %.2f floors (target %.2f) by %d object moves, %.3f m from the stage start", std::chrono::duration<double>(std::chrono::steady_clock::now() - stage_start).count(), before, margin, this->params.margin_target_floors, moves, (at - this->best_in_attempt.position).norm());
+	this->CommitPostureStage(at, std::move(tour));
+}
+
+// The stage's spot and tour become the attempt's best even at higher travel (fewer reconfigurations and more margin come
+// first); planned travel recomputed.
+void ObjectPlacementOptimizer::CommitPostureStage(const Position& at, TourSolution tour)
+{
+	tour.planned_cost = this->can_plan ? this->ComputeRealPlannedTravelCost(at, tour) : -1.0;
+	tour.weighted_cost_sum = this->ComputeWeightedCost(tour);
+	if (at != this->best_in_attempt.position)
+		this->move_history.push_back({MoveType::KinematicRoomMove, this->best_in_attempt.position, at});
+	this->best_in_attempt.position = at;
+	this->best_in_attempt.weighted_cost_sum = tour.weighted_cost_sum;
+	this->best_in_attempt.all_reachable = tour.all_reachable;
+	this->best_in_attempt.tour_solution = std::move(tour);
+}
+
+// Reconfigurations and the tightest arm margins of a tour (joint limits in rad; collisions within 0.1 m, camera left out).
+void ObjectPlacementOptimizer::LogPostureAndMargins(const std::string& when, const Position& at, const TourSolution& tour)
+{
+	if (!tour.all_reachable)
+		return;
+	const std::vector<room_margins::Margin> margins = this->GetArmMargins(at, tour);
+	double joint_margin = std::numeric_limits<double>::infinity();
+	double collision_margin = std::numeric_limits<double>::infinity();
+	for (const room_margins::Margin& m : margins)
+	{
+		if (m.name.rfind("joint", 0) == 0)
+			joint_margin = std::min(joint_margin, m.value);
+		else if (m.name.rfind("collision", 0) == 0)
+			collision_margin = std::min(collision_margin, m.value);
+	}
+	char collision[32] = "over 0.1 m";
+	if (!std::isinf(collision_margin))
+		std::snprintf(collision, sizeof(collision), "%.3f m", collision_margin);
+	RCLCPP_INFO(this->node->get_logger(), "  %s at abs (%.4f, %.4f, %.4f): reconfigurations %d, smallest margin %.2f floors, joint limit %.3f rad, collision %s, planned travel %.2f %s", when.c_str(), at.x(), at.y(), at.z(), this->CountReconfigurations(tour), room_margins::Tightest(margins), joint_margin, collision, tour.planned_cost, this->params.travel_cost_is_time ? "s" : "rad");
 }
 
 // ---------------------------------------------------------------------------------------------

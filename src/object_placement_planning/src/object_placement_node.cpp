@@ -48,6 +48,8 @@ struct Params
 
 	double joint_distance_weight = 1.0;
 	double max_joint_deviation_weight = 1.0;
+	double travel_time_weight = 0.0;
+	bool travel_cost_is_time = false;
 	double miss_gap_weight = 5000.0;
 	double manipulability_limit_sharpness = 0.0;
 	double manipulability_weight = 0.0;
@@ -80,6 +82,7 @@ struct Params
 	int max_kinematic_moves = 20;
 	double initial_step = 0.02;
 	double step_shrink = 0.25;
+	double reach_first_step = 0.01;
 	int max_line_search_iters = 4;
 	double jacobian_damping = 1e-3;
 
@@ -95,6 +98,11 @@ struct Params
 	double tour_placement_self_motion_step = 0.3;
 	double tour_placement_joint_margin = 0.05;
 	double reconfig_threshold = 1.0;
+	bool reduce_reconfigurations = false;
+	int reconfiguration_max_moves = 10;
+	bool raise_margins = false;
+	double margin_target_floors = 2.0;
+	int margin_max_moves = 10;
 	bool freeze_order = false;
 	bool lock_input_order = false;
 	double real_cost_planning_time = 0.0;
@@ -265,6 +273,8 @@ private:
 		this->declareIfNeeded("rot_metric_scale", this->params.rot_metric_scale);
 		this->declareIfNeeded("joint_distance_weight", this->params.joint_distance_weight);
 		this->declareIfNeeded("max_joint_deviation_weight", this->params.max_joint_deviation_weight);
+		this->declareIfNeeded("travel_time_weight", this->params.travel_time_weight);
+		this->declareIfNeeded("travel_cost_is_time", this->params.travel_cost_is_time);
 		this->declareIfNeeded("miss_gap_weight", this->params.miss_gap_weight);
 		this->declareIfNeeded("manipulability_limit_sharpness", this->params.manipulability_limit_sharpness);
 		this->declareIfNeeded("manipulability_weight", this->params.manipulability_weight);
@@ -295,6 +305,7 @@ private:
 		this->declareIfNeeded("max_kinematic_moves", this->params.max_kinematic_moves);
 		this->declareIfNeeded("initial_step", this->params.initial_step);
 		this->declareIfNeeded("step_shrink", this->params.step_shrink);
+		this->declareIfNeeded("reach_first_step", this->params.reach_first_step);
 		this->declareIfNeeded("max_line_search_iters", this->params.max_line_search_iters);
 		this->declareIfNeeded("jacobian_damping", this->params.jacobian_damping);
 		this->declareIfNeeded("convergence_tolerance_offset", this->params.convergence_tolerance_offset);
@@ -309,6 +320,11 @@ private:
 		this->declareIfNeeded("tour_placement_self_motion_step", this->params.tour_placement_self_motion_step);
 		this->declareIfNeeded("tour_placement_joint_margin", this->params.tour_placement_joint_margin);
 		this->declareIfNeeded("reconfig_threshold", this->params.reconfig_threshold);
+		this->declareIfNeeded("reduce_reconfigurations", this->params.reduce_reconfigurations);
+		this->declareIfNeeded("reconfiguration_max_moves", this->params.reconfiguration_max_moves);
+		this->declareIfNeeded("raise_margins", this->params.raise_margins);
+		this->declareIfNeeded("margin_target_floors", this->params.margin_target_floors);
+		this->declareIfNeeded("margin_max_moves", this->params.margin_max_moves);
 		this->declareIfNeeded("freeze_order", this->params.freeze_order);
 		this->declareIfNeeded("lock_input_order", this->params.lock_input_order);
 		this->declareIfNeeded("real_cost_planning_time", this->params.real_cost_planning_time);
@@ -348,6 +364,8 @@ private:
 		this->get_parameter("rot_metric_scale", this->params.rot_metric_scale);
 		this->get_parameter("joint_distance_weight", this->params.joint_distance_weight);
 		this->get_parameter("max_joint_deviation_weight", this->params.max_joint_deviation_weight);
+		this->get_parameter("travel_time_weight", this->params.travel_time_weight);
+		this->get_parameter("travel_cost_is_time", this->params.travel_cost_is_time);
 		this->get_parameter("miss_gap_weight", this->params.miss_gap_weight);
 		this->get_parameter("manipulability_limit_sharpness", this->params.manipulability_limit_sharpness);
 		this->get_parameter("manipulability_weight", this->params.manipulability_weight);
@@ -378,6 +396,7 @@ private:
 		this->get_parameter("max_kinematic_moves", this->params.max_kinematic_moves);
 		this->get_parameter("initial_step", this->params.initial_step);
 		this->get_parameter("step_shrink", this->params.step_shrink);
+		this->get_parameter("reach_first_step", this->params.reach_first_step);
 		this->get_parameter("max_line_search_iters", this->params.max_line_search_iters);
 		this->get_parameter("jacobian_damping", this->params.jacobian_damping);
 		this->get_parameter("convergence_tolerance_offset", this->params.convergence_tolerance_offset);
@@ -392,6 +411,11 @@ private:
 		this->get_parameter("tour_placement_self_motion_step", this->params.tour_placement_self_motion_step);
 		this->get_parameter("tour_placement_joint_margin", this->params.tour_placement_joint_margin);
 		this->get_parameter("reconfig_threshold", this->params.reconfig_threshold);
+		this->get_parameter("reduce_reconfigurations", this->params.reduce_reconfigurations);
+		this->get_parameter("reconfiguration_max_moves", this->params.reconfiguration_max_moves);
+		this->get_parameter("raise_margins", this->params.raise_margins);
+		this->get_parameter("margin_target_floors", this->params.margin_target_floors);
+		this->get_parameter("margin_max_moves", this->params.margin_max_moves);
 		this->get_parameter("freeze_order", this->params.freeze_order);
 		this->get_parameter("lock_input_order", this->params.lock_input_order);
 		this->get_parameter("real_cost_planning_time", this->params.real_cost_planning_time);
@@ -453,6 +477,9 @@ private:
 		bg.rot_metric_scale = this->params.rot_metric_scale;
 		bg.edge_weights.joint_distance = this->params.joint_distance_weight;
 		bg.edge_weights.max_turn = this->params.max_joint_deviation_weight;
+		bg.edge_weights.time = this->params.travel_time_weight;
+		SetJointSpeedLimits(this->robot_model, this->params.group_name, bg.edge_weights);
+		bg.travel_cost_is_time = this->params.travel_cost_is_time;
 		bg.miss_gap_weight = this->params.miss_gap_weight;
 		bg.manipulability_limit_sharpness = this->params.manipulability_limit_sharpness;
 		bg.manipulability_weight = this->params.manipulability_weight;
@@ -485,6 +512,7 @@ private:
 		bg.max_kinematic_moves = this->params.max_kinematic_moves;
 		bg.initial_step = this->params.initial_step;
 		bg.step_shrink = this->params.step_shrink;
+		bg.reach_first_step = this->params.reach_first_step;
 		bg.max_line_search_iters = this->params.max_line_search_iters;
 		bg.jacobian_damping = this->params.jacobian_damping;
 		bg.convergence_tolerance_offset = this->params.convergence_tolerance_offset;
@@ -499,6 +527,11 @@ private:
 		bg.tour_placement_self_motion_step = this->params.tour_placement_self_motion_step;
 		bg.tour_placement_joint_margin = this->params.tour_placement_joint_margin;
 		bg.reconfig_threshold = this->params.reconfig_threshold;
+		bg.reduce_reconfigurations = this->params.reduce_reconfigurations;
+		bg.reconfiguration_max_moves = this->params.reconfiguration_max_moves;
+		bg.raise_margins = this->params.raise_margins;
+		bg.margin_target_floors = this->params.margin_target_floors;
+		bg.margin_max_moves = this->params.margin_max_moves;
 		bg.freeze_order = this->params.freeze_order;
 		bg.lock_input_order = this->params.lock_input_order;
 		bg.real_cost_planning_time = this->params.real_cost_planning_time;

@@ -4,9 +4,9 @@
 /**:
   ros__parameters:
     # Start position and bounds
-    initial_x: 0.4
-    initial_y: 0.4
-    initial_z: 0.4
+    initial_x: 0.292
+    initial_y: 0.0
+    initial_z: 0.257
     x_min: 0.2
     x_max: 0.6
     y_min: -0.6
@@ -28,6 +28,11 @@
     tour_placement_self_motion_step: 0.3  # rad along each pose's self-motion per step
     tour_placement_joint_margin: 0.05     # rad kept from joint limits
     reconfig_threshold: 1.0               # rad: a move turning any joint (joint 7 aside) more than this is a reconfiguration
+    reduce_reconfigurations: true         # after all reached: IK in the neighbor's posture, then object moves for the rest
+    reconfiguration_max_moves: 10         # object moves in that stage
+    raise_margins: true                   # then roomier IK poses and object moves until every margin reaches the target
+    margin_target_floors: 2.0             # smallest margin wanted, in floors (joint limit 0.05 rad, stretch 0.02, collision 0.01 m)
+    margin_max_moves: 10                  # object moves in that stage
     room_then_reach: true                 # when stuck: aim at a missed viewpoint; if reached ones are lost, back off for what ran out
     room_max_targets: 3                   # missed viewpoints room-then-reach tries per call, closest first; 0 = all
     room_for_missed_viewpoint: true       # when aiming stops closing the gap: move to open what blocks the missed viewpoint (self-collision, joint limits)
@@ -37,6 +42,7 @@
     trace_line_search: false
     initial_step: 0.05                    # m: largest object move per iteration (first probe)
     step_shrink: 0.5                     # each failed probe tries step * this
+    reach_first_step: 0.01                # m: while viewpoints are missed, moves try this, doubling, before initial_step; 0 = off
     max_line_search_iters: 4              # probes per iteration before giving up
 
     # IK: a fixed number of attempts instead of a time limit, so the same random_seed repeats the run
@@ -45,6 +51,11 @@
     # Cost
     planned_travel_in_cost: true
     real_cost_planning_time: 0.5
+    travel_cost_is_time: true             # tour cost = execution time (s), stopping at every pose; straight joint moves where collision-free
+    travel_time_weight: 1.0               # GTSP edge cost per second of a straight move
+    joint_distance_weight: 0.0            # GTSP edge cost per rad of joint distance (0: time only)
+    max_joint_deviation_weight: 0.0       # GTSP edge cost per rad of the largest joint turn (0: time only)
+    joint_margin: 0.1                     # rad: hard margin from every joint limit (read by the launch file)
     manipulability_weight: 1.0            # while viewpoints are missed: cost -= this * sum of manipulability
     softmin_manipulability_weight: 1000.0 # while viewpoints are missed: cost -= this * soft-min manipulability (worst poses)
     softmin_tau: 0.01                     # soft-min: small = only the worst pose, large = closer to the average
@@ -55,4 +66,4 @@
     exact_ik_finish_gap: 0.05             # m: a miss closer than this (rotation at rot_metric_scale) gets exact IK from its closest pose; 0 = off
     ik_solver: closest                    # kdl, or closest: one solver for exact and closest IK
     ignore_camera_roll: false              # closest solver only: the camera's spin about its axis is free
-    exact_ik_margin: 0.0                  # closest solver only: m clearance an exact IK pose keeps; 0 = collision-free only
+    exact_ik_margin: 0.01                 # closest solver only: m clearance an exact IK pose keeps; 0 = collision-free only

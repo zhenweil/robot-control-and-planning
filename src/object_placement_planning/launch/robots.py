@@ -1,4 +1,8 @@
 """Per-robot settings shared by the launch files: robot:=panda (default), kinova (Kinova Gen3 7-DOF), xarm7 (UFactory xArm7), ur5e or ur3e (Universal Robots, 6-DOF)."""
+import xml.etree.ElementTree as ElementTree
+
+import yaml
+
 from moveit_configs_utils import MoveItConfigsBuilder
 
 # home: the tour's start pose (overrides object_pose.yaml's initial_joints). The other robots' homes put tool0 at the
@@ -76,6 +80,38 @@ def GetMoveItConfig(robot):
         .planning_pipelines(pipelines=["ompl"])
         .to_moveit_configs()
     )
+
+
+# Hard joint margin: every revolute joint's range (as MoveIt reads it from the URDF) shrunk by margin (rad) on both
+# sides, as joint_limits.yaml position limits, so IK, sampling and planning all treat the rest as out of range. 0 = off.
+def ShrinkJointRanges(moveit_config, margin):
+    if margin <= 0.0:
+        return moveit_config
+    limits = moveit_config.joint_limits["robot_description_planning"]["joint_limits"]
+    for joint in ElementTree.fromstring(str(moveit_config.robot_description["robot_description"])).iter("joint"):
+        limit = joint.find("limit")
+        if joint.get("type") != "revolute" or limit is None or joint.get("name") not in limits:
+            continue
+        lower, upper = float(limit.get("lower")), float(limit.get("upper"))
+        safety = joint.find("safety_controller")  # MoveIt uses the tighter soft limits when given
+        if safety is not None:
+            lower = max(lower, float(safety.get("soft_lower_limit", lower)))
+            upper = min(upper, float(safety.get("soft_upper_limit", upper)))
+        limits[joint.get("name")].update({"has_position_limits": True, "min_position": lower + margin, "max_position": upper - margin})
+    return moveit_config
+
+
+# joint_margin (rad) from a params YAML's /** or node section; 0 if not given.
+def GetJointMargin(params_file):
+    if not params_file:
+        return 0.0
+    with open(params_file) as f:
+        sections = yaml.safe_load(f) or {}
+    for section in sections.values():
+        margin = ((section or {}).get("ros__parameters") or {}).get("joint_margin")
+        if margin is not None:
+            return float(margin)
+    return 0.0
 
 
 # Node parameters that follow the robot: planning group and home pose.

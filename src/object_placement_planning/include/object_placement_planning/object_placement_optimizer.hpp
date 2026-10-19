@@ -151,6 +151,7 @@ private:
 
 	// --- Room-then-reach ---
 	void TraceRoomMove(const std::string& what, int target, const Position& cand, const TourSolution& candidate_tour, const std::string& verdict);
+	bool IsRoomMoveAccepted(const TourSolution& candidate_tour, int target, int max_lost) const;
 	double GetStretch(const Joints& q);
 	std::vector<room_margins::Margin> GetIkPoseMargins(int v, const Joints& q);
 	room_margins::ArmModel BuildRoomMarginArmModel(const Position& at, const TourSolution& sol);
@@ -158,6 +159,22 @@ private:
 	std::vector<room_margins::Margin> GetMissedPoseMargins(int target, const Position& at, const TourSolution& tour);
 	std::optional<Joints> FindRoomierPose(int v, const Position& at, const room_margins::ArmModel& model, int tries);
 	room_margins::Shortage GetMarginsThatRunOut(int v, const room_margins::ArmModel& model, const Position& at, const Eigen::Vector3d& d);
+
+	// --- Fewer reconfigurations and more margin (after all reached) ---
+	int CountReconfigurations(const TourSolution& tour) const;
+	std::vector<int> GetReconfigurationEdges(const TourSolution& tour) const;
+	TourSolution MatchNeighborPostures(const Position& at, TourSolution tour);
+	TourSolution EvaluateWithFixedOrder(const Position& at, const TourSolution& from);
+	closest_ik::Result SolveFromNeighborPose(moveit::core::RobotState& state, random_numbers::RandomNumberGenerator& rng, const Eigen::Isometry3d& target, const Joints& start);
+	closest_ik::Result GetPostureGap(const Position& at, const TourSolution& tour, int edge);
+	std::vector<room_margins::Margin> RemoveCameraMargins(std::vector<room_margins::Margin> all) const;
+	std::vector<room_margins::Margin> GetArmMargins(const Position& at, const TourSolution& tour);
+	double GetSmallestMargin(const Position& at, const TourSolution& tour);
+	bool IsPostureNoWorse(const Position& candidate_at, const TourSolution& candidate, const Position& reference_at, const TourSolution& reference);
+	void ReduceReconfigurations();
+	void RaiseMargins();
+	void CommitPostureStage(const Position& at, TourSolution tour);
+	void LogPostureAndMargins(const std::string& when, const Position& at, const TourSolution& tour);
 
 	// --- Fixed for the whole run ---
 	std::string group_name;

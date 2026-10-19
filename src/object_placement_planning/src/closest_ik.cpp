@@ -172,6 +172,22 @@ bool IsWithinExactTolerance(const scene_geometry::Vector6d& pose_error, const Op
 
 // Exact stage, like KDL: full damped Newton steps on the pose error, no collision terms; one validity check once within
 // the tolerances. Not found if it doesn't converge or the pose is invalid.
+// True if no arm link is within margin of anything. The camera side (links past the last wrist link) is left out: the
+// viewpoint planner already set its standoff from the object.
+bool HasArmClearance(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, const moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, double margin)
+{
+	std::set<std::string> camera_side = ToolSideLinks(tool);
+	camera_side.erase(moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(tool)->getName());
+	const ClosePairs pairs = FindClosePairs(scene, state, group, CloseRequest(state, group, margin), margin);
+	for (const std::string& name : pairs.names)
+	{
+		const size_t split = name.find(" - ");
+		if (!camera_side.count(name.substr(0, split)) && !camera_side.count(name.substr(split + 3)))
+			return false;
+	}
+	return true;
+}
+
 Result SolveExact(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const Options& options)
 {
 	const double damping = 1e-3;
@@ -186,7 +202,7 @@ Result SolveExact(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, 
 		{
 			if (!scene_geometry::IsStateValid(scene, &state, group, q.data()))
 				return {};
-			if (options.exact_margin > 0.0 && !FindClosePairs(scene, state, group, CloseRequest(state, group, options.exact_margin), options.exact_margin).dists.empty())
+			if (options.exact_margin > 0.0 && !HasArmClearance(scene, state, group, tool, options.exact_margin))
 				return {};
 			return {true, true, pose_error, scene_geometry::PoseGap(pose_error, options.rot_scale), q};
 		}

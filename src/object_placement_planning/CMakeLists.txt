@@ -39,6 +39,7 @@ find_package(VTK 9.1 REQUIRED COMPONENTS
 add_executable(viewpoint_planner_nn2opt
 	src/mesh_utils.cpp
 	src/potential_field_sampler.cpp
+	src/joint_travel.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
 	src/viewpoint_planner_nn2opt_node.cpp
@@ -47,6 +48,7 @@ add_executable(viewpoint_planner_nn2opt
 add_executable(viewpoint_planner_hgtsp
 	src/mesh_utils.cpp
 	src/potential_field_sampler.cpp
+	src/joint_travel.cpp
 	src/real_cost_planning.cpp
 	src/hierarchical_tour.cpp
 	src/viewpoint_io.cpp
@@ -55,6 +57,7 @@ add_executable(viewpoint_planner_hgtsp
 
 add_executable(bstar_placement
 	src/bstar_placement.cpp
+	src/joint_travel.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
 	src/bstar_placement_node.cpp
@@ -89,6 +92,7 @@ ament_target_dependencies(build_reachability_map rclcpp moveit_ros_planning rand
 add_executable(viewpoint_generator
 	src/mesh_utils.cpp
 	src/potential_field_sampler.cpp
+	src/joint_travel.cpp
 	src/real_cost_planning.cpp
 	src/viewpoint_io.cpp
 	src/viewpoint_generation.cpp
@@ -122,6 +126,7 @@ add_executable(sgd_placement
 add_executable(ik_reachability_check
 	src/closest_ik.cpp
 	src/manipulability.cpp
+	src/joint_travel.cpp
 	src/real_cost_planning.cpp
 	src/scene_geometry.cpp
 	src/viewpoint_io.cpp

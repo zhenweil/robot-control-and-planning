@@ -111,6 +111,9 @@ public:
 		const double beta1 = this->GetParameter<double>("sgd_beta1", 0.9);
 		const double beta2 = this->GetParameter<double>("sgd_beta2", 0.999);
 		const double restart_radius = this->GetParameter<double>("sgd_restart_radius", 0.1);	// m per axis around the best position
+		// Restarts sampled around where the last descent ended instead: a normal distribution, so nearer spots are likelier.
+		const bool restart_near_last = this->GetParameter<bool>("sgd_restart_near_last", false);
+		const double restart_sigma = this->GetParameter<double>("sgd_restart_sigma", 0.1);	// m per axis
 		const double adam_epsilon = 1e-8;
 		// Tour at the solution: object_placement's names and defaults.
 		const int two_opt_rounds = static_cast<int>(this->GetParameter<int64_t>("gtsp_two_opt_rounds", 5));
@@ -123,6 +126,9 @@ public:
 		joint_travel::EdgeWeights edge_weights;
 		edge_weights.joint_distance = this->GetParameter<double>("joint_distance_weight", 1.0);
 		edge_weights.max_turn = this->GetParameter<double>("max_joint_deviation_weight", 1.0);
+		edge_weights.time = this->GetParameter<double>("travel_time_weight", 0.0);
+		// Planned travel = execution time (s), stopping at every pose, as object_placement's travel_cost_is_time.
+		const bool travel_cost_is_time = this->GetParameter<bool>("travel_cost_is_time", false);
 		const std::vector<int> travel_joints = joint_travel::AllJoints(static_cast<int>(home.size()) - 1);  // the last joint only spins the camera
 
 		if (mesh_path.empty())
@@ -139,6 +145,7 @@ public:
 		state.setToDefaultValues();
 		const moveit::core::JointModelGroup* group = state.getJointModelGroup(group_name);
 		const moveit::core::LinkModel* tool = model->getLinkModel("tool0");
+		SetJointSpeedLimits(model, group_name, edge_weights);
 		const planning_scene_monitor::PlanningSceneMonitorPtr scene = BuildLocalCollisionScene(this->shared_from_this(), mesh_path, mesh_scale, nominal, rotation);
 		AddMountingSurface(scene);
 
@@ -189,18 +196,33 @@ public:
 
 		std::mt19937 rng(static_cast<unsigned int>(seed));
 		std::uniform_real_distribution<double> restart_offset(-restart_radius, restart_radius);
+		std::normal_distribution<double> normal_offset(0.0, restart_sigma);
+		// A restart spot near `center`, resampled until inside the box (clamped if that keeps failing).
+		auto SampleNear = [&](const Eigen::Vector3d& center)
+		{
+			Eigen::Vector3d sample = center;
+			for (int tries = 0; tries < 100; ++tries)
+			{
+				sample = center + Eigen::Vector3d(normal_offset(rng), normal_offset(rng), normal_offset(rng));
+				if ((sample.array() >= lo.array()).all() && (sample.array() <= hi.array()).all())
+					return sample;
+			}
+			return Eigen::Vector3d(sample.cwiseMax(lo).cwiseMin(hi));
+		};
 		const auto start_time = std::chrono::steady_clock::now();
 		auto GetElapsedSeconds = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count(); };
 
 		Eigen::Vector3d best_position = start.cwiseMax(lo).cwiseMin(hi);
 		StepResult best_step;
 		best_step.num_exact = -1;
+		Eigen::Vector3d last_position = best_position;	// where the last descent ended
 		int restart = 0, total_steps = 0;
 		bool all_reached = false;
 		while (!all_reached && rclcpp::ok() && GetElapsedSeconds() < time_budget)
 		{
-			// The first descent starts at the given start (as object_placement), later ones at a random offset from the best position.
-			Eigen::Vector3d position = restart == 0 ? start.cwiseMax(lo).cwiseMin(hi) : Eigen::Vector3d(best_position + Eigen::Vector3d(restart_offset(rng), restart_offset(rng), restart_offset(rng))).cwiseMax(lo).cwiseMin(hi);
+			// The first descent starts at the given start (as object_placement), later ones at a random offset from the best position
+			// (or near where the last descent ended).
+			Eigen::Vector3d position = restart == 0 ? start.cwiseMax(lo).cwiseMin(hi) : restart_near_last ? SampleNear(last_position) : Eigen::Vector3d(Eigen::Vector3d(best_position + Eigen::Vector3d(restart_offset(rng), restart_offset(rng), restart_offset(rng))).cwiseMax(lo).cwiseMin(hi));
 			std::vector<Joints> seeds(viewpoints.size(), home);
 			Eigen::Vector3d first_moment = Eigen::Vector3d::Zero(), second_moment = Eigen::Vector3d::Zero();
 			for (int step_index = 1; step_index <= max_steps && rclcpp::ok() && GetElapsedSeconds() < time_budget; ++step_index)
@@ -238,6 +260,7 @@ public:
 				position -= learning_rate * first_unbiased.cwiseQuotient((second_unbiased.array().sqrt() + adam_epsilon).matrix());
 				position = position.cwiseMax(lo).cwiseMin(hi);
 			}
+			last_position = position;
 			++restart;
 		}
 		const double search_seconds = GetElapsedSeconds();
@@ -253,8 +276,15 @@ public:
 		scene_geometry::MoveObject(scene, scene_geometry::MakeIsometry(best_position, rotation));
 		auto GetPlannedTravel = [&](const gtsp::Tour& tour)
 		{
-			const std::vector<double> edges = PlanTourJointPathLengths(this->shared_from_this(), model, scene, tour.poses, home, group_name, planning_time, planning_attempts, /*count_last_joint=*/false);
 			double travel = 0.0;
+			if (travel_cost_is_time)
+			{
+				const std::vector<double> times = PlanTourEdgeTimes(this->shared_from_this(), model, scene, tour.poses, home, group_name, planning_time, planning_attempts);
+				for (size_t k = 0; k < tour.poses.size(); ++k)
+					travel += (k < times.size() && times[k] >= 0.0) ? times[k] : joint_travel::StraightMoveTime(k == 0 ? home : tour.poses[k - 1], tour.poses[k], edge_weights.max_velocity, edge_weights.max_acceleration) + unreachable_penalty;
+				return travel;
+			}
+			const std::vector<double> edges = PlanTourJointPathLengths(this->shared_from_this(), model, scene, tour.poses, home, group_name, planning_time, planning_attempts, /*count_last_joint=*/false);
 			for (size_t k = 0; k < tour.poses.size(); ++k)
 				travel += (k < edges.size() && edges[k] >= 0.0) ? edges[k] : joint_travel::JointDistance(k == 0 ? home : tour.poses[k - 1], tour.poses[k], travel_joints) + unreachable_penalty;
 			return travel;
@@ -304,7 +334,7 @@ public:
 			if (static_cast<int>(tour.order.size()) < num_viewpoint)
 				continue;
 			const double travel = GetPlannedTravel(tour);
-			RCLCPP_INFO(this->get_logger(), "GTSP restart %d/%d: planned travel %.2f rad vs %.2f best%s", restart_index + 1, gtsp_restarts, travel, planned_travel, travel < planned_travel ? "  <-- new best" : "");
+			RCLCPP_INFO(this->get_logger(), "GTSP restart %d/%d: planned travel %.2f %s vs %.2f best%s", restart_index + 1, gtsp_restarts, travel, travel_cost_is_time ? "s" : "rad", planned_travel, travel < planned_travel ? "  <-- new best" : "");
 			if (travel < planned_travel)
 			{
 				planned_travel = travel;
@@ -312,11 +342,11 @@ public:
 			}
 		}
 		if (all_reached && gtsp_restarts > 0)
-			RCLCPP_INFO(this->get_logger(), "%d GTSP restarts: planned travel %.2f -> %.2f rad", gtsp_restarts, travel_at_reach, planned_travel);
+			RCLCPP_INFO(this->get_logger(), "%d GTSP restarts: planned travel %.2f -> %.2f %s", gtsp_restarts, travel_at_reach, planned_travel, travel_cost_is_time ? "s" : "rad");
 
 		const double seconds = GetElapsedSeconds();
 		if (all_reached)
-			RCLCPP_INFO(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned travel %.2f rad (%d restarts, %d steps, %.1f s).", best_position.x(), best_position.y(), best_position.z(), num_viewpoint, planned_travel, restart, total_steps, seconds);
+			RCLCPP_INFO(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned travel %.2f %s (%d restarts, %d steps, %.1f s).", best_position.x(), best_position.y(), best_position.z(), num_viewpoint, planned_travel, travel_cost_is_time ? "s" : "rad", restart, total_steps, seconds);
 		else
 			RCLCPP_WARN(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses (%d restarts, %d steps, %.1f s).", best_position.x(), best_position.y(), best_position.z(), std::max(0, best_step.num_exact), num_viewpoint, restart, total_steps, seconds);
 

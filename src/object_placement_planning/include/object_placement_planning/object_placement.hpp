@@ -76,6 +76,7 @@ struct ObjectPlacementParams
 	int max_kinematic_moves = 20;  // per reach attempt
 	double initial_step = 0.02;
 	double step_shrink = 0.25;
+	double reach_first_step = 0.01;  // m: while viewpoints are missed, moves try this, doubling below initial_step, before initial_step; 0 = off
 	int max_line_search_iters = 4;
 	double jacobian_damping = 1e-3;  // lambda in the damped pseudo-inverse J^T (J J^T + lambda^2 I)^-1
 	double rot_metric_scale = 0.3;   // meters per radian: weighs a missed viewpoint's angle gap against its distance gap
@@ -90,12 +91,21 @@ struct ObjectPlacementParams
 	// shorten the tour's joint distance; kept if planned travel drops. 0 = off.
 	int tour_placement_iterations = 0;
 	int tour_placement_rounds = 1;  // GTSP restarts then tour-placement, repeated this many times
-	double tour_placement_object_step = 0.02;  // m per axis, halved when a step is rejected
+	double tour_placement_object_step = 0.02;  // m per axis, halved when a step is rejected; 0 = object held still
 	double tour_placement_self_motion_step = 0.3;  // rad per pose, halved with the object step
 	double tour_placement_joint_margin = 0.05;  // rad kept from each joint limit
 	int gtsp_restart_ik_solutions = 8;  // IK solutions per viewpoint in GTSP restarts: more same-branch choices for GTSP
 	// Reconfiguration: a move turning any joint (joint 7 aside) more than this; GTSP restarts log how many are left.
 	double reconfig_threshold = 1.0;
+	// Planned travel = execution time (s), stopping at every pose: straight joint moves where collision-free, else OMPL,
+	// timed under the joint speed and acceleration limits. Pair with travel_time_weight for the GTSP.
+	bool travel_cost_is_time = false;
+	// Once all are reached, before the GTSP restarts + tour-placement rounds: fewer reconfigurations, then more margin.
+	bool reduce_reconfigurations = false;  // IK in the neighbor's posture, then object moves for the rest
+	int reconfiguration_max_moves = 10;  // object moves in that stage
+	bool raise_margins = false;  // roomier IK poses, then object moves, until every margin reaches margin_target_floors
+	double margin_target_floors = 2.0;  // smallest margin wanted, in floors (joint limit 0.05 rad, stretch 0.02, collision 0.01 m)
+	int margin_max_moves = 10;  // object moves in that stage
 	bool freeze_order = false;  // once all viewpoints are reached, keep the viewpoint order fixed
 	bool lock_input_order = false;  // visit viewpoints in the input order throughout (no GTSP reordering)
 	// > 0: OMPL-planned joint travel can be computed; seconds per planning attempt.

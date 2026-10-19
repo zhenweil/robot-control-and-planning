@@ -14,6 +14,7 @@
 #include <moveit/planning_pipeline/planning_pipeline.h>
 #include <moveit/robot_state/conversions.h>
 #include <moveit/robot_trajectory/robot_trajectory.h>
+#include <moveit/trajectory_processing/time_optimal_trajectory_generation.h>
 #include <moveit/utils/moveit_error_code.h>
 #include <moveit_msgs/msg/collision_object.hpp>
 #include <rcutils/logging.h>
@@ -690,6 +691,112 @@ std::vector<double> PlanTourJointPathLengths(
 		start_joints = &goal_joints;
 	}
 	return lengths;
+}
+
+namespace
+{
+
+// True if every state on the straight joint-space line from -> to (checked every max_step rad) is valid.
+bool IsStraightMoveValid(const planning_scene::PlanningSceneConstPtr& scene, const moveit::core::RobotState& from, const moveit::core::RobotState& to, const std::string& group_name, double max_step)
+{
+	const moveit::core::JointModelGroup* jmg = from.getJointModelGroup(group_name);
+	std::vector<double> a, b;
+	from.copyJointGroupPositions(jmg, a);
+	to.copyJointGroupPositions(jmg, b);
+	double largest = 0.0;
+	for (size_t j = 0; j < a.size(); ++j)
+		largest = std::max(largest, std::abs(b[j] - a[j]));
+	const int steps = std::max(1, static_cast<int>(std::ceil(largest / max_step)));
+	moveit::core::RobotState state(from);
+	for (int i = 1; i < steps; ++i)
+	{
+		from.interpolate(to, static_cast<double>(i) / steps, state);
+		state.update();
+		if (!scene->isStateValid(state, group_name))
+			return false;
+	}
+	return true;
+}
+
+}  // namespace
+
+void SetJointSpeedLimits(const moveit::core::RobotModelConstPtr& robot_model, const std::string& group_name, joint_travel::EdgeWeights& weights)
+{
+	weights.max_velocity.clear();
+	weights.max_acceleration.clear();
+	for (const std::string& name : robot_model->getJointModelGroup(group_name)->getVariableNames())
+	{
+		const moveit::core::VariableBounds& bounds = robot_model->getVariableBounds(name);
+		weights.max_velocity.push_back(bounds.velocity_bounded_ ? bounds.max_velocity_ : 1.0);
+		weights.max_acceleration.push_back(bounds.acceleration_bounded_ ? bounds.max_acceleration_ : 1.0);
+	}
+}
+
+std::vector<double> PlanTourEdgeTimes(
+	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::vector<std::vector<double>>& waypoint_joints, const std::vector<double>& start_reference_joints,
+	const std::string& group_name, double planning_time, int num_planning_attempts)
+{
+	const double kStraightCheckStep = 0.02;	 // rad between collision checks on a straight move
+	QuietPlanningLoggers(node);
+	planning_pipeline::PlanningPipeline pipeline(robot_model, node, "ompl");
+	pipeline.displayComputedMotionPlans(false);
+	pipeline.checkSolutionPaths(false);
+	planning_scene::PlanningSceneConstPtr scene = planning_scene_monitor->getPlanningScene();
+	joint_travel::EdgeWeights limits;
+	SetJointSpeedLimits(robot_model, group_name, limits);
+	const trajectory_processing::TimeOptimalTrajectoryGeneration time_parameterization;
+
+	std::vector<double> times;
+	times.reserve(waypoint_joints.size());
+	const std::vector<double>* start_joints = &start_reference_joints;
+	for (const std::vector<double>& goal_joints : waypoint_joints)
+	{
+		if (!rclcpp::ok())
+			break;
+		moveit::core::RobotState start_state(robot_model);
+		start_state.setToDefaultValues();
+		const moveit::core::JointModelGroup* jmg = start_state.getJointModelGroup(group_name);
+		start_state.setJointGroupPositions(jmg, *start_joints);
+		start_state.update();
+		moveit::core::RobotState goal_state(robot_model);
+		goal_state.setToDefaultValues();
+		goal_state.setJointGroupPositions(jmg, goal_joints);
+		goal_state.update();
+		if (!scene->isStateValid(start_state, group_name) || !scene->isStateValid(goal_state, group_name))
+		{
+			times.push_back(-1.0);
+			start_joints = &goal_joints;
+			continue;
+		}
+		if (IsStraightMoveValid(scene, start_state, goal_state, group_name, kStraightCheckStep))
+		{
+			times.push_back(joint_travel::StraightMoveTime(*start_joints, goal_joints, limits.max_velocity, limits.max_acceleration));
+			start_joints = &goal_joints;
+			continue;
+		}
+
+		planning_interface::MotionPlanRequest req;
+		req.group_name = group_name;
+		req.allowed_planning_time = planning_time;
+		req.num_planning_attempts = 1;
+		moveit::core::robotStateToRobotStateMsg(start_state, req.start_state);
+		req.goal_constraints.push_back(kinematic_constraints::constructGoalConstraints(goal_state, jmg));
+		double best = -1.0;
+		for (int attempt = 0; attempt < num_planning_attempts; ++attempt)
+		{
+			planning_interface::MotionPlanResponse res;
+			if (!pipeline.generatePlan(scene, req, res) || !res.trajectory_ || !time_parameterization.computeTimeStamps(*res.trajectory_))
+				continue;
+			const double time = res.trajectory_->getDuration();
+			if (best < 0.0 || time < best)
+				best = time;
+		}
+		times.push_back(best);
+		start_joints = &goal_joints;
+	}
+	return times;
 }
 
 namespace

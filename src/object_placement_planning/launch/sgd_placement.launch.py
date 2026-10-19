@@ -27,8 +27,8 @@ def generate_launch_description():
 
     def make_node(context):
         robot = robots.GetRobot(LaunchConfiguration("robot").perform(context))
-        moveit_config = robots.GetMoveItConfig(robot)
         params_file = LaunchConfiguration("params_file").perform(context)
+        moveit_config = robots.ShrinkJointRanges(robots.GetMoveItConfig(robot), robots.GetJointMargin(os.path.expanduser(params_file)))
         extra = [os.path.expanduser(params_file)] if params_file else []
         seed = LaunchConfiguration("random_seed").perform(context)
         node_params = {
