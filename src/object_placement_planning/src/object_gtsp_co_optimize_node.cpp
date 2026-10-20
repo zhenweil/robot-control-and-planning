@@ -201,6 +201,7 @@ public:
 		this->max_steps = static_cast<int>(this->GetParameter<int64_t>("co_max_steps", 200));  // iterations of the descent
 		this->max_line_search_tries = static_cast<int>(this->GetParameter<int64_t>("co_max_line_search_tries", 4));  // tries per sub-step
 		this->ik_attempts = static_cast<int>(this->GetParameter<int64_t>("co_ik_attempts", 10));  // random start poses when a missed viewpoint's own pose fails
+		this->exact_finish_gap = this->GetParameter<double>("exact_ik_finish_gap", 0.05);  // m: a closest pose this near its target gets exact IK started from it
 		this->closest_gap_slack = this->GetParameter<double>("co_closest_gap_slack", 0.005);  // m: a miss's closest poses this near its best gap stay candidates
 		this->closest_ik_extra_starts = static_cast<int>(this->GetParameter<int64_t>("co_closest_ik_extra_starts", 3));  // random starts also tried for a miss's closest pose
 		this->initial_step = this->GetParameter<double>("co_initial_step", 0.02);	 // m
@@ -645,6 +646,7 @@ private:
 	// poses only).
 	void UpdateCost(Descent& descent, double penalty)
 	{
+		this->PromoteNearMisses(descent.placement);
 		// Tour length, with each edge whose straight move collides charged its estimated detour (see GetBlockedEdgeCharges).
 		double detour_charge = 0.0;
 		const std::vector<std::pair<size_t, double>> blocked = this->GetBlockedEdgeCharges(descent.placement, descent.order);
@@ -669,6 +671,38 @@ private:
 		descent.smallest_margin = this->GetSmallestJointMargin(reached_poses);
 		const int num_missed = static_cast<int>(this->viewpoints.size()) - descent.placement.num_reached;
 		descent.cost = descent.tour_cost + this->miss_cost * num_missed + penalty * descent.placement.gap_sum + this->reconfiguration_cost * descent.num_reconfigurations + this->reconfiguration_weight * descent.posture_gap_sum + this->GetRoomWeight(penalty) * descent.room_shortfall;
+	}
+
+	// Final check before scoring a spot: a missed viewpoint whose stored pose is within exact_finish_gap of its target gets
+	// exact IK started from that pose (every exact check applies); if it passes, the viewpoint is reached. Catches poses
+	// that reached the miss list without an exact try (GTSP choice, posture swap, closest search).
+	void PromoteNearMisses(Placement& placement)
+	{
+		bool moved = false;
+		for (size_t v = 0; v < this->viewpoints.size(); ++v)
+		{
+			if (placement.reached[v] || placement.gaps[v] >= this->exact_finish_gap)
+				continue;
+			if (!moved)
+			{
+				scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(placement.position, this->rotation));
+				moved = true;
+			}
+			const Eigen::Isometry3d target = scene_geometry::Translation(placement.position) * this->viewpoints[v];
+			const closest_ik::Result exact = closest_ik::Solve(this->scene, *this->state, this->group, this->tool, target, placement.poses[v], this->exact_options);
+			if (!exact.exact)
+				continue;
+			placement.poses[v] = exact.q;
+			placement.reached[v] = true;
+			placement.num_reached += 1;
+			placement.gap_sum -= placement.gaps[v];
+			placement.gaps[v] = 0.0;
+			placement.position_errors[v] = Eigen::Vector3d::Zero();
+			placement.angle_errors[v] = 0.0;
+			placement.clearance_shortfalls[v] = 0.0;
+			placement.miss_candidates[v].clear();
+		}
+		placement.gap_sum = std::max(0.0, placement.gap_sum);
 	}
 
 	// Joint room weight: keeps joints off their limits (penalty unused; the weight is fixed).
@@ -926,6 +960,21 @@ private:
 		return room_margins::MostRoomDirection(margins, this->initial_step);
 	}
 
+	// A miss nearly on target: each exact-IK check redone on its stored pose, measured fresh, and exact IK started from it.
+	void LogWhyNotExact(const Placement& placement, size_t v)
+	{
+		const Joints& q = placement.poses[v];
+		const Eigen::Isometry3d target = scene_geometry::Translation(placement.position) * this->viewpoints[v];
+		this->state->setJointGroupPositions(this->group, q);
+		this->state->update();
+		const scene_geometry::Vector6d pose_error = closest_ik::GetPoseError(target, this->state->getGlobalLinkTransform(this->tool), this->exact_options.ignore_roll);
+		const bool within_tolerance = pose_error.head<3>().norm() < this->exact_options.exact_position_tolerance && pose_error.tail<3>().norm() < this->exact_options.exact_rotation_tolerance;
+		const bool valid = scene_geometry::IsStateValid(this->scene, this->state.get(), this->group, q.data());
+		const double arm_clearance = this->GetArmClearance(*this->state, q, 0.05);
+		const closest_ik::Result exact = closest_ik::Solve(this->scene, *this->state, this->group, this->tool, target, q, this->exact_options);
+		RCLCPP_INFO(this->get_logger(), "    why not exact (viewpoint %zu): measured now position %.4f mm, angle %.5f deg (tolerances %.2f mm, %.4f deg) -> %s; collision check %s; arm clearance %.2f mm (needs %.1f); exact IK from this pose: %s", v, 1000.0 * pose_error.head<3>().norm(), pose_error.tail<3>().norm() * 180.0 / M_PI, 1000.0 * this->exact_options.exact_position_tolerance, this->exact_options.exact_rotation_tolerance * 180.0 / M_PI, within_tolerance ? "within" : "OUTSIDE", valid ? "passes" : "FAILS", 1000.0 * arm_clearance, 1000.0 * this->exact_options.exact_margin, exact.found ? (exact.exact ? "EXACT (pose was never tried as exact)" : "found, not exact") : "fails");
+	}
+
 	// Per missed viewpoint: its gap and what its closest pose is up against (joints near a limit, close collision pairs).
 	void LogMissedViewpoints(const Placement& placement)
 	{
@@ -952,6 +1001,8 @@ private:
 				blockers += " " + pairs.names[k] + " " + std::to_string(static_cast<int>(std::round(pairs.dists[k] * 1000.0))) + " mm;";
 			const bool valid = scene_geometry::IsStateValid(this->scene, this->state.get(), this->group, placement.poses[v].data());
 			RCLCPP_INFO(this->get_logger(), "  missed viewpoint %zu: gap %.2f mm (position %.2f mm, angle %.3f deg, clearance short %.2f mm, closest pose %s), blocked by:%s", v, 1000.0 * placement.gaps[v], 1000.0 * placement.position_errors[v].norm(), placement.angle_errors[v] * 180.0 / M_PI, 1000.0 * placement.clearance_shortfalls[v], valid ? "valid" : "INVALID", blockers.empty() ? " nothing (reach)" : blockers.c_str());
+			if (placement.gaps[v] < 1e-3)
+				this->LogWhyNotExact(placement, v);
 		}
 	}
 
@@ -970,6 +1021,13 @@ private:
 				// The closest stage calls a pose on target exact without the exact poses' arm clearance check.
 				result.exact = false;
 				result = this->FinishClearance(state, target, result);
+			}
+			else if (!result.exact && result.gap < this->exact_finish_gap)
+			{
+				// Close to the target: exact IK started from the closest pose (every exact check applies).
+				const closest_ik::Result exact = closest_ik::Solve(this->scene, state, this->group, this->tool, target, result.q, this->exact_options);
+				if (exact.exact)
+					result = exact;
 			}
 			results.push_back(result);
 			if (result.exact)
@@ -1718,6 +1776,7 @@ private:
 	int ik_attempts = 10;
 	int closest_ik_extra_starts = 3;
 	double closest_gap_slack = 0.005;
+	double exact_finish_gap = 0.05;
 	double initial_step = 0.02;
 	double min_step = 0.001;
 	double max_step = 0.05;

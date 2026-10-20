@@ -47,6 +47,7 @@
     co_min_step: 0.001                    # m: below this the descent has settled at the current penalty
     co_max_step: 0.05                     # m: largest object move
     co_ik_attempts: 10                    # random IK starts for a missed viewpoint, after its own pose fails
+    exact_ik_finish_gap: 0.05             # m: a closest pose this near its target gets exact IK started from it
     co_closest_ik_extra_starts: 3         # random starts also tried for a miss's closest pose
     co_closest_gap_slack: 0.005           # m: closest poses this near the best gap (with room, if any) are GTSP choices
 
