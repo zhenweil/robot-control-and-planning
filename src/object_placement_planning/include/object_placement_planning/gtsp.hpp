@@ -2,6 +2,8 @@
 // Tour over viewpoints as a GTSP: each viewpoint has several IK poses, and the tour visits every reachable viewpoint
 // once using one of its poses. An open path from a start pose (no return).
 
+#include <map>
+#include <utility>
 #include <vector>
 
 #include "object_placement_planning/joint_travel.hpp"
@@ -37,6 +39,10 @@ public:
 	// Indices of the joints that count as travel; empty = all.
 	void SetTravelJoints(const std::vector<int>& indices);
 
+	// Extra cost on the edge between two poses, either direction (e.g. its straight move is blocked). A pose is (viewpoint,
+	// index in its IK poses); the start pose is (-1, -1).
+	void AddEdgeCost(std::pair<int, int> from, std::pair<int, int> to, double cost);
+
 	// Order and poses: nearest neighbour, then 2-opt. initial_order (e.g. the previous tour's): when it lists exactly
 	// the reachable viewpoints, 2-opt also runs from it and the cheaper tour is kept. Deterministic.
 	Tour Solve(const std::vector<int>& initial_order = {}) const;
@@ -48,6 +54,8 @@ public:
 private:
 	// Cost of the move into `to`; from = nullptr means from the start pose.
 	double EdgeCost(const Stop* from, const Stop& to) const;
+	// Extra cost added with AddEdgeCost between two poses (either order), else 0.
+	double GetExtraEdgeCost(std::pair<int, int> from, std::pair<int, int> to) const;
 	double TourCost(const std::vector<Stop>& stops) const;
 	std::vector<Stop> NearestNeighborTour() const;
 	// Rounds of segment reversals, then each stop's best pose with its neighbours held fixed.
@@ -60,6 +68,7 @@ private:
 	joint_travel::Joints start_pose;
 	std::vector<int> travel_joints;  // indices of the joints that count as travel
 	std::vector<std::vector<joint_travel::Joints>> viewpoint_ik_poses;
+	std::map<std::pair<std::pair<int, int>, std::pair<int, int>>, double> extra_edge_costs;  // keyed with the smaller end first
 };
 
 }  // namespace gtsp

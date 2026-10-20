@@ -149,6 +149,19 @@ std::vector<double> PlanTourEdgeTimes(
 	double planning_time,
 	int num_planning_attempts);
 
+// Joint path length of each tour edge, as PlanTourEdgeTimes plans them: the straight move if collision-free, else the
+// shortest of num_planning_attempts OMPL paths. count_last_joint false leaves the last joint out. -1 for an edge that failed.
+std::vector<double> PlanTourEdgeLengths(
+	const rclcpp::Node::SharedPtr& node,
+	const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::vector<std::vector<double>>& waypoint_joints,
+	const std::vector<double>& start_reference_joints,
+	const std::string& group_name,
+	double planning_time,
+	int num_planning_attempts,
+	bool count_last_joint = true);
+
 // Plans each consecutive leg of selected from start_reference_joints, retrying num_planning_attempts
 // times per leg and keeping the shortest -- affordable since it's only selected.size() calls.
 std::vector<TourTrajectory> PlanFinalTourTrajectories(

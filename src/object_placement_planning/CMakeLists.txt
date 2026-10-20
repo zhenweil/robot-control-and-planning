@@ -36,49 +36,43 @@ find_package(VTK 9.1 REQUIRED COMPONENTS
 	IOGeometry
 	)
 
-add_executable(viewpoint_planner_nn2opt
-	src/mesh_utils.cpp
-	src/potential_field_sampler.cpp
-	src/joint_travel.cpp
-	src/real_cost_planning.cpp
-	src/viewpoint_io.cpp
-	src/viewpoint_planner_nn2opt_node.cpp
-	)
-
-add_executable(viewpoint_planner_hgtsp
-	src/mesh_utils.cpp
-	src/potential_field_sampler.cpp
-	src/joint_travel.cpp
-	src/real_cost_planning.cpp
-	src/hierarchical_tour.cpp
-	src/viewpoint_io.cpp
-	src/viewpoint_planner_hgtsp_node.cpp
-	)
-
-add_executable(bstar_placement
+# Shared code, compiled once into one library that every node links (each node used to compile its own copy).
+add_library(object_placement_core STATIC
 	src/bstar_placement.cpp
-	src/joint_travel.cpp
-	src/real_cost_planning.cpp
-	src/viewpoint_io.cpp
-	src/bstar_placement_node.cpp
-	)
-
-add_executable(object_placement
-	src/object_placement.cpp
 	src/closest_ik.cpp
 	src/gtsp.cpp
+	src/hierarchical_tour.cpp
 	src/ik_sampling.cpp
 	src/joint_travel.cpp
 	src/manipulability.cpp
 	src/marker_utils.cpp
+	src/mesh_utils.cpp
+	src/object_placement.cpp
 	src/object_placement_optimizer.cpp
+	src/potential_field_sampler.cpp
+	src/reachability_map.cpp
+	src/real_cost_planning.cpp
 	src/room_margins.cpp
 	src/scene_geometry.cpp
 	src/tour_placement.cpp
-	src/real_cost_planning.cpp
+	src/viewpoint_generation.cpp
 	src/viewpoint_io.cpp
-	src/object_placement_node.cpp
 	)
+set_target_properties(object_placement_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# The heavy ROS / MoveIt / Eigen headers are parsed once for the library instead of once per file.
+target_precompile_headers(object_placement_core PRIVATE
+	<Eigen/Dense>
+	<Eigen/Geometry>
+	<rclcpp/rclcpp.hpp>
+	<moveit/planning_scene_monitor/planning_scene_monitor.h>
+	<moveit/robot_model/robot_model.h>
+	<moveit/robot_state/robot_state.h>
+	)
+
+add_executable(viewpoint_planner_nn2opt src/viewpoint_planner_nn2opt_node.cpp)
+add_executable(viewpoint_planner_hgtsp src/viewpoint_planner_hgtsp_node.cpp)
+add_executable(bstar_placement src/bstar_placement_node.cpp)
+add_executable(object_placement src/object_placement_node.cpp)
 
 # Builds the reachability map that random_placement's weighted sampling loads.
 add_executable(build_reachability_map
@@ -89,51 +83,21 @@ target_include_directories(build_reachability_map PRIVATE ${CMAKE_CURRENT_SOURCE
 ament_target_dependencies(build_reachability_map rclcpp moveit_ros_planning random_numbers)
 
 # Viewpoints with no robot reachability check, for object_placement's tour_input_dir.
-add_executable(viewpoint_generator
-	src/mesh_utils.cpp
-	src/potential_field_sampler.cpp
-	src/joint_travel.cpp
-	src/real_cost_planning.cpp
-	src/viewpoint_io.cpp
-	src/viewpoint_generation.cpp
-	src/viewpoint_generator_node.cpp
-	)
+add_executable(viewpoint_generator src/viewpoint_generator_node.cpp)
 
 # Random-sampling placement baseline (separate from object_placement).
-add_executable(random_placement
-	src/gtsp.cpp
-	src/ik_sampling.cpp
-	src/joint_travel.cpp
-	src/reachability_map.cpp
-	src/real_cost_planning.cpp
-	src/viewpoint_io.cpp
-	src/random_placement_node.cpp
-	)
+add_executable(random_placement src/random_placement_node.cpp)
 
 # SGD placement baseline (Mayer and Althoff 2026), separate from object_placement.
-add_executable(sgd_placement
-	src/closest_ik.cpp
-	src/gtsp.cpp
-	src/joint_travel.cpp
-	src/manipulability.cpp
-	src/real_cost_planning.cpp
-	src/scene_geometry.cpp
-	src/viewpoint_io.cpp
-	src/sgd_placement_node.cpp
-	)
+add_executable(sgd_placement src/sgd_placement_node.cpp)
+
+# Object placement co-optimizing reach, reconfigurations, tour length and joint room in one descent.
+add_executable(object_gtsp_co_optimize src/object_gtsp_co_optimize_node.cpp)
 
 # One-off check: is a missed viewpoint reachable at a given object position (heavy IK search).
-add_executable(ik_reachability_check
-	src/closest_ik.cpp
-	src/manipulability.cpp
-	src/joint_travel.cpp
-	src/real_cost_planning.cpp
-	src/scene_geometry.cpp
-	src/viewpoint_io.cpp
-	src/ik_reachability_check.cpp
-	)
+add_executable(ik_reachability_check src/ik_reachability_check.cpp)
 
-foreach(viewpoint_planner_target viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement ik_reachability_check viewpoint_generator)
+foreach(viewpoint_planner_target object_placement_core viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement object_gtsp_co_optimize ik_reachability_check viewpoint_generator)
 	target_include_directories(${viewpoint_planner_target} PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		)
@@ -162,17 +126,20 @@ foreach(viewpoint_planner_target viewpoint_planner_nn2opt viewpoint_planner_hgts
 		)
 endforeach()
 
-# bstar_placement's B* implementation solves a sequence of linear programs with OSQP.
-target_link_libraries(bstar_placement osqp::osqp)
+target_link_libraries(object_placement_core ompl::ompl osqp::osqp)
+foreach(node_target viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement object_gtsp_co_optimize ik_reachability_check viewpoint_generator)
+	target_link_libraries(${node_target} object_placement_core)
+endforeach()
 
-# object_placement seeds OMPL (planned travel) from RANDOM_SEED so runs repeat.
+# OSQP: bstar_placement's linear programs and tour_placement's QP; OMPL: object_placement seeds it from RANDOM_SEED.
+target_link_libraries(bstar_placement osqp::osqp)
 target_link_libraries(object_placement ompl::ompl osqp::osqp)
 
 install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement ik_reachability_check build_reachability_map viewpoint_generator
+install(TARGETS viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement object_gtsp_co_optimize ik_reachability_check build_reachability_map viewpoint_generator
 	DESTINATION lib/${PROJECT_NAME}
 	)
 

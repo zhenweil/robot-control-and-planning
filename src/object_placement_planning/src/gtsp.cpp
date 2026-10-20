@@ -22,6 +22,19 @@ void Solver::SetTravelJoints(const std::vector<int>& indices)
 	this->travel_joints = indices.empty() ? joint_travel::AllJoints(static_cast<int>(this->start_pose.size())) : indices;
 }
 
+void Solver::AddEdgeCost(std::pair<int, int> from, std::pair<int, int> to, double cost)
+{
+	this->extra_edge_costs[{std::min(from, to), std::max(from, to)}] += cost;
+}
+
+double Solver::GetExtraEdgeCost(std::pair<int, int> from, std::pair<int, int> to) const
+{
+	if (this->extra_edge_costs.empty())
+		return 0.0;
+	const auto found = this->extra_edge_costs.find({std::min(from, to), std::max(from, to)});
+	return found == this->extra_edge_costs.end() ? 0.0 : found->second;
+}
+
 Tour Solver::Solve(const std::vector<int>& initial_order) const
 {
 	Tour tour;
@@ -76,14 +89,14 @@ Tour Solver::SolveFixedOrder(const std::vector<int>& order_in) const
 		{
 			if (k == 0)
 			{
-				best[k][j] = joint_travel::EdgeCost(this->start_pose, poses[v][j], this->edge, this->travel_joints);
+				best[k][j] = joint_travel::EdgeCost(this->start_pose, poses[v][j], this->edge, this->travel_joints) + this->GetExtraEdgeCost({-1, -1}, {static_cast<int>(v), static_cast<int>(j)});
 				continue;
 			}
 			const size_t u = static_cast<size_t>(order[k - 1]);
 			for (size_t i = 0; i < poses[u].size(); ++i)
 			{
 				const double c =
-					best[k - 1][i] + joint_travel::EdgeCost(poses[u][i], poses[v][j], this->edge, this->travel_joints);
+					best[k - 1][i] + joint_travel::EdgeCost(poses[u][i], poses[v][j], this->edge, this->travel_joints) + this->GetExtraEdgeCost({static_cast<int>(u), static_cast<int>(i)}, {static_cast<int>(v), static_cast<int>(j)});
 				if (c < best[k][j])
 				{
 					best[k][j] = c;
@@ -111,7 +124,8 @@ double Solver::EdgeCost(const Stop* from, const Stop& to) const
 	const joint_travel::Joints& from_pose = from
 		? this->viewpoint_ik_poses[static_cast<size_t>(from->viewpoint)][static_cast<size_t>(from->pose)]
 		: this->start_pose;
-	return joint_travel::EdgeCost(from_pose, to_pose, this->edge, this->travel_joints);
+	const std::pair<int, int> from_key = from ? std::make_pair(from->viewpoint, from->pose) : std::make_pair(-1, -1);
+	return joint_travel::EdgeCost(from_pose, to_pose, this->edge, this->travel_joints) + this->GetExtraEdgeCost(from_key, {to.viewpoint, to.pose});
 }
 
 double Solver::TourCost(const std::vector<Stop>& stops) const

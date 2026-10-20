@@ -799,6 +799,71 @@ std::vector<double> PlanTourEdgeTimes(
 	return times;
 }
 
+std::vector<double> PlanTourEdgeLengths(
+	const rclcpp::Node::SharedPtr& node, const moveit::core::RobotModelConstPtr& robot_model,
+	const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor,
+	const std::vector<std::vector<double>>& waypoint_joints, const std::vector<double>& start_reference_joints,
+	const std::string& group_name, double planning_time, int num_planning_attempts, bool count_last_joint)
+{
+	const double kStraightCheckStep = 0.02;	 // rad between collision checks on a straight move
+	QuietPlanningLoggers(node);
+	planning_pipeline::PlanningPipeline pipeline(robot_model, node, "ompl");
+	pipeline.displayComputedMotionPlans(false);
+	pipeline.checkSolutionPaths(false);
+	planning_scene::PlanningSceneConstPtr scene = planning_scene_monitor->getPlanningScene();
+
+	std::vector<double> lengths;
+	lengths.reserve(waypoint_joints.size());
+	const std::vector<double>* start_joints = &start_reference_joints;
+	for (const std::vector<double>& goal_joints : waypoint_joints)
+	{
+		if (!rclcpp::ok())
+			break;
+		moveit::core::RobotState start_state(robot_model);
+		start_state.setToDefaultValues();
+		const moveit::core::JointModelGroup* jmg = start_state.getJointModelGroup(group_name);
+		start_state.setJointGroupPositions(jmg, *start_joints);
+		start_state.update();
+		moveit::core::RobotState goal_state(robot_model);
+		goal_state.setToDefaultValues();
+		goal_state.setJointGroupPositions(jmg, goal_joints);
+		goal_state.update();
+		if (!scene->isStateValid(start_state, group_name) || !scene->isStateValid(goal_state, group_name))
+		{
+			lengths.push_back(-1.0);
+			start_joints = &goal_joints;
+			continue;
+		}
+		if (IsStraightMoveValid(scene, start_state, goal_state, group_name, kStraightCheckStep))
+		{
+			const int num_counted = static_cast<int>(goal_joints.size()) - (count_last_joint ? 0 : 1);
+			lengths.push_back(joint_travel::JointDistance(*start_joints, goal_joints, joint_travel::AllJoints(num_counted)));
+			start_joints = &goal_joints;
+			continue;
+		}
+
+		planning_interface::MotionPlanRequest req;
+		req.group_name = group_name;
+		req.allowed_planning_time = planning_time;
+		req.num_planning_attempts = 1;
+		moveit::core::robotStateToRobotStateMsg(start_state, req.start_state);
+		req.goal_constraints.push_back(kinematic_constraints::constructGoalConstraints(goal_state, jmg));
+		double best = -1.0;
+		for (int attempt = 0; attempt < num_planning_attempts; ++attempt)
+		{
+			planning_interface::MotionPlanResponse res;
+			if (!pipeline.generatePlan(scene, req, res) || !res.trajectory_)
+				continue;
+			const double length = MeasureTrajectoryJointDistance(res.trajectory_, count_last_joint);
+			if (best < 0.0 || length < best)
+				best = length;
+		}
+		lengths.push_back(best);
+		start_joints = &goal_joints;
+	}
+	return lengths;
+}
+
 namespace
 {
 

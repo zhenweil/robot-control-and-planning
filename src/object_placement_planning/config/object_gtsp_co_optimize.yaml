@@ -1,0 +1,79 @@
+# Run settings for object_gtsp_co_optimize.launch.py params_file:=...
+# Same values as the runs so far (from object_placement_run.yaml). Positions and bounds are abs (m, base frame).
+# random_seed, co_time_budget_sec, visualize_progress_delay_sec and keep_alive come from the launch arguments.
+/**:
+  ros__parameters:
+    # Start position and search box
+    initial_x: 0.292                      # below the home tool0, halfway between the table and the tool
+    initial_y: 0.0
+    initial_z: 0.257
+    x_min: 0.2
+    x_max: 0.6
+    y_min: -0.6
+    y_max: 0.6
+    z_min: -0.7
+    z_max: 0.7
+
+    # Hard constraints
+    joint_margin: 0.1                     # rad: hard margin from every joint limit (read by the launch file)
+    exact_ik_margin: 0.01                 # m: clearance an exact IK pose keeps, arm links only
+
+    # IK
+    closest_ik_iters: 60                  # closest-IK iterations per solve
+    closest_ik_margin: 0.02               # m: clearance the closest-IK search keeps from collisions
+    rot_metric_scale: 0.1                 # m per rad: weighs a gap's angle against its distance
+    manipulability_limit_sharpness: 20.0  # closest IK: joints near a limit count less in manipulability
+    ignore_camera_roll: false             # the camera's spin about its axis is free
+    jacobian_damping: 0.001               # damped pseudo-inverse in how poses follow the object
+
+    # Tour cost: tour length, the joint distance of straight moves (camera spin aside)
+    joint_distance_weight: 1.0            # GTSP edge cost per rad of joint distance
+    max_joint_deviation_weight: 0.0       # GTSP edge cost per rad of the largest joint turn
+    travel_time_weight: 0.0               # GTSP edge cost per second of a straight move (0: time not optimized)
+    gtsp_two_opt_rounds: 5
+    co_blocked_edge_charge: 4.0           # a blocked edge costs its detour through home if that is free, else this x its length extra (0 = off)
+    co_gtsp_blocked_rounds: 2             # GTSP re-solves with the chosen blocked edges charged
+    reconfig_threshold: 1.0               # rad: a move turning any joint (joint 7 aside) more than this is a reconfiguration
+
+    # Final check of the result (measures only, changes nothing): planned length, and time for reference
+    real_cost_planning_time: 0.5          # s per OMPL attempt on an edge
+    real_cost_attempts: 3                 # OMPL attempts per edge; the shortest (fastest for time) is kept
+    unreachable_penalty: 50.0             # rad (s for time) added for an edge that fails to plan
+
+    # Descent
+    co_max_steps: 200                     # iterations of the one descent (each: reach step, IK in place, tour step)
+    co_max_line_search_tries: 4           # tries per sub-step (step halves on a failed try)
+    co_initial_step: 0.02                 # m: first object move
+    co_min_step: 0.001                    # m: below this the descent has settled at the current penalty
+    co_max_step: 0.05                     # m: largest object move
+    co_ik_attempts: 10                    # random IK starts for a missed viewpoint, after its own pose fails
+    co_closest_ik_extra_starts: 3         # random starts also tried for a miss's closest pose
+    co_closest_gap_slack: 0.005           # m: closest poses this near the best gap (with room, if any) are GTSP choices
+
+    # Reach step: kept if it reaches more viewpoints, or as many with smaller gaps; room-then-reach when it loses some.
+    # Tour steps: kept if the total cost drops (rad of tour length); they may lose viewpoints if the gain beats their gaps.
+    # Reach
+    co_miss_cost: 0.0                     # cost per missed viewpoint at equal reach (0: only the smooth gap charge below)
+    co_initial_penalty: 100.0             # cost per m of missed gap
+    co_penalty_growth: 10.0               # when settled with misses, the penalty grows this much
+    co_max_penalty: 100000.0
+    co_room: true                         # room for blocked misses, and room-then-reach for viewpoints a reach step loses
+
+    # Reconfigurations
+    co_neighbor_ik: true                  # reorders also try IK from each pose's tour neighbours
+    co_posture_match: true                # reconfiguration edges pull the object and swap poses
+    co_reconfiguration_cost: 2.0          # cost per reconfiguration
+    co_reconfiguration_weight: 10.0       # cost per m of posture gap
+
+    # Joints kept off their limits
+    co_joint_room_band: 0.05              # rad beyond the hard limit each joint should keep
+    co_joint_room_weight: 400.0           # cost per rad^2 of shortfall on reached poses (a joint right at the hard limit costs 1 rad)
+
+    # Pose slides (tour length + joint room)
+    co_slide: true                        # each step also slides poses along their self-motion
+    co_initial_slide_step: 0.3            # rad: largest pose slide at co_initial_step
+    co_slide_joint_margin: 0.05           # rad a slide stays from each (hard) joint limit
+
+    # Ablation switches
+    co_tour_object_move: true             # false: the object moves only for reach, never for the tour
+    co_freeze_object_when_reached: false  # true: once every viewpoint is reached the object stays put (arm poses still improve)
