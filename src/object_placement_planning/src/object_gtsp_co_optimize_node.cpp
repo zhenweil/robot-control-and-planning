@@ -104,7 +104,7 @@ struct Placement
 {
 	Eigen::Vector3d position = Eigen::Vector3d::Zero();	 // abs, m
 	std::vector<Joints> poses;	// per viewpoint: exact IK, else the closest pose
-	std::vector<bool> reached;
+	std::vector<char> reached;  // one byte per viewpoint: written from parallel threads (std::vector<bool> packs bits and races)
 	std::vector<Eigen::Vector3d> position_errors;  // per viewpoint, tool to target; zero if reached
 	std::vector<double> gaps;  // per viewpoint, m: position and angle (at the closest IK's rot_scale) + clearance shortfall; zero if reached
 	std::vector<double> clearance_shortfalls;  // per viewpoint, m: the part of its gap from arm clearance
@@ -841,7 +841,7 @@ private:
 			if (this->IsReconfiguration(k == 0 ? this->home : placement.poses[static_cast<size_t>(order[k - 1])], placement.poses[static_cast<size_t>(order[k])]))
 				edges.push_back(k);
 		std::vector<PostureMatch> matches(edges.size());
-		std::vector<bool> found(edges.size(), false);
+		std::vector<char> found(edges.size(), 0);  // one byte per edge: written from parallel threads
 		if (edges.empty())
 			return {};
 		scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(placement.position, this->rotation));

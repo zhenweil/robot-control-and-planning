@@ -267,7 +267,9 @@ Result Solve(
 		if (gap < best.gap && scene_geometry::IsStateValid(scene, &state, group, q.data()) &&
 			ClearPathToTarget(scene, state, tool, target.translation(), tool_side))
 		{
-			best = {true, IsWithinExactTolerance(pose_error, options), pose_error, gap, q};
+			// Exact only with the exact poses' arm clearance too, as the exact stage requires.
+			const bool exact = IsWithinExactTolerance(pose_error, options) && (options.exact_margin <= 0.0 || HasArmClearance(scene, state, group, tool, options.exact_margin));
+			best = {true, exact, pose_error, gap, q};
 			if (gap < 1e-6)
 				break;
 		}
