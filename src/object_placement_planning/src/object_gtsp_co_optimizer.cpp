@@ -1,117 +1,28 @@
-// Object placement in one descent. Each iteration: a reach step moves the object to reach more viewpoints (room-then-reach
-// when it loses reached ones); then, for the tour (length + reconfigurations, joints kept off their limits), IK is re-solved
-// with the object held still (self-motion slides, GTSP reorder, posture swaps) and the object is moved. Each pose follows
-// the object by IK from its last pose, so it keeps its posture. Repeats until nothing changes.
+#include "object_placement_planning/object_gtsp_co_optimizer.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <filesystem>
-#include <fstream>
 #include <limits>
-#include <memory>
 #include <set>
-#include <string>
 #include <thread>
 #include <utility>
-#include <vector>
 
-#include <Eigen/Geometry>
-#include <ament_index_cpp/get_package_share_directory.hpp>
-#include <json/json.h>
-#include <moveit/planning_scene_monitor/planning_scene_monitor.h>
-#include <moveit/robot_model_loader/robot_model_loader.h>
 #include <moveit/robot_state/robot_state.h>
 #include <random_numbers/random_numbers.h>
-#include <moveit_msgs/msg/collision_object.hpp>
-#include <rclcpp/rclcpp.hpp>
-#include <shape_msgs/msg/solid_primitive.hpp>
-#include <visualization_msgs/msg/marker_array.hpp>
 
-#include "object_placement_planning/closest_ik.hpp"
 #include "object_placement_planning/gtsp.hpp"
-#include "object_placement_planning/joint_travel.hpp"
 #include "object_placement_planning/manipulability.hpp"
 #include "object_placement_planning/marker_utils.hpp"
-#include "object_placement_planning/object_placement.hpp"
 #include "object_placement_planning/real_cost_planning.hpp"
 #include "object_placement_planning/room_margins.hpp"
 #include "object_placement_planning/scene_geometry.hpp"
-#include "object_placement_planning/viewpoint_io.hpp"
+
+namespace object_gtsp_co_optimize
+{
 
 namespace
 {
-
-using Joints = std::vector<double>;
-
-// The surface the robot stands on (top face at the base plane), as in object_placement, so all methods see the same world.
-void AddMountingSurface(const planning_scene_monitor::PlanningSceneMonitorPtr& planning_scene_monitor)
-{
-	const double size = 4.0, thickness = 0.05;	// m
-	planning_scene_monitor::LockedPlanningSceneRW scene(planning_scene_monitor);
-	const std::string base_link = scene->getRobotModel()->getRootLinkName();
-	moveit_msgs::msg::CollisionObject surface;
-	surface.header.frame_id = base_link;
-	surface.id = "mounting_surface";
-	shape_msgs::msg::SolidPrimitive box;
-	box.type = box.BOX;
-	box.dimensions = {size, size, thickness};
-	geometry_msgs::msg::Pose pose;
-	pose.position.z = -0.5 * thickness;
-	pose.orientation.w = 1.0;
-	surface.primitives.push_back(box);
-	surface.primitive_poses.push_back(pose);
-	surface.operation = surface.ADD;
-	scene->processCollisionObjectMsg(surface);
-	// The base rests on it: allow every link fixed to the root.
-	for (const moveit::core::LinkModel* link : scene->getRobotModel()->getLinkModels())
-		if (moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(link) == scene->getRobotModel()->getRootLink())
-			scene->getAllowedCollisionMatrixNonConst().setEntry(surface.id, link->getName(), true);
-}
-
-// RViz marker for the mounting surface, as object_placement draws it.
-visualization_msgs::msg::Marker GetMountingSurfaceMarker(const std::string& base_link, const rclcpp::Time& stamp)
-{
-	const double size = 4.0, thickness = 0.05;	// m, as AddMountingSurface
-	visualization_msgs::msg::Marker marker;
-	marker.header.frame_id = base_link;
-	marker.header.stamp = stamp;
-	marker.ns = "mounting_surface";
-	marker.type = visualization_msgs::msg::Marker::CUBE;
-	marker.action = visualization_msgs::msg::Marker::ADD;
-	marker.pose.position.z = -0.5 * thickness;
-	marker.pose.orientation.w = 1.0;
-	marker.scale.x = size;
-	marker.scale.y = size;
-	marker.scale.z = thickness;
-	marker.color = marker_utils::Rgba(0.55f, 0.45f, 0.35f, 0.6f);
-	return marker;
-}
-
-// One closest pose of a missed viewpoint and its gap parts.
-struct MissCandidate
-{
-	Joints q;
-	Eigen::Vector3d position_error = Eigen::Vector3d::Zero();
-	double angle_error = 0.0;  // rad
-	double clearance_shortfall = 0.0;  // m
-	double gap = 0.0;  // m
-};
-
-// Every viewpoint's arm pose at one object position.
-struct Placement
-{
-	Eigen::Vector3d position = Eigen::Vector3d::Zero();	 // abs, m
-	std::vector<Joints> poses;	// per viewpoint: exact IK, else the closest pose
-	std::vector<char> reached;  // one byte per viewpoint: written from parallel threads (std::vector<bool> packs bits and races)
-	std::vector<Eigen::Vector3d> position_errors;  // per viewpoint, tool to target; zero if reached
-	std::vector<double> gaps;  // per viewpoint, m: position and angle (at the closest IK's rot_scale) + clearance shortfall; zero if reached
-	std::vector<double> clearance_shortfalls;  // per viewpoint, m: the part of its gap from arm clearance
-	std::vector<double> angle_errors;  // per viewpoint, rad, zero if reached
-	std::vector<std::vector<MissCandidate>> miss_candidates;  // per missed viewpoint: closest poses GTSP may choose from
-	int num_reached = 0;
-	double gap_sum = 0.0;  // m, over the missed viewpoints
-};
 
 // Downhill move of one step: the object's direction and each pose's joint slide along its self-motion.
 struct DescentDirection
@@ -121,124 +32,18 @@ struct DescentDirection
 	bool has_slide = false;
 };
 
-// One reconfiguration edge's posture gap: `viewpoint`'s closest pose started from `neighbor_pose` (its tour neighbour across
-// the edge), i.e. the viewpoint in the neighbour's arm posture. Exact = the reconfiguration can be removed by swapping.
-struct PostureMatch
-{
-	size_t viewpoint = 0;
-	Joints neighbor_pose;
-	Joints pose;
-	Eigen::Vector3d position_error = Eigen::Vector3d::Zero();
-	double gap = 0.0;  // m, as the reach gaps (position, angle, clearance shortfall)
-	double clearance_shortfall = 0.0;  // m, its clearance part
-	double angle_error = 0.0;  // rad
-	bool exact = false;
-};
-
-// One evaluated spot: poses, tour order, and the reconfiguration edges still left with their posture gaps.
-struct Descent
-{
-	Placement placement;
-	std::vector<int> order;	 // viewpoint visit order
-	std::vector<PostureMatch> matches;  // per remaining reconfiguration edge
-	int num_reconfigurations = 0;
-	int num_blocked_edges = 0;  // tour edges whose straight move collides
-	double posture_gap_sum = 0.0;  // m
-	double tour_cost = 0.0;	 // GTSP edge cost summed from home (tour length in rad with joint_distance_weight 1)
-	double room_shortfall = 0.0;  // rad^2: summed squared shortfall of joint room below room_band, over all poses
-	double smallest_margin = 0.0;  // rad beyond the hard limit, over the reached poses
-	double cost = 0.0;
-};
-
 }  // namespace
 
-class ObjectGtspCoOptimizeNode : public rclcpp::Node
+class Optimizer::Impl
 {
 public:
-	ObjectGtspCoOptimizeNode()
-		: Node("object_gtsp_co_optimize", rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true))
+	Impl(
+		rclcpp::Node::SharedPtr node, moveit::core::RobotModelConstPtr model, planning_scene_monitor::PlanningSceneMonitorPtr scene,
+		const std::string& group_name, std::vector<Eigen::Isometry3d> viewpoints, const Eigen::Matrix3d& rotation, Joints home,
+		Settings settings, rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub)
+		: node(std::move(node)), model(std::move(model)), scene(std::move(scene)), viewpoints(std::move(viewpoints)),
+		  rotation(rotation), home(std::move(home)), settings(std::move(settings)), progress_pub(std::move(progress_pub))
 	{
-	}
-
-	void Run()
-	{
-		const std::string group_name = this->GetParameter<std::string>("group_name", "panda_arm");
-		std::string mesh_path = this->GetParameter<std::string>("mesh_path", "");
-		const double mesh_scale = this->GetParameter<double>("mesh_scale", 0.01);
-		const std::string tour_input_dir = this->GetParameter<std::string>("tour_input_dir", "/tmp/viewpoint_planner_output");
-		const std::string output_dir = this->GetParameter<std::string>("output_dir", "/tmp/object_gtsp_co_optimize_output");
-		this->home = this->GetParameter<std::vector<double>>("initial_joints", std::vector<double>{0.0, -0.8745, 0.0, -2.356, 0.0, 1.571, 0.785});
-		const Eigen::Vector3d nominal = ToVector3(this->GetParameter<std::vector<double>>("object_translation_world", {0.5, 0.0, 0.15}), Eigen::Vector3d(0.5, 0.0, 0.15));
-		this->rotation = RotationFromRpyDeg(this->GetParameter<std::vector<double>>("object_rotation_rpy_deg", {0.0, 0.0, 0.0}));
-		// object_placement's parameter names, so one params file serves all methods.
-		this->lower_bound = Eigen::Vector3d(this->GetParameter<double>("x_min", -0.6), this->GetParameter<double>("y_min", -0.6), this->GetParameter<double>("z_min", -0.2));
-		this->upper_bound = Eigen::Vector3d(this->GetParameter<double>("x_max", 0.6), this->GetParameter<double>("y_max", 0.6), this->GetParameter<double>("z_max", 0.2));
-		const Eigen::Vector3d start(this->GetParameter<double>("initial_x", 0.5), this->GetParameter<double>("initial_y", 0.0), this->GetParameter<double>("initial_z", 0.15));
-		closest_ik::Options ik_options;
-		this->seed = static_cast<int>(this->GetParameter<int64_t>("random_seed", 42));
-		ik_options.iters = static_cast<int>(this->GetParameter<int64_t>("closest_ik_iters", 60));
-		ik_options.margin = this->GetParameter<double>("closest_ik_margin", 0.02);
-		ik_options.rot_scale = this->GetParameter<double>("rot_metric_scale", 0.1);
-		ik_options.limit_sharpness = this->GetParameter<double>("manipulability_limit_sharpness", 20.0);
-		ik_options.ignore_roll = this->GetParameter<bool>("ignore_camera_roll", false);
-		ik_options.exact_margin = this->GetParameter<double>("exact_ik_margin", 0.0);
-		this->exact_options = ik_options;
-		this->exact_options.exact_only = true;
-		this->closest_options = ik_options;
-		this->closest_options.try_exact_first = false;
-		this->jacobian_damping = this->GetParameter<double>("jacobian_damping", 1e-3);
-		this->edge_weights.joint_distance = this->GetParameter<double>("joint_distance_weight", 1.0);
-		this->edge_weights.max_turn = this->GetParameter<double>("max_joint_deviation_weight", 1.0);
-		this->edge_weights.time = this->GetParameter<double>("travel_time_weight", 0.0);
-		this->two_opt_rounds = static_cast<int>(this->GetParameter<int64_t>("gtsp_two_opt_rounds", 5));
-		const double reconfig_threshold = this->GetParameter<double>("reconfig_threshold", 1.0);
-		const double planning_time = this->GetParameter<double>("real_cost_planning_time", 0.5);
-		const int planning_attempts = static_cast<int>(this->GetParameter<int64_t>("real_cost_attempts", 3));
-		const double unreachable_penalty = this->GetParameter<double>("unreachable_penalty", 50.0);
-		// The co-optimization's own tunable parameters.
-		const double time_budget = this->GetParameter<double>("co_time_budget_sec", 300.0);
-		this->max_steps = static_cast<int>(this->GetParameter<int64_t>("co_max_steps", 200));  // iterations of the descent
-		this->max_line_search_tries = static_cast<int>(this->GetParameter<int64_t>("co_max_line_search_tries", 4));  // tries per sub-step
-		this->ik_attempts = static_cast<int>(this->GetParameter<int64_t>("co_ik_attempts", 10));  // random start poses when a missed viewpoint's own pose fails
-		this->exact_finish_gap = this->GetParameter<double>("exact_ik_finish_gap", 0.05);  // m: a closest pose this near its target gets exact IK started from it
-		this->closest_gap_slack = this->GetParameter<double>("co_closest_gap_slack", 0.005);  // m: a miss's closest poses this near its best gap stay candidates
-		this->closest_ik_extra_starts = static_cast<int>(this->GetParameter<int64_t>("co_closest_ik_extra_starts", 3));  // random starts also tried for a miss's closest pose
-		this->initial_step = this->GetParameter<double>("co_initial_step", 0.02);	 // m
-		this->min_step = this->GetParameter<double>("co_min_step", 0.001);	// m: below this the descent has settled at this penalty
-		this->max_step = this->GetParameter<double>("co_max_step", 0.05);	 // m
-		this->initial_penalty = this->GetParameter<double>("co_initial_penalty", 100.0);	 // cost per m of missed gap
-		this->penalty_growth = this->GetParameter<double>("co_penalty_growth", 10.0);
-		this->max_penalty = this->GetParameter<double>("co_max_penalty", 1e5);
-		this->use_neighbor_ik = this->GetParameter<bool>("co_neighbor_ik", true);	// reorders also offer IK from each pose's tour neighbours
-		this->use_slide = this->GetParameter<bool>("co_slide", true);	// each step also slides reached poses along their self-motion
-		this->initial_slide_step = this->GetParameter<double>("co_initial_slide_step", 0.3);	// rad, largest pose slide at co_initial_step
-		this->slide_joint_margin = this->GetParameter<double>("co_slide_joint_margin", 0.05);	// rad a slide stays from each (hard) joint limit
-		this->reconfig_threshold = reconfig_threshold;
-		this->use_posture_match = this->GetParameter<bool>("co_posture_match", true);	// reconfiguration edges pull the object and swap poses
-		this->reconfiguration_weight = this->GetParameter<double>("co_reconfiguration_weight", 10.0);	// cost per m of posture gap
-		this->blocked_edge_charge = this->GetParameter<double>("co_blocked_edge_charge", 4.0);	// x edge length extra for a blocked edge with no free detour through home; 0 = off
-		this->gtsp_blocked_rounds = static_cast<int>(this->GetParameter<int64_t>("co_gtsp_blocked_rounds", 2));	// GTSP re-solves charging blocked edges
-		this->miss_cost = this->GetParameter<double>("co_miss_cost", 10.0);	// cost per missed viewpoint (a step may lose one if it gains more)
-		this->reconfiguration_cost = this->GetParameter<double>("co_reconfiguration_cost", 2.0);	// cost per reconfiguration
-		this->joint_room_band = this->GetParameter<double>("co_joint_room_band", 0.2);	// rad beyond the hard limit a joint should keep
-		this->joint_room_weight = this->GetParameter<double>("co_joint_room_weight", 50.0);	// cost per rad^2 of room shortfall
-		this->use_room = this->GetParameter<bool>("co_room", true);
-		// Ablation switches: no object move for the tour (reach still moves it); object frozen once every viewpoint is reached.
-		this->tour_object_move = this->GetParameter<bool>("co_tour_object_move", true);
-		this->freeze_object_when_reached = this->GetParameter<bool>("co_freeze_object_when_reached", false);	// a blocked missed viewpoint also pulls the object to free what blocks it
-		this->progress_delay = this->GetParameter<double>("visualize_progress_delay_sec", 0.0);  // s pause after each progress publish
-		const bool keep_alive = this->GetParameter<bool>("keep_alive", false);  // keep republishing the final markers until Ctrl-C (for RViz)
-
-		if (mesh_path.empty())
-			mesh_path = ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs.stl";
-		this->viewpoints = LoadTourTcpPoses(tour_input_dir);	// relative to the object position below
-		const std::vector<Eigen::Isometry3d> viewpoints_nominal = this->viewpoints;	// abs, object at nominal
-		for (Eigen::Isometry3d& viewpoint : this->viewpoints)
-			viewpoint.translation() -= nominal;
-		const int num_viewpoint = static_cast<int>(this->viewpoints.size());
-
-		robot_model_loader::RobotModelLoader loader(this->shared_from_this(), "robot_description");
-		this->model = loader.getModel();
 		this->state = std::make_unique<moveit::core::RobotState>(this->model);
 		this->state->setToDefaultValues();
 		this->group = this->state->getJointModelGroup(group_name);
@@ -246,113 +51,9 @@ public:
 		// The camera side, as exact IK's clearance check: links rigid with the tool and below, the wrist link itself aside.
 		this->camera_side_links = closest_ik::ToolSideLinks(this->tool);
 		this->camera_side_links.erase(moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(this->tool)->getName());
-		SetJointSpeedLimits(this->model, group_name, this->edge_weights);
+		SetJointSpeedLimits(this->model, group_name, this->settings.edge_weights);
 		this->travel_joints = joint_travel::AllJoints(static_cast<int>(this->home.size()) - 1);  // the last joint only spins the camera
-		this->scene = BuildLocalCollisionScene(this->shared_from_this(), mesh_path, mesh_scale, nominal, this->rotation);
-		AddMountingSurface(this->scene);
-		this->mesh_path = mesh_path;
-		this->mesh_scale = mesh_scale;
-		this->marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/object_placement_markers", rclcpp::QoS(1).transient_local());
-		this->progress_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/object_placement_progress_markers", rclcpp::QoS(1).transient_local());
-		visualization_msgs::msg::MarkerArray surface_markers;
-		surface_markers.markers.push_back(GetMountingSurfaceMarker(this->model->getRootLinkName(), this->now()));
-		this->marker_pub->publish(surface_markers);
-		this->num_threads = std::max(1u, std::min(std::thread::hardware_concurrency(), static_cast<unsigned int>(num_viewpoint)));
-		RCLCPP_INFO(this->get_logger(), "Loaded %d tour poses; co-optimizing in box (%.2f..%.2f, %.2f..%.2f, %.2f..%.2f) m, budget %.0f s", num_viewpoint, this->lower_bound.x(), this->upper_bound.x(), this->lower_bound.y(), this->upper_bound.y(), this->lower_bound.z(), this->upper_bound.z(), time_budget);
-
-		this->start_time = std::chrono::steady_clock::now();
-		this->time_budget_end = time_budget;
-		// One descent from the given start, no restarts.
-		const Descent best = this->Descend(this->ClampToBox(start));
-		const double search_seconds = this->GetElapsedSeconds();
-		const bool all_reached = best.placement.num_reached == num_viewpoint;
-
-		// Planned tour length and, for reference, execution time: straight moves where collision-free, else OMPL (camera spin
-		// aside in the length; timed with TOTG for the time).
-		std::vector<Joints> tour_poses = this->GetTourPoses(best.placement, best.order);
-		scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(best.placement.position, this->rotation));
-		const std::vector<double> edge_lengths = PlanTourEdgeLengths(this->shared_from_this(), this->model, this->scene, tour_poses, this->home, group_name, planning_time, planning_attempts, /*count_last_joint=*/false);
-		double planned_length = 0.0;
-		int num_failed_length_edges = 0;
-		for (size_t k = 0; k < tour_poses.size(); ++k)
-		{
-			const bool edge_ok = k < edge_lengths.size() && edge_lengths[k] >= 0.0;
-			num_failed_length_edges += edge_ok ? 0 : 1;
-			planned_length += edge_ok ? edge_lengths[k] : joint_travel::JointDistance(k == 0 ? this->home : tour_poses[k - 1], tour_poses[k], this->travel_joints) + unreachable_penalty;
-		}
-		const std::vector<double> edge_times = PlanTourEdgeTimes(this->shared_from_this(), this->model, this->scene, tour_poses, this->home, group_name, planning_time, planning_attempts);
-		double planned_time = 0.0;
-		int num_failed_edges = 0;
-		for (size_t k = 0; k < tour_poses.size(); ++k)
-		{
-			const bool edge_ok = k < edge_times.size() && edge_times[k] >= 0.0;
-			num_failed_edges += edge_ok ? 0 : 1;
-			planned_time += edge_ok ? edge_times[k] : joint_travel::StraightMoveTime(k == 0 ? this->home : tour_poses[k - 1], tour_poses[k], this->edge_weights.max_velocity, this->edge_weights.max_acceleration) + unreachable_penalty;
-		}
-		std::vector<Joints> poses_from_home = tour_poses;
-		poses_from_home.insert(poses_from_home.begin(), this->home);
-		const int num_reconfigurations = joint_travel::CountReconfigs(poses_from_home, reconfig_threshold, this->travel_joints);
-		const double smallest_margin = this->GetSmallestJointMargin(tour_poses);
-		const double seconds = this->GetElapsedSeconds();
-		if (all_reached)
-			RCLCPP_INFO(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned length %.2f rad (%d failed edges), %d reconfigurations, smallest joint margin %.3f rad beyond the hard limit; planned time %.2f s for reference (%.1f s).", best.placement.position.x(), best.placement.position.y(), best.placement.position.z(), num_viewpoint, planned_length, num_failed_length_edges, num_reconfigurations, smallest_margin, planned_time, seconds);
-		else
-			RCLCPP_WARN(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses (%.1f s).", best.placement.position.x(), best.placement.position.y(), best.placement.position.z(), std::max(0, best.placement.num_reached), num_viewpoint, seconds);
-
-		std::filesystem::create_directories(output_dir);
-		Json::Value out;
-		out["ok"] = all_reached;
-		out["num_reachable"] = std::max(0, best.placement.num_reached);
-		out["num_total"] = num_viewpoint;
-		out["x"] = best.placement.position.x();
-		out["y"] = best.placement.position.y();
-		out["z"] = best.placement.position.z();
-		out["planned_travel"] = all_reached ? planned_length : -1.0;  // rad
-		out["planned_time"] = all_reached ? planned_time : -1.0;  // s, reference only
-		out["straight_tour_cost"] = best.tour_cost;
-		out["failed_edges"] = num_failed_length_edges;
-		out["reconfigurations"] = num_reconfigurations;
-		out["smallest_joint_margin"] = smallest_margin;
-		out["search_seconds"] = search_seconds;
-		out["seconds"] = seconds;
-		for (int viewpoint : best.order)
-			out["tour_order"].append(viewpoint);
-		for (const Joints& pose : tour_poses)
-		{
-			Json::Value joints(Json::arrayValue);
-			for (double value : pose)
-				joints.append(value);
-			out["joint_solutions"].append(joints);
-		}
-		std::ofstream(output_dir + "/object_gtsp_co_optimize_result.json") << out;
-
-		// Final markers on /object_placement_markers, as object_placement draws them: the object and the tour's viewpoints.
-		ObjectPlacementResult result;
-		result.ok = all_reached;
-		result.x = best.placement.position.x();
-		result.y = best.placement.position.y();
-		result.z = best.placement.position.z();
-		result.tour_order = best.order;
-		for (int viewpoint : best.order)
-			result.joint_solutions.push_back(best.placement.reached[static_cast<size_t>(viewpoint)] ? best.placement.poses[static_cast<size_t>(viewpoint)] : Joints());
-		visualization_msgs::msg::MarkerArray final_markers = BuildObjectPlacementMarkerArray(this->now(), this->mesh_path, this->mesh_scale, nominal, this->rotation, viewpoints_nominal, result);
-		final_markers.markers.push_back(GetMountingSurfaceMarker(this->model->getRootLinkName(), this->now()));
-		this->marker_pub->publish(final_markers);
-		this->PublishProgress(best.placement, best.order, Eigen::Vector3d::Zero());
-		while (keep_alive && rclcpp::ok())
-		{
-			std::this_thread::sleep_for(std::chrono::seconds(2));
-			this->marker_pub->publish(final_markers);
-		}
-	}
-
-private:
-	template <typename T>
-	T GetParameter(const std::string& name, const T& fallback)
-	{
-		if (!this->has_parameter(name))
-			this->declare_parameter(name, fallback);
-		return this->get_parameter(name).get_value<T>();
+		this->num_threads = std::max(1u, std::min(std::thread::hardware_concurrency(), static_cast<unsigned int>(this->viewpoints.size())));
 	}
 
 	double GetElapsedSeconds() const
@@ -362,7 +63,7 @@ private:
 
 	Eigen::Vector3d ClampToBox(const Eigen::Vector3d& position) const
 	{
-		return position.cwiseMax(this->lower_bound).cwiseMin(this->upper_bound);
+		return position.cwiseMax(this->settings.lower_bound).cwiseMin(this->settings.upper_bound);
 	}
 
 	// One descent from `start`. Each iteration: (reach) if viewpoints are missed, move the object to reach more, with
@@ -372,40 +73,40 @@ private:
 	// penalty grows (up to max_penalty) and it goes on.
 	Descent Descend(const Eigen::Vector3d& start)
 	{
-		double penalty = this->initial_penalty;
+		double penalty = this->settings.initial_penalty;
 		Descent current;
 		current.placement = this->SolvePoses(start, std::vector<Joints>(this->viewpoints.size(), this->home));
 		current.order = this->ReorderTour(current.placement, {});
 		this->EvaluateWithBestOrder(current, penalty);
 		const int num_viewpoint = static_cast<int>(this->viewpoints.size());
-		double reach_step = this->initial_step;
-		double tour_step = this->initial_step;
+		double reach_step = this->settings.initial_step;
+		double tour_step = this->settings.initial_step;
 		this->trail.assign(1, start);
 		this->PublishProgress(current.placement, current.order, Eigen::Vector3d::Zero());
 		this->LogDescent("start", current);
 		bool object_frozen = false;	 // freeze_object_when_reached: set once every viewpoint is reached
-		for (int iteration = 1; iteration <= this->max_steps && rclcpp::ok() && this->GetElapsedSeconds() < this->time_budget_end; ++iteration)
+		for (int iteration = 1; iteration <= this->settings.max_steps && rclcpp::ok() && this->GetElapsedSeconds() < this->settings.time_budget; ++iteration)
 		{
-			if (this->freeze_object_when_reached && !object_frozen && current.placement.num_reached == num_viewpoint)
+			if (this->settings.freeze_object_when_reached && !object_frozen && current.placement.num_reached == num_viewpoint)
 			{
 				object_frozen = true;
-				RCLCPP_INFO(this->get_logger(), "iteration %d: all reached; object frozen at abs (%.4f, %.4f, %.4f)", iteration, current.placement.position.x(), current.placement.position.y(), current.placement.position.z());
+				RCLCPP_INFO(this->node->get_logger(), "iteration %d: all reached; object frozen at abs (%.4f, %.4f, %.4f)", iteration, current.placement.position.x(), current.placement.position.y(), current.placement.position.z());
 			}
 			bool changed = false;
 			if (current.placement.num_reached < num_viewpoint && !object_frozen)
 				changed = this->TakeReachStep(current, reach_step, penalty, iteration) || changed;
 			changed = this->ImprovePosesInPlace(current, penalty, iteration) || changed;
-			if (this->tour_object_move && !object_frozen)
+			if (this->settings.tour_object_move && !object_frozen)
 				changed = this->TakeTourStep(current, tour_step, penalty, iteration) || changed;
 			if (changed)
 				continue;
-			if (current.placement.num_reached == num_viewpoint || penalty >= this->max_penalty)
+			if (current.placement.num_reached == num_viewpoint || penalty >= this->settings.max_penalty)
 				break;
-			penalty = std::min(this->max_penalty, penalty * this->penalty_growth);
+			penalty = std::min(this->settings.max_penalty, penalty * this->settings.penalty_growth);
 			this->UpdateCost(current, penalty);
-			reach_step = this->initial_step;
-			tour_step = this->initial_step;
-			RCLCPP_INFO(this->get_logger(), "iteration %d: nothing changed with %d missed; penalty -> %.0f per m", iteration, num_viewpoint - current.placement.num_reached, penalty);
+			reach_step = this->settings.initial_step;
+			tour_step = this->settings.initial_step;
+			RCLCPP_INFO(this->node->get_logger(), "iteration %d: nothing changed with %d missed; penalty -> %.0f per m", iteration, num_viewpoint - current.placement.num_reached, penalty);
 			this->LogMissedViewpoints(current.placement);
 		}
 		this->LogDescent("end", current);
@@ -415,7 +116,7 @@ private:
 
 	void LogDescent(const std::string& label, const Descent& descent)
 	{
-		RCLCPP_INFO(this->get_logger(), "%s: abs (%.4f, %.4f, %.4f) m  reached %d/%zu  gap sum %.4f m  reconfigurations %d (posture gap sum %.3f m)  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f", label.c_str(), descent.placement.position.x(), descent.placement.position.y(), descent.placement.position.z(), descent.placement.num_reached, this->viewpoints.size(), descent.placement.gap_sum, descent.num_reconfigurations, descent.posture_gap_sum, descent.num_blocked_edges, descent.tour_cost, descent.smallest_margin, descent.cost);
+		RCLCPP_INFO(this->node->get_logger(), "%s: abs (%.4f, %.4f, %.4f) m  reached %d/%zu  gap sum %.4f m  reconfigurations %d (posture gap sum %.3f m)  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f", label.c_str(), descent.placement.position.x(), descent.placement.position.y(), descent.placement.position.z(), descent.placement.num_reached, this->viewpoints.size(), descent.placement.gap_sum, descent.num_reconfigurations, descent.posture_gap_sum, descent.num_blocked_edges, descent.tour_cost, descent.smallest_margin, descent.cost);
 	}
 
 	// The object at `position`, IK from `seeds` (then `fallback_seeds`), evaluated like every spot.
@@ -439,7 +140,7 @@ private:
 			return false;
 		Eigen::Vector3d direction = aim;
 		bool tried_miss_room = false;
-		for (int attempt = 0; attempt < this->max_line_search_tries && step >= this->min_step; ++attempt)
+		for (int attempt = 0; attempt < this->settings.max_line_search_tries && step >= this->settings.min_step; ++attempt)
 		{
 			const Descent candidate = this->EvaluateSpot(current.placement.position + step * direction, current.placement.poses, {}, current.order, penalty);
 			std::vector<size_t> lost;
@@ -447,13 +148,13 @@ private:
 				if (current.placement.reached[v] && !candidate.placement.reached[v])
 					lost.push_back(v);
 			const bool kept = candidate.placement.num_reached > current.placement.num_reached || (candidate.placement.num_reached == current.placement.num_reached && candidate.placement.gap_sum < current.placement.gap_sum);
-			RCLCPP_INFO(this->get_logger(), "iteration %d reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %zu)  gap sum %.4f m vs %.4f%s", iteration, step, candidate.placement.position.x(), candidate.placement.position.y(), candidate.placement.position.z(), candidate.placement.num_reached, lost.size(), candidate.placement.gap_sum, current.placement.gap_sum, kept ? "  <-- kept" : "");
+			RCLCPP_INFO(this->node->get_logger(), "iteration %d reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %zu)  gap sum %.4f m vs %.4f%s", iteration, step, candidate.placement.position.x(), candidate.placement.position.y(), candidate.placement.position.z(), candidate.placement.num_reached, lost.size(), candidate.placement.gap_sum, current.placement.gap_sum, kept ? "  <-- kept" : "");
 			if (kept)
 			{
 				current = candidate;
 				this->trail.push_back(current.placement.position);
 				this->PublishProgress(current.placement, current.order, direction);
-				step = std::min(this->max_step, step * 1.5);
+				step = std::min(this->settings.max_step, step * 1.5);
 				// Misses nearly on target: say why they still miss.
 				bool has_tiny_miss = false;
 				for (size_t v = 0; v < this->viewpoints.size(); ++v)
@@ -462,7 +163,7 @@ private:
 					this->LogMissedViewpoints(current.placement);
 				return true;
 			}
-			if (!lost.empty() && this->use_room)
+			if (!lost.empty() && this->settings.use_room)
 			{
 				const Eigen::Vector3d room_direction = this->GetRoomThenReachDirection(current.placement, lost, aim, step);
 				if (room_direction.norm() > 0.5 && (room_direction - direction).norm() > 1e-3)
@@ -473,7 +174,7 @@ private:
 			}
 			// Room-then-reach for the misses: once per step, a move that frees what blocks them (joint limits, stretch,
 			// collisions), kept if it raises their tightest margin and loses nothing; the next iteration aims again.
-			if (this->use_room && !tried_miss_room)
+			if (this->settings.use_room && !tried_miss_room)
 			{
 				tried_miss_room = true;
 				if (this->TakeMissRoomStep(current, step, penalty, iteration))
@@ -482,7 +183,7 @@ private:
 			step *= 0.5;
 		}
 		// Failed at this spot: the next try (after other sub-steps may have changed things) starts from the full step.
-		step = this->initial_step;
+		step = this->settings.initial_step;
 		return false;
 	}
 
@@ -491,7 +192,7 @@ private:
 	// the cost drops. The slide halves on failure.
 	bool ImprovePosesInPlace(Descent& current, double penalty, int iteration)
 	{
-		if (!this->use_slide)
+		if (!this->settings.use_slide)
 		{
 			Descent reordered = current;
 			this->EvaluateWithBestOrder(reordered, penalty);
@@ -501,12 +202,12 @@ private:
 			return kept;
 		}
 		const DescentDirection direction = this->GetTourDirection(current);
-		double slide_step = this->initial_slide_step;
-		for (int attempt = 0; attempt < this->max_line_search_tries && direction.has_slide; ++attempt)
+		double slide_step = this->settings.initial_slide_step;
+		for (int attempt = 0; attempt < this->settings.max_line_search_tries && direction.has_slide; ++attempt)
 		{
 			const Descent candidate = this->EvaluateSpot(current.placement.position, this->GetSlidPoses(current.placement, direction, slide_step), current.placement.poses, current.order, penalty);
 			const bool kept = candidate.cost < current.cost - 1e-9;
-			RCLCPP_INFO(this->get_logger(), "iteration %d poses: slide %.3f rad  reached %d  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f vs %.2f%s", iteration, slide_step, candidate.placement.num_reached, candidate.num_reconfigurations, candidate.num_blocked_edges, candidate.tour_cost, candidate.smallest_margin, candidate.cost, current.cost, kept ? "  <-- kept" : "");
+			RCLCPP_INFO(this->node->get_logger(), "iteration %d poses: slide %.3f rad  reached %d  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f vs %.2f%s", iteration, slide_step, candidate.placement.num_reached, candidate.num_reconfigurations, candidate.num_blocked_edges, candidate.tour_cost, candidate.smallest_margin, candidate.cost, current.cost, kept ? "  <-- kept" : "");
 			if (kept)
 			{
 				current = candidate;
@@ -524,23 +225,23 @@ private:
 		const DescentDirection direction = this->GetTourDirection(current);
 		if (direction.object_direction.norm() < 0.5)
 			return false;
-		for (int attempt = 0; attempt < this->max_line_search_tries && step >= this->min_step; ++attempt)
+		for (int attempt = 0; attempt < this->settings.max_line_search_tries && step >= this->settings.min_step; ++attempt)
 		{
 			const Descent candidate = this->EvaluateSpot(current.placement.position + step * direction.object_direction, current.placement.poses, {}, current.order, penalty);
 			const bool kept = candidate.cost < current.cost - 1e-9;
-			RCLCPP_INFO(this->get_logger(), "iteration %d tour: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d  gap sum %.4f m  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f vs %.2f%s", iteration, step, candidate.placement.position.x(), candidate.placement.position.y(), candidate.placement.position.z(), candidate.placement.num_reached, candidate.placement.gap_sum, candidate.num_reconfigurations, candidate.num_blocked_edges, candidate.tour_cost, candidate.smallest_margin, candidate.cost, current.cost, kept ? "  <-- kept" : "");
+			RCLCPP_INFO(this->node->get_logger(), "iteration %d tour: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d  gap sum %.4f m  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f vs %.2f%s", iteration, step, candidate.placement.position.x(), candidate.placement.position.y(), candidate.placement.position.z(), candidate.placement.num_reached, candidate.placement.gap_sum, candidate.num_reconfigurations, candidate.num_blocked_edges, candidate.tour_cost, candidate.smallest_margin, candidate.cost, current.cost, kept ? "  <-- kept" : "");
 			if (kept)
 			{
 				current = candidate;
 				this->trail.push_back(current.placement.position);
 				this->PublishProgress(current.placement, current.order, direction.object_direction);
-				step = std::min(this->max_step, step * 1.5);
+				step = std::min(this->settings.max_step, step * 1.5);
 				return true;
 			}
 			step *= 0.5;
 		}
 		// Failed at this spot: the next try (after other sub-steps may have changed things) starts from the full step.
-		step = this->initial_step;
+		step = this->settings.initial_step;
 		return false;
 	}
 
@@ -575,7 +276,7 @@ private:
 		const double tightest_before = room_margins::Tightest(before);
 		const double tightest_after = after.empty() ? std::numeric_limits<double>::infinity() : room_margins::Tightest(after);
 		const bool kept = !lost_any && candidate.placement.num_reached >= current.placement.num_reached && tightest_after > tightest_before + 1e-3;
-		RCLCPP_INFO(this->get_logger(), "iteration %d reach room: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d  blocked misses %zu  tightest margin %.2f -> %.2f floors%s", iteration, step, candidate.placement.position.x(), candidate.placement.position.y(), candidate.placement.position.z(), candidate.placement.num_reached, blocked.size(), tightest_before, tightest_after, kept ? "  <-- kept" : "");
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d reach room: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d  blocked misses %zu  tightest margin %.2f -> %.2f floors%s", iteration, step, candidate.placement.position.x(), candidate.placement.position.y(), candidate.placement.position.z(), candidate.placement.num_reached, blocked.size(), tightest_before, tightest_after, kept ? "  <-- kept" : "");
 		if (!kept)
 			return false;
 		current = candidate;
@@ -668,7 +369,7 @@ private:
 		}
 		descent.smallest_margin = this->GetSmallestJointMargin(reached_poses);
 		const int num_missed = static_cast<int>(this->viewpoints.size()) - descent.placement.num_reached;
-		descent.cost = descent.tour_cost + this->miss_cost * num_missed + penalty * descent.placement.gap_sum + this->reconfiguration_cost * descent.num_reconfigurations + this->reconfiguration_weight * descent.posture_gap_sum + this->joint_room_weight * descent.room_shortfall;
+		descent.cost = descent.tour_cost + this->settings.miss_cost * num_missed + penalty * descent.placement.gap_sum + this->settings.reconfiguration_cost * descent.num_reconfigurations + this->settings.reconfiguration_weight * descent.posture_gap_sum + this->settings.joint_room_weight * descent.room_shortfall;
 	}
 
 	// Joint room of one pose beyond the hard limit: sum over its joints (camera spin aside) of max(0, room_band - margin)^2,
@@ -687,17 +388,17 @@ private:
 			const double value = q[static_cast<size_t>(j)];
 			const double low = value - bounds.min_position_;
 			const double high = bounds.max_position_ - value;
-			if (low < this->joint_room_band)
+			if (low < this->settings.joint_room_band)
 			{
-				shortfall += (this->joint_room_band - low) * (this->joint_room_band - low);
+				shortfall += (this->settings.joint_room_band - low) * (this->settings.joint_room_band - low);
 				if (slope != nullptr)
-					(*slope)[j] -= 2.0 * (this->joint_room_band - low);
+					(*slope)[j] -= 2.0 * (this->settings.joint_room_band - low);
 			}
-			if (high < this->joint_room_band)
+			if (high < this->settings.joint_room_band)
 			{
-				shortfall += (this->joint_room_band - high) * (this->joint_room_band - high);
+				shortfall += (this->settings.joint_room_band - high) * (this->settings.joint_room_band - high);
 				if (slope != nullptr)
-					(*slope)[j] += 2.0 * (this->joint_room_band - high);
+					(*slope)[j] += 2.0 * (this->settings.joint_room_band - high);
 			}
 		}
 		return shortfall;
@@ -724,7 +425,7 @@ private:
 
 	bool IsReconfiguration(const Joints& from, const Joints& to) const
 	{
-		return joint_travel::MaxJointTurn(from, to, this->travel_joints) > this->reconfig_threshold;
+		return joint_travel::MaxJointTurn(from, to, this->travel_joints) > this->settings.reconfig_threshold;
 	}
 
 	// Reconfigurations along home -> tour.
@@ -753,7 +454,7 @@ private:
 	void MatchPostures(Descent& descent)
 	{
 		descent.matches.clear();
-		if (!this->use_posture_match)
+		if (!this->settings.use_posture_match)
 			return;
 		Placement& placement = descent.placement;
 		const std::vector<int>& order = descent.order;
@@ -823,13 +524,13 @@ private:
 					for (const std::pair<size_t, const Joints*>& option : options)
 					{
 						const Eigen::Isometry3d target = scene_geometry::Translation(placement.position) * this->viewpoints[option.first];
-						closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, *option.second, this->exact_options);
+						closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, *option.second, this->settings.exact_options);
 						if (!result.exact)
 							result = this->SolveClosestWithRoom(thread_state, target, {*option.second});
 						if (!result.found || this->IsReconfiguration(*option.second, result.q))
 							continue;
 						const double clearance_shortfall = result.exact ? 0.0 : this->GetClearanceShortfall(thread_state, result.q);
-						const double gap = result.exact ? 0.0 : scene_geometry::PoseGap(result.pose_error, this->closest_options.rot_scale) + clearance_shortfall;
+						const double gap = result.exact ? 0.0 : scene_geometry::PoseGap(result.pose_error, this->settings.closest_options.rot_scale) + clearance_shortfall;
 						if (found[e] && gap >= matches[e].gap)
 							continue;
 						found[e] = true;
@@ -867,9 +568,9 @@ private:
 		const double joint_floor = 0.05;  // rad
 		const double stretch_floor = 0.02;
 		const double collision_floor = 0.01;  // m
-		const double window = this->closest_options.margin + near_floors * collision_floor;  // m, collision pairs looked at
+		const double window = this->settings.closest_options.margin + near_floors * collision_floor;  // m, collision pairs looked at
 		const int dof = static_cast<int>(q.size());
-		const Eigen::MatrixXd dq_dp = scene_geometry::DampedPinv(manipulability::ToolJacobian(*this->state, this->group, this->tool, q), this->jacobian_damping).leftCols<3>();
+		const Eigen::MatrixXd dq_dp = scene_geometry::DampedPinv(manipulability::ToolJacobian(*this->state, this->group, this->tool, q), this->settings.jacobian_damping).leftCols<3>();
 		const std::vector<const moveit::core::JointModel*>& joints = this->group->getActiveJointModels();
 		std::vector<room_margins::Margin> margins;
 		for (int i = 0; i < dof; ++i)
@@ -917,7 +618,7 @@ private:
 		const std::vector<room_margins::Margin> margins = this->GetBlockingMargins(v, placement.poses[v]);
 		if (margins.empty())
 			return Eigen::Vector3d::Zero();
-		return room_margins::MostRoomDirection(margins, this->initial_step);
+		return room_margins::MostRoomDirection(margins, this->settings.initial_step);
 	}
 
 	// Per missed viewpoint: its gap and what its closest pose is up against (joints near a limit, close collision pairs).
@@ -926,7 +627,7 @@ private:
 		scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(placement.position, this->rotation));
 		const std::vector<const moveit::core::JointModel*>& joints = this->group->getActiveJointModels();
 		const double limit_band = 0.02;  // rad: a joint this close to its (hard) limit counts as at it
-		const double contact_band = this->closest_options.margin + 0.002;  // m
+		const double contact_band = this->settings.closest_options.margin + 0.002;  // m
 		for (size_t v = 0; v < this->viewpoints.size(); ++v)
 		{
 			if (placement.reached[v])
@@ -945,7 +646,7 @@ private:
 			for (size_t k = 0; k < pairs.names.size(); ++k)
 				blockers += " " + pairs.names[k] + " " + std::to_string(static_cast<int>(std::round(pairs.dists[k] * 1000.0))) + " mm;";
 			const bool valid = scene_geometry::IsStateValid(this->scene, this->state.get(), this->group, placement.poses[v].data());
-			RCLCPP_INFO(this->get_logger(), "  missed viewpoint %zu: gap %.2f mm (position %.2f mm, angle %.3f deg, clearance short %.2f mm, closest pose %s), blocked by:%s", v, 1000.0 * placement.gaps[v], 1000.0 * placement.position_errors[v].norm(), placement.angle_errors[v] * 180.0 / M_PI, 1000.0 * placement.clearance_shortfalls[v], valid ? "valid" : "INVALID", blockers.empty() ? " nothing (reach)" : blockers.c_str());
+			RCLCPP_INFO(this->node->get_logger(), "  missed viewpoint %zu: gap %.2f mm (position %.2f mm, angle %.3f deg, clearance short %.2f mm, closest pose %s), blocked by:%s", v, 1000.0 * placement.gaps[v], 1000.0 * placement.position_errors[v].norm(), placement.angle_errors[v] * 180.0 / M_PI, 1000.0 * placement.clearance_shortfalls[v], valid ? "valid" : "INVALID", blockers.empty() ? " nothing (reach)" : blockers.c_str());
 		}
 	}
 
@@ -956,15 +657,15 @@ private:
 		std::vector<closest_ik::Result> results;
 		for (const Joints& start : starts)
 		{
-			closest_ik::Result result = closest_ik::Solve(this->scene, state, this->group, this->tool, target, start, this->closest_options);
+			closest_ik::Result result = closest_ik::Solve(this->scene, state, this->group, this->tool, target, start, this->settings.closest_options);
 			if (!result.found)
 				continue;
 			if (this->GetClearanceShortfall(state, result.q) > 0.0)
 				result = this->FinishClearance(state, target, result);
-			else if (!result.exact && result.gap < this->exact_finish_gap)
+			else if (!result.exact && result.gap < this->settings.exact_finish_gap)
 			{
 				// Close to the target: exact IK started from the closest pose (every exact check applies).
-				const closest_ik::Result exact = closest_ik::Solve(this->scene, state, this->group, this->tool, target, result.q, this->exact_options);
+				const closest_ik::Result exact = closest_ik::Solve(this->scene, state, this->group, this->tool, target, result.q, this->settings.exact_options);
 				if (exact.exact)
 					result = exact;
 			}
@@ -990,15 +691,15 @@ private:
 			candidate.position_error = result.pose_error.head<3>();
 			candidate.angle_error = result.pose_error.tail<3>().norm();
 			candidate.clearance_shortfall = this->GetClearanceShortfall(state, result.q);
-			candidate.gap = scene_geometry::PoseGap(result.pose_error, this->closest_options.rot_scale) + candidate.clearance_shortfall;
+			candidate.gap = scene_geometry::PoseGap(result.pose_error, this->settings.closest_options.rot_scale) + candidate.clearance_shortfall;
 			best_gap = std::min(best_gap, candidate.gap);
-			roomy.push_back(candidate.clearance_shortfall <= 0.0 && this->GetSmallestJointMargin({result.q}) >= this->joint_room_band);
+			roomy.push_back(candidate.clearance_shortfall <= 0.0 && this->GetSmallestJointMargin({result.q}) >= this->settings.joint_room_band);
 			all.push_back(candidate);
 		}
 		std::vector<MissCandidate> near, near_roomy;
 		for (size_t k = 0; k < all.size(); ++k)
 		{
-			if (all[k].gap > best_gap + this->closest_gap_slack)
+			if (all[k].gap > best_gap + this->settings.closest_gap_slack)
 				continue;
 			near.push_back(all[k]);
 			if (roomy[k])
@@ -1016,7 +717,7 @@ private:
 		{
 			if (result.exact)
 				return result;
-			const double gap = scene_geometry::PoseGap(result.pose_error, this->closest_options.rot_scale) + this->GetClearanceShortfall(state, result.q);
+			const double gap = scene_geometry::PoseGap(result.pose_error, this->settings.closest_options.rot_scale) + this->GetClearanceShortfall(state, result.q);
 			if (gap < best_gap)
 			{
 				best = result;
@@ -1032,7 +733,7 @@ private:
 	// freedom: a 6-joint arm on a full 6D target can't move without moving the tool.
 	closest_ik::Result FinishClearance(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const closest_ik::Result& closest)
 	{
-		const double margin = this->exact_options.exact_margin;
+		const double margin = this->settings.exact_options.exact_margin;
 		if (margin <= 0.0)
 			return closest;
 		const double goal_clearance = margin + 0.002;  // m: a little past the exact poses' clearance
@@ -1055,14 +756,14 @@ private:
 			}
 			if (push.norm() < 1e-9)
 				break;
-			const scene_geometry::Vector6d pose_error = closest_ik::GetPoseError(target, state.getGlobalLinkTransform(this->tool), this->exact_options.ignore_roll);
+			const scene_geometry::Vector6d pose_error = closest_ik::GetPoseError(target, state.getGlobalLinkTransform(this->tool), this->settings.exact_options.ignore_roll);
 			Eigen::MatrixXd jacobian = manipulability::ToolJacobian(state, this->group, this->tool, q);
-			if (this->exact_options.ignore_roll)
+			if (this->settings.exact_options.ignore_roll)
 			{
 				const Eigen::Vector3d axis = state.getGlobalLinkTransform(this->tool).linear().col(2);
 				jacobian.bottomRows<3>() = (Eigen::Matrix3d::Identity() - axis * axis.transpose()) * jacobian.bottomRows<3>();
 			}
-			const Eigen::MatrixXd pseudo_inverse = scene_geometry::DampedPinv(jacobian, this->jacobian_damping);
+			const Eigen::MatrixXd pseudo_inverse = scene_geometry::DampedPinv(jacobian, this->settings.jacobian_damping);
 			const Eigen::MatrixXd self_motion = Eigen::MatrixXd::Identity(jacobian.cols(), jacobian.cols()) - pseudo_inverse * jacobian;
 			Eigen::VectorXd step = pseudo_inverse * pose_error + self_motion * push;
 			if (step.cwiseAbs().maxCoeff() > max_joint_step)
@@ -1073,7 +774,7 @@ private:
 			state.enforceBounds(this->group);
 			state.copyJointGroupPositions(this->group, q);
 		}
-		const closest_ik::Result exact = closest_ik::Solve(this->scene, state, this->group, this->tool, target, q, this->exact_options);
+		const closest_ik::Result exact = closest_ik::Solve(this->scene, state, this->group, this->tool, target, q, this->settings.exact_options);
 		if (exact.exact)
 			return exact;
 		if (!scene_geometry::IsStateValid(this->scene, &state, this->group, q.data()))
@@ -1083,11 +784,11 @@ private:
 		closest_ik::Result finished;
 		finished.found = true;
 		finished.exact = false;
-		finished.pose_error = closest_ik::GetPoseError(target, state.getGlobalLinkTransform(this->tool), this->exact_options.ignore_roll);
-		finished.gap = scene_geometry::PoseGap(finished.pose_error, this->closest_options.rot_scale);
+		finished.pose_error = closest_ik::GetPoseError(target, state.getGlobalLinkTransform(this->tool), this->settings.exact_options.ignore_roll);
+		finished.gap = scene_geometry::PoseGap(finished.pose_error, this->settings.closest_options.rot_scale);
 		finished.q = q;
 		const double finished_gap = finished.gap + this->GetClearanceShortfall(state, q);
-		const double closest_gap = scene_geometry::PoseGap(closest.pose_error, this->closest_options.rot_scale) + this->GetClearanceShortfall(state, closest.q);
+		const double closest_gap = scene_geometry::PoseGap(closest.pose_error, this->settings.closest_options.rot_scale) + this->GetClearanceShortfall(state, closest.q);
 		return finished_gap < closest_gap ? finished : closest;
 	}
 
@@ -1112,7 +813,7 @@ private:
 	// (camera side left out). Added to a missed viewpoint's gap, so a miss blocked only by clearance isn't free to lose.
 	double GetClearanceShortfall(moveit::core::RobotState& state, const Joints& q) const
 	{
-		const double margin = this->exact_options.exact_margin;
+		const double margin = this->settings.exact_options.exact_margin;
 		if (margin <= 0.0)
 			return 0.0;
 		return std::max(0.0, margin - this->GetArmClearance(state, q, margin));
@@ -1122,7 +823,7 @@ private:
 	uint32_t GetSpotSeed(const Eigen::Vector3d& position, size_t v) const
 	{
 		const Eigen::Vector3d cell = (position * 1e4).array().round();
-		uint64_t hash = static_cast<uint64_t>(this->seed) * 1000003ULL + static_cast<uint64_t>(v) * 7919ULL;
+		uint64_t hash = static_cast<uint64_t>(this->settings.seed) * 1000003ULL + static_cast<uint64_t>(v) * 7919ULL;
 		for (int axis = 0; axis < 3; ++axis)
 			hash = hash * 6364136223846793005ULL + static_cast<uint64_t>(static_cast<int64_t>(cell[axis]));
 		return static_cast<uint32_t>(hash ^ (hash >> 32));
@@ -1152,24 +853,24 @@ private:
 					// Random starts seeded by viewpoint and spot (0.1 mm grid): the same spot always gives the same poses.
 					random_numbers::RandomNumberGenerator viewpoint_rng(this->GetSpotSeed(position, v));
 					const Eigen::Isometry3d target = scene_geometry::Translation(position) * this->viewpoints[v];
-					closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, seeds[v], this->exact_options);
+					closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, seeds[v], this->settings.exact_options);
 					if (!result.exact && v < fallback_seeds.size())
-						result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, fallback_seeds[v], this->exact_options);
+						result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, fallback_seeds[v], this->settings.exact_options);
 					std::vector<Joints> random_starts;
-					for (int attempt = 0; attempt < this->ik_attempts && !result.exact; ++attempt)
+					for (int attempt = 0; attempt < this->settings.ik_attempts && !result.exact; ++attempt)
 					{
 						Joints random_start;
 						thread_state.setToRandomPositions(this->group, viewpoint_rng);
 						thread_state.copyJointGroupPositions(this->group, random_start);
 						random_starts.push_back(random_start);
-						result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, random_start, this->exact_options);
+						result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, random_start, this->settings.exact_options);
 					}
 					if (!result.exact)
 					{
 						// Closest poses from its own pose and a few of the random starts (other postures). Those near the best gap
 						// and with room are kept for GTSP to choose by tour; the one from its own pose is the default.
 						std::vector<Joints> closest_starts = {seeds[v]};
-						for (size_t k = 0; k < random_starts.size() && static_cast<int>(closest_starts.size()) <= this->closest_ik_extra_starts; ++k)
+						for (size_t k = 0; k < random_starts.size() && static_cast<int>(closest_starts.size()) <= this->settings.closest_ik_extra_starts; ++k)
 							closest_starts.push_back(random_starts[k]);
 						const std::vector<closest_ik::Result> closest = this->SolveClosestCandidates(thread_state, target, closest_starts);
 						result = closest_ik::Result();
@@ -1187,7 +888,7 @@ private:
 					if (!result.found)
 					{
 						// No collision-free pose near: keep the last one and a fixed large gap, no pull.
-						gaps[v] = this->closest_options.margin + 1.0;
+						gaps[v] = this->settings.closest_options.margin + 1.0;
 						continue;
 					}
 					placement.poses[v] = result.q;
@@ -1226,7 +927,7 @@ private:
 	{
 		std::vector<Joints> poses = this->GetTourPoses(placement, order);
 		poses.insert(poses.begin(), this->home);
-		return joint_travel::TravelCost(poses, this->edge_weights, this->travel_joints);
+		return joint_travel::TravelCost(poses, this->settings.edge_weights, this->travel_joints);
 	}
 
 	// d(edge cost)/d(to) by central differences. The cost depends on to - from only, so d/d(from) is its negative.
@@ -1238,9 +939,9 @@ private:
 		for (size_t j = 0; j < to.size(); ++j)
 		{
 			shifted[j] = to[j] + delta;
-			const double cost_up = joint_travel::EdgeCost(from, shifted, this->edge_weights, this->travel_joints);
+			const double cost_up = joint_travel::EdgeCost(from, shifted, this->settings.edge_weights, this->travel_joints);
 			shifted[j] = to[j] - delta;
-			const double cost_down = joint_travel::EdgeCost(from, shifted, this->edge_weights, this->travel_joints);
+			const double cost_down = joint_travel::EdgeCost(from, shifted, this->settings.edge_weights, this->travel_joints);
 			shifted[j] = to[j];
 			slope[static_cast<Eigen::Index>(j)] = (cost_up - cost_down) / (2.0 * delta);
 		}
@@ -1251,7 +952,7 @@ private:
 	Eigen::MatrixXd GetToolJacobian(const Joints& q)
 	{
 		Eigen::MatrixXd jacobian = manipulability::ToolJacobian(*this->state, this->group, this->tool, q);
-		if (this->exact_options.ignore_roll)
+		if (this->settings.exact_options.ignore_roll)
 		{
 			const Eigen::Vector3d axis = this->state->getGlobalLinkTransform(this->tool).linear().col(2);
 			jacobian.bottomRows<3>() = (Eigen::Matrix3d::Identity() - axis * axis.transpose()) * jacobian.bottomRows<3>();
@@ -1301,7 +1002,7 @@ private:
 				reach_move -= placement.position_errors[v] / gap;
 			// A miss on target (gap under 1 mm) is all blocked.
 			const double blocked_share = gap < 1e-3 ? 1.0 : 1.0 - placement.position_errors[v].norm() / gap;
-			if (this->use_room && blocked_share > 1e-3)
+			if (this->settings.use_room && blocked_share > 1e-3)
 				reach_move += blocked_share * this->GetRoomDirection(placement, v);
 		}
 		return reach_move.norm() > 1e-12 ? Eigen::Vector3d(reach_move.normalized()) : Eigen::Vector3d::Zero();
@@ -1326,15 +1027,15 @@ private:
 		for (size_t v = 0; v < this->viewpoints.size(); ++v)
 		{
 			const Eigen::MatrixXd jacobian = this->GetToolJacobian(placement.poses[v]);
-			const Eigen::MatrixXd follow_rate = scene_geometry::DampedPinv(jacobian, this->jacobian_damping) * object_twist;
+			const Eigen::MatrixXd follow_rate = scene_geometry::DampedPinv(jacobian, this->settings.jacobian_damping) * object_twist;
 			Eigen::VectorXd room_slope = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(placement.poses[v].size()));
 			if (placement.reached[v])
 				this->GetRoomShortfall(placement.poses[v], &room_slope);
 			length_move -= follow_rate.transpose() * pose_slopes[v];
-			room_move -= this->joint_room_weight * follow_rate.transpose() * room_slope;
-			if (!this->use_slide || !placement.reached[v])
+			room_move -= this->settings.joint_room_weight * follow_rate.transpose() * room_slope;
+			if (!this->settings.use_slide || !placement.reached[v])
 				continue;
-			direction.slides[v] = -this->GetSelfMotionProjector(jacobian) * (pose_slopes[v] + this->joint_room_weight * room_slope);
+			direction.slides[v] = -this->GetSelfMotionProjector(jacobian) * (pose_slopes[v] + this->settings.joint_room_weight * room_slope);
 			largest_slide = std::max(largest_slide, direction.slides[v].norm());
 		}
 		for (Eigen::VectorXd& slide : direction.slides)
@@ -1343,8 +1044,8 @@ private:
 		for (const PostureMatch& match : descent.matches)
 		{
 			if (match.gap > 1e-9)
-				reconfiguration_move -= this->reconfiguration_weight * match.position_error / match.gap;
-			if (!this->use_slide || !placement.reached[match.viewpoint])
+				reconfiguration_move -= this->settings.reconfiguration_weight * match.position_error / match.gap;
+			if (!this->settings.use_slide || !placement.reached[match.viewpoint])
 				continue;
 			// Toward the neighbour's joints along the self-motion, full slide step.
 			const Eigen::VectorXd toward = Eigen::Map<const Eigen::VectorXd>(match.neighbor_pose.data(), static_cast<Eigen::Index>(match.neighbor_pose.size())) - Eigen::Map<const Eigen::VectorXd>(placement.poses[match.viewpoint].data(), static_cast<Eigen::Index>(match.neighbor_pose.size()));
@@ -1397,7 +1098,7 @@ private:
 				const double value = slid_poses[v][j];
 				slid_poses[v][j] += slide_step * direction.slides[v][static_cast<Eigen::Index>(j)];
 				if (bounds.position_bounded_)
-					slid_poses[v][j] = std::clamp(slid_poses[v][j], std::min(value, bounds.min_position_ + this->slide_joint_margin), std::max(value, bounds.max_position_ - this->slide_joint_margin));
+					slid_poses[v][j] = std::clamp(slid_poses[v][j], std::min(value, bounds.min_position_ + this->settings.slide_joint_margin), std::max(value, bounds.max_position_ - this->settings.slide_joint_margin));
 			}
 		}
 		return slid_poses;
@@ -1417,7 +1118,7 @@ private:
 					if (candidate.q != placement.poses[v])
 						candidates[v].push_back(candidate.q);
 		}
-		if (this->use_neighbor_ik && order.size() == this->viewpoints.size())
+		if (this->settings.use_neighbor_ik && order.size() == this->viewpoints.size())
 		{
 			scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(placement.position, this->rotation));
 			std::vector<std::thread> threads;
@@ -1436,7 +1137,7 @@ private:
 							neighbors.push_back(&placement.poses[static_cast<size_t>(order[k + 1])]);
 						for (const Joints* neighbor : neighbors)
 						{
-							const closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, *neighbor, this->exact_options);
+							const closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, *neighbor, this->settings.exact_options);
 							if (result.exact)
 								candidates[v].push_back(result.q);
 						}
@@ -1445,12 +1146,12 @@ private:
 			for (std::thread& thread : threads)
 				thread.join();
 		}
-		gtsp::Solver solver(candidates, this->home, this->edge_weights, this->two_opt_rounds);
+		gtsp::Solver solver(candidates, this->home, this->settings.edge_weights, this->settings.two_opt_rounds);
 		solver.SetTravelJoints(this->travel_joints);
 		gtsp::Tour tour = solver.Solve(order);
 		// GTSP sees straight-line lengths only: charge the chosen edges whose straight move collides and solve again, so the
 		// order can route around them (checking every pair up front would be too slow).
-		for (int round = 0; round < this->gtsp_blocked_rounds && this->blocked_edge_charge > 0.0; ++round)
+		for (int round = 0; round < this->settings.gtsp_blocked_rounds && this->settings.blocked_edge_charge > 0.0; ++round)
 		{
 			Placement chosen = placement;
 			for (size_t k = 0; k < tour.order.size(); ++k)
@@ -1522,7 +1223,7 @@ private:
 	// takes: through home if both straight halves are free, else blocked_edge_charge x the edge length. In parallel.
 	std::vector<std::pair<size_t, double>> GetBlockedEdgeCharges(const Placement& placement, const std::vector<int>& order)
 	{
-		if (this->blocked_edge_charge <= 0.0 || order.empty())
+		if (this->settings.blocked_edge_charge <= 0.0 || order.empty())
 			return {};
 		scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(placement.position, this->rotation));
 		std::vector<double> charges(order.size(), -1.0);  // -1: straight move free
@@ -1538,10 +1239,10 @@ private:
 					const Joints& to_pose = placement.poses[static_cast<size_t>(order[k])];
 					if (this->IsStraightMoveFree(thread_state, from_pose, to_pose))
 						continue;
-					const double straight = joint_travel::EdgeCost(from_pose, to_pose, this->edge_weights, this->travel_joints);
+					const double straight = joint_travel::EdgeCost(from_pose, to_pose, this->settings.edge_weights, this->travel_joints);
 					const bool via_home = k > 0 && this->IsStraightMoveFree(thread_state, from_pose, this->home) && this->IsStraightMoveFree(thread_state, this->home, to_pose);
-					const double detour = joint_travel::EdgeCost(from_pose, this->home, this->edge_weights, this->travel_joints) + joint_travel::EdgeCost(this->home, to_pose, this->edge_weights, this->travel_joints);
-					charges[k] = via_home ? std::max(0.0, detour - straight) : this->blocked_edge_charge * straight;
+					const double detour = joint_travel::EdgeCost(from_pose, this->home, this->settings.edge_weights, this->travel_joints) + joint_travel::EdgeCost(this->home, to_pose, this->settings.edge_weights, this->travel_joints);
+					charges[k] = via_home ? std::max(0.0, detour - straight) : this->settings.blocked_edge_charge * straight;
 				}
 			});
 		for (std::thread& thread : threads)
@@ -1557,7 +1258,9 @@ private:
 	// viewpoints (green reached, red missed), the tour's tool path, and each miss's closest arm pose with a line to its target.
 	void PublishProgress(const Placement& placement, const std::vector<int>& order, const Eigen::Vector3d& object_direction)
 	{
-		const rclcpp::Time stamp = this->now();
+		if (!this->progress_pub)
+			return;
+		const rclcpp::Time stamp = this->node->now();
 		const Eigen::Isometry3d object_transform = scene_geometry::Translation(placement.position);
 		visualization_msgs::msg::MarkerArray markers;
 		// Markers update in place (same ns and id); the first publish clears what an earlier run left.
@@ -1569,10 +1272,10 @@ private:
 		}
 
 		visualization_msgs::msg::Marker mesh = marker_utils::MakeMarker("object_placement_current", visualization_msgs::msg::Marker::MESH_RESOURCE, stamp);
-		mesh.mesh_resource = "file://" + this->mesh_path;
+		mesh.mesh_resource = "file://" + this->settings.mesh_path;
 		mesh.mesh_use_embedded_materials = false;
 		mesh.pose = scene_geometry::ToPoseMsg(scene_geometry::MakeIsometry(placement.position, this->rotation));
-		mesh.scale.x = mesh.scale.y = mesh.scale.z = this->mesh_scale;
+		mesh.scale.x = mesh.scale.y = mesh.scale.z = this->settings.mesh_scale;
 		mesh.color = marker_utils::Rgba(1.0f, 0.85f, 0.0f, 0.6f);
 		markers.markers.push_back(mesh);
 
@@ -1671,8 +1374,8 @@ private:
 			}
 		this->progress_marker_keys = std::move(keys);
 		this->progress_pub->publish(markers);
-		if (this->progress_delay > 0.0)
-			std::this_thread::sleep_for(std::chrono::duration<double>(this->progress_delay));
+		if (this->settings.progress_delay > 0.0)
+			std::this_thread::sleep_for(std::chrono::duration<double>(this->settings.progress_delay));
 	}
 
 	// Smallest distance of any tour joint (camera spin aside) from its limit, beyond the hard margin the launch file applies.
@@ -1692,6 +1395,7 @@ private:
 		return smallest;
 	}
 
+	rclcpp::Node::SharedPtr node;
 	moveit::core::RobotModelConstPtr model;
 	std::unique_ptr<moveit::core::RobotState> state;
 	const moveit::core::JointModelGroup* group = nullptr;
@@ -1699,64 +1403,56 @@ private:
 	planning_scene_monitor::PlanningSceneMonitorPtr scene;
 	std::vector<Eigen::Isometry3d> viewpoints;	// relative to the object position
 	Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
-	Eigen::Vector3d lower_bound = Eigen::Vector3d::Zero();
-	Eigen::Vector3d upper_bound = Eigen::Vector3d::Zero();
 	Joints home;
-	std::vector<int> travel_joints;
-	joint_travel::EdgeWeights edge_weights;
-	closest_ik::Options exact_options;
-	closest_ik::Options closest_options;
-	double jacobian_damping = 1e-3;
-	int two_opt_rounds = 5;
-	int seed = 42;
-	unsigned int num_threads = 1;
-	int max_steps = 200;
-	int max_line_search_tries = 4;
-	int ik_attempts = 10;
-	int closest_ik_extra_starts = 3;
-	double closest_gap_slack = 0.005;
-	double exact_finish_gap = 0.05;
-	double initial_step = 0.02;
-	double min_step = 0.001;
-	double max_step = 0.05;
-	double initial_penalty = 100.0;
-	double penalty_growth = 10.0;
-	double max_penalty = 1e5;
-	bool use_neighbor_ik = true;
-	bool use_slide = true;
-	double initial_slide_step = 0.3;
-	double slide_joint_margin = 0.05;
-	double reconfig_threshold = 1.0;
-	bool use_posture_match = true;
-	double reconfiguration_weight = 10.0;
-	bool use_room = true;
-	bool tour_object_move = true;
-	bool freeze_object_when_reached = false;
-	double blocked_edge_charge = 4.0;
-	int gtsp_blocked_rounds = 2;
-	double miss_cost = 10.0;
-	double reconfiguration_cost = 2.0;
-	double joint_room_band = 0.2;
-	double joint_room_weight = 50.0;
-	std::chrono::steady_clock::time_point start_time;
-	double time_budget_end = 0.0;  // s since start_time
-	std::string mesh_path;
-	double mesh_scale = 0.01;
-	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub;
+	Settings settings;
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub;
+	std::vector<int> travel_joints;
+	unsigned int num_threads = 1;
+	std::chrono::steady_clock::time_point start_time;
 	std::set<std::string> camera_side_links;
 	std::set<std::pair<std::string, int>> progress_marker_keys;	 // markers in the last progress publish
 	std::vector<Eigen::Vector3d> trail;	 // object positions this descent
-	double progress_delay = 0.0;
 };
 
-int main(int argc, char* argv[])
+Optimizer::Optimizer(
+	rclcpp::Node::SharedPtr node, moveit::core::RobotModelConstPtr model, planning_scene_monitor::PlanningSceneMonitorPtr scene,
+	const std::string& group_name, std::vector<Eigen::Isometry3d> viewpoints, const Eigen::Matrix3d& rotation, Joints home,
+	Settings settings, rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub)
+	: impl(std::make_unique<Impl>(std::move(node), std::move(model), std::move(scene), group_name, std::move(viewpoints), rotation, std::move(home), std::move(settings), std::move(progress_pub)))
 {
-	rclcpp::init(argc, argv);
-	auto node = std::make_shared<ObjectGtspCoOptimizeNode>();
-	std::thread spin([node]() { rclcpp::spin(node); });
-	node->Run();
-	rclcpp::shutdown();
-	spin.join();
-	return 0;
 }
+
+Optimizer::~Optimizer() = default;
+
+Descent Optimizer::Descend(const Eigen::Vector3d& start)
+{
+	this->impl->start_time = std::chrono::steady_clock::now();
+	return this->impl->Descend(this->impl->ClampToBox(start));
+}
+
+std::vector<Joints> Optimizer::GetTourPoses(const Placement& placement, const std::vector<int>& order) const
+{
+	return this->impl->GetTourPoses(placement, order);
+}
+
+double Optimizer::GetSmallestJointMargin(const std::vector<Joints>& poses) const
+{
+	return this->impl->GetSmallestJointMargin(poses);
+}
+
+void Optimizer::PublishProgress(const Placement& placement, const std::vector<int>& order, const Eigen::Vector3d& object_direction)
+{
+	this->impl->PublishProgress(placement, order, object_direction);
+}
+
+const std::vector<int>& Optimizer::GetTravelJoints() const
+{
+	return this->impl->travel_joints;
+}
+
+const joint_travel::EdgeWeights& Optimizer::GetEdgeWeights() const
+{
+	return this->impl->settings.edge_weights;
+}
+
+}  // namespace object_gtsp_co_optimize
