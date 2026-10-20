@@ -260,6 +260,7 @@ private:
 		settings.max_penalty = this->GetParameter<double>("co_max_penalty", 1e5);
 		settings.miss_cost = this->GetParameter<double>("co_miss_cost", 10.0);
 		settings.use_room = this->GetParameter<bool>("co_room", true);
+		settings.room_in_reach_direction = this->GetParameter<bool>("co_room_in_reach_direction", false);
 		settings.use_neighbor_ik = this->GetParameter<bool>("co_neighbor_ik", true);
 		settings.use_posture_match = this->GetParameter<bool>("co_posture_match", true);
 		settings.reconfiguration_cost = this->GetParameter<double>("co_reconfiguration_cost", 2.0);

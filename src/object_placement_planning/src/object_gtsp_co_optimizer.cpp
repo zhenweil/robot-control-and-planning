@@ -346,6 +346,7 @@ public:
 	// poses only).
 	void UpdateCost(Descent& descent, double penalty)
 	{
+		this->UnwrapTour(descent.placement, descent.order);
 		// Tour length, with each edge whose straight move collides charged its estimated detour (see GetBlockedEdgeCharges).
 		double detour_charge = 0.0;
 		const std::vector<std::pair<size_t, double>> blocked = this->GetBlockedEdgeCharges(descent.placement, descent.order);
@@ -370,6 +371,42 @@ public:
 		descent.smallest_margin = this->GetSmallestJointMargin(reached_poses);
 		const int num_missed = static_cast<int>(this->viewpoints.size()) - descent.placement.num_reached;
 		descent.cost = descent.tour_cost + this->settings.miss_cost * num_missed + penalty * descent.placement.gap_sum + this->settings.reconfiguration_cost * descent.num_reconfigurations + this->settings.reconfiguration_weight * descent.posture_gap_sum + this->settings.joint_room_weight * descent.room_shortfall;
+	}
+
+	// Joints that turn a full circle or more (UR joints, the xArm7's 1/3/5/7) reach the same angle at q and q +- 2 pi; IK may
+	// return either, which turns a small move into a near full-turn swing (a fake reconfiguration that sweeps the arm through
+	// the scene). Along the tour from home, each such joint takes the 2 pi version closest to the previous pose within its
+	// limits. The physical poses stay the same.
+	void UnwrapTour(Placement& placement, const std::vector<int>& order) const
+	{
+		const Joints* previous = &this->home;
+		for (int viewpoint : order)
+		{
+			Joints& pose = placement.poses[static_cast<size_t>(viewpoint)];
+			this->UnwrapToward(pose, *previous);
+			previous = &pose;
+		}
+	}
+
+	// Each full-turn joint of `pose` shifted by whole turns to the value closest to `reference`, within its limits.
+	void UnwrapToward(Joints& pose, const Joints& reference) const
+	{
+		const std::vector<const moveit::core::JointModel*>& joints = this->group->getActiveJointModels();
+		const double full_turn = 2.0 * M_PI;
+		for (size_t j = 0; j < pose.size() && j < joints.size() && j < reference.size(); ++j)
+		{
+			const moveit::core::VariableBounds& bounds = joints[j]->getVariableBounds()[0];
+			if (bounds.position_bounded_ && bounds.max_position_ - bounds.min_position_ < full_turn)
+				continue;
+			const double turns = std::round((reference[j] - pose[j]) / full_turn);
+			for (double shift : {turns, turns - 1.0, turns + 1.0})
+			{
+				const double value = pose[j] + shift * full_turn;
+				const bool inside = !bounds.position_bounded_ || (value >= bounds.min_position_ && value <= bounds.max_position_);
+				if (inside && std::abs(value - reference[j]) < std::abs(pose[j] - reference[j]))
+					pose[j] = value;
+			}
+		}
 	}
 
 	// Joint room of one pose beyond the hard limit: sum over its joints (camera spin aside) of max(0, room_band - margin)^2,
@@ -453,6 +490,7 @@ public:
 	// closer match that adds none. Two rounds (a swap can expose or remove others); the edges left keep their matches.
 	void MatchPostures(Descent& descent)
 	{
+		this->UnwrapTour(descent.placement, descent.order);
 		descent.matches.clear();
 		if (!this->settings.use_posture_match)
 			return;
@@ -1000,9 +1038,11 @@ public:
 			// The closest pose is a minimum over the joints, so only the gap's position part moves with the object.
 			if (gap > 1e-9)
 				reach_move -= placement.position_errors[v] / gap;
-			// A miss on target (gap under 1 mm) is all blocked.
+			// Room blended in (room_in_reach_direction): a miss on target (gap under 1 mm) is all blocked. Off by default, room
+			// then comes only as its own tries (TakeMissRoomStep, GetRoomThenReachDirection): its straight-line guess can point
+			// the object the wrong way, and blended into every reach move it bends the whole path.
 			const double blocked_share = gap < 1e-3 ? 1.0 : 1.0 - placement.position_errors[v].norm() / gap;
-			if (this->settings.use_room && blocked_share > 1e-3)
+			if (this->settings.use_room && this->settings.room_in_reach_direction && blocked_share > 1e-3)
 				reach_move += blocked_share * this->GetRoomDirection(placement, v);
 		}
 		return reach_move.norm() > 1e-12 ? Eigen::Vector3d(reach_move.normalized()) : Eigen::Vector3d::Zero();
@@ -1114,9 +1154,13 @@ public:
 			candidates[v].push_back(placement.poses[v]);
 			// A missed viewpoint's other closest poses (near its best gap, with room): GTSP picks by tour.
 			if (!placement.reached[v] && v < placement.miss_candidates.size())
-				for (const MissCandidate& candidate : placement.miss_candidates[v])
+				for (MissCandidate& candidate : placement.miss_candidates[v])
+				{
+					// Same turn as the current pose (see UnwrapTour), so the GTSP choice can be matched back to its gap below.
+					this->UnwrapToward(candidate.q, placement.poses[v]);
 					if (candidate.q != placement.poses[v])
 						candidates[v].push_back(candidate.q);
+				}
 		}
 		if (this->settings.use_neighbor_ik && order.size() == this->viewpoints.size())
 		{
@@ -1146,6 +1190,10 @@ public:
 			for (std::thread& thread : threads)
 				thread.join();
 		}
+		// Candidates in the same turn as the viewpoint's current pose, so GTSP doesn't see fake full-turn swings.
+		for (size_t v = 0; v < this->viewpoints.size(); ++v)
+			for (Joints& candidate : candidates[v])
+				this->UnwrapToward(candidate, placement.poses[v]);
 		gtsp::Solver solver(candidates, this->home, this->settings.edge_weights, this->settings.two_opt_rounds);
 		solver.SetTravelJoints(this->travel_joints);
 		gtsp::Tour tour = solver.Solve(order);

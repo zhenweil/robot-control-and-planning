@@ -103,7 +103,8 @@ struct Settings
 	double penalty_growth = 10.0;
 	double max_penalty = 1e5;
 	double miss_cost = 10.0;  // cost per missed viewpoint
-	bool use_room = true;  // room for blocked misses, and room-then-reach for viewpoints a reach step loses
+	bool use_room = true;  // room tries for blocked misses, and room-then-reach for viewpoints a reach step loses
+	bool room_in_reach_direction = false;  // also blend the room pull into every reach move
 	bool use_neighbor_ik = true;  // reorders also offer IK from each pose's tour neighbours
 	bool use_posture_match = true;  // reconfiguration edges pull the object and swap poses
 	double reconfiguration_cost = 2.0;  // cost per reconfiguration
