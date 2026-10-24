@@ -83,6 +83,18 @@ struct PostureSwapCounts
 	int earlier_from_later_closer = 0;
 };
 
+// Posture-match IK solves so far, by outcome, with their summed thread seconds (for the log).
+struct PostureMatchTiming
+{
+	int cached = 0;  // answered from the cache, not solved
+	int exact_found = 0;  // exact IK from the neighbour pose succeeded
+	int exact_failed = 0;  // it failed, so closest IK ran after
+	int closest_usable = 0;  // of those, the closest pose kept the neighbour's posture
+	double exact_found_seconds = 0.0;
+	double exact_failed_seconds = 0.0;
+	double closest_seconds = 0.0;
+};
+
 // One evaluated spot: poses, tour order, and the reconfiguration edges still left with their posture gaps.
 struct ObjectPositionEvaluation
 {
@@ -277,6 +289,7 @@ private:
 	std::map<std::pair<size_t, Joints>, PostureMatchSolve> posture_match_cache;
 	Eigen::Vector3d posture_match_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
 	std::mutex posture_match_cache_mutex;
+	PostureMatchTiming posture_match_timing;  // guarded by posture_match_cache_mutex
 
 	// Visualization
 	std::string mesh_path;  // object mesh for the progress markers
