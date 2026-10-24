@@ -79,12 +79,11 @@ struct ObjectPositionEvaluation
 	double weighted_total_cost = 0.0; // Joint_travel_cost+miss_cost+gap_cost+reconfiguration_cost+joint_room
 };
 
-// The problem and run limits (the node reads them from the shared ROS parameters and launch arguments).
-struct ProblemSetup
+// Where the object may go and how long the descent may run.
+struct DescentLimits
 {
 	Eigen::Vector3d search_box_lower_bound = Eigen::Vector3d::Zero();  // abs, m
 	Eigen::Vector3d search_box_upper_bound = Eigen::Vector3d::Zero();
-	int seed = 42;  // seeds the random IK starts
 	double time_budget = 300.0;  // s for the descent
 	int max_steps = 200;  // iterations of the descent
 };
@@ -131,6 +130,7 @@ struct IkSettings
 	closest_ik::Options exact_options;  // exact IK (exact_only)
 	closest_ik::Options closest_options;  // closest IK (try_exact_first off)
 	double jacobian_damping = 1e-3;
+	int random_ik_seed = 42;  // seeds the random IK starts
 	int ik_attempts = 10;  // random start poses when a missed viewpoint's own pose fails
 	int closest_ik_extra_starts = 3;  // random starts also tried for a miss's closest pose
 	double closest_gap_slack = 0.005;  // m: a miss's closest poses this near its best gap stay GTSP candidates
@@ -160,8 +160,8 @@ public:
 	// viewpoints: relative to the object position. progress_pub: live markers, or null for none; mesh_path and mesh_scale draw the object in them.
 	Optimizer(
 		rclcpp::Node::SharedPtr node, moveit::core::RobotModelConstPtr model, planning_scene_monitor::PlanningSceneMonitorPtr scene,
-		const std::string& group_name, std::vector<Eigen::Isometry3d> viewpoints, const Eigen::Matrix3d& rotation, Joints home,
-		ProblemSetup problem_setup, MethodSwitches method_switches, CostWeights cost_weights, StepSizes step_sizes, IkSettings ik_settings,
+		const std::string& group_name, std::vector<Eigen::Isometry3d> viewpoints, const Eigen::Matrix3d& object_rotation, Joints home,
+		DescentLimits descent_limits, MethodSwitches method_switches, CostWeights cost_weights, StepSizes step_sizes, IkSettings ik_settings,
 		TourSettings tour_settings, rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub, std::string mesh_path,
 		double mesh_scale);
 
@@ -175,76 +175,91 @@ public:
 	void publishProgressMarkers(const ViewpointIkAtPosition& placement, const std::vector<int>& order, const Eigen::Vector3d& object_direction);
 
 private:
+	// Descent loop and its steps
 	Eigen::Vector3d clampToSearchBox(const Eigen::Vector3d& position) const;
 	ObjectPositionEvaluation runDescentFromStart(const Eigen::Vector3d& start);
-	ObjectPositionEvaluation evaluateObjectPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds, const std::vector<int>& order, double penalty);
-	bool moveObjectToReachMore(ObjectPositionEvaluation& current, double& step, double penalty, int iteration);
+	void updateWeightedTotalCost(ObjectPositionEvaluation& descent, double penalty);
+	void evaluateCurrentAndReorderedTour(ObjectPositionEvaluation& descent, double penalty);
 	bool improveArmPosesWithObjectFixed(ObjectPositionEvaluation& current, double penalty, int iteration);
+	bool moveObjectToReachMore(ObjectPositionEvaluation& current, double& step, double penalty, int iteration);
 	bool moveObjectToLowerCost(ObjectPositionEvaluation& current, double& step, double penalty, int iteration);
 	bool moveObjectToUnblockMisses(ObjectPositionEvaluation& current, double step, double penalty, int iteration);
-	std::vector<room_margins::Margin> getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& placement, const std::vector<size_t>& misses, double near_floors);
-	Eigen::Vector3d getRoomThenReachDirection(const ViewpointIkAtPosition& placement, const std::vector<size_t>& lost, const Eigen::Vector3d& aim, double step);
-	void updateWeightedTotalCost(ObjectPositionEvaluation& descent, double penalty);
-	void unwrapFullTurnJointsAlongTour(ViewpointIkAtPosition& placement, const std::vector<int>& order) const;
-	void unwrapFullTurnJointsToward(Joints& pose, const Joints& reference) const;
-	double getJointRoomShortfall(const Joints& q, Eigen::VectorXd* slope) const;
-	void evaluateCurrentAndReorderedTour(ObjectPositionEvaluation& descent, double penalty);
-	bool isReconfiguration(const Joints& from, const Joints& to) const;
-	int countReconfigurations(const ViewpointIkAtPosition& placement, const std::vector<int>& order) const;
-	int countReconfigurationsAround(const ViewpointIkAtPosition& placement, const std::vector<int>& order, size_t k, const Joints& pose) const;
-	void swapInReconfigurationPostureMatches(ObjectPositionEvaluation& descent);
-	std::vector<ReconfigurationPostureMatch> findReconfigurationPostureMatches(const ViewpointIkAtPosition& placement, const std::vector<int>& order);
-	double getSmallestJacobianSingularValue(const Joints& q);
-	std::vector<room_margins::Margin> getBlockingMarginsOfPose(size_t v, const Joints& q, double near_floors = 2.0);
+	ObjectPositionEvaluation evaluateObjectPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds, const std::vector<int>& order, double penalty);
+
+	// Step directions
+	Eigen::Vector3d getReachDirection(const ViewpointIkAtPosition& placement);
+	DescentDirection getTourDirection(const ObjectPositionEvaluation& descent);
+	Eigen::MatrixXd getSelfMotionProjector(const Eigen::MatrixXd& jacobian) const;
+	Eigen::MatrixXd getToolJacobian(moveit::core::RobotState& state, const Joints& q) const;
+	Eigen::Vector3d combineMovesWithoutConflict(const std::vector<Eigen::Vector3d>& moves) const;
 	Eigen::Vector3d getRoomDirectionOfMissedViewpoint(const ViewpointIkAtPosition& placement, size_t v);
-	std::vector<closest_ik::Result> solveClosestIkFromStarts(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts);
+	std::vector<Eigen::VectorXd> getTourCostSlopePerPose(const ViewpointIkAtPosition& placement, const std::vector<int>& order) const;
+	std::vector<Joints> getPosesAfterJointSlides(const ViewpointIkAtPosition& placement, const DescentDirection& direction, double slide_step) const;
+	Eigen::Vector3d getRoomThenReachDirection(const ViewpointIkAtPosition& placement, const std::vector<size_t>& lost, const Eigen::Vector3d& aim, double step);
+
+	// Joint room and blocking margins
+	double getSmallestJacobianSingularValue(const Joints& q);
+	double getJointRoomShortfall(const Joints& q, Eigen::VectorXd* slope) const;
+	std::vector<room_margins::Margin> getBlockingMarginsOfPose(size_t v, const Joints& q, double near_floors = 2.0);
+	std::vector<room_margins::Margin> getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& placement, const std::vector<size_t>& misses, double near_floors);
+
+	// IK
+	uint32_t getRandomIkSeed(const Eigen::Vector3d& position, size_t v) const;
+	std::vector<Joints> getChosenPoses(const ViewpointIkAtPosition& placement) const;
+	double getClearanceShortfall(moveit::core::RobotState& state, const Joints& q) const;
 	std::vector<ClosestIkCandidate> keepCandidatesNearBestGap(moveit::core::RobotState& state, const std::vector<closest_ik::Result>& closest);
 	closest_ik::Result solveSmallestGapIk(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts);
 	closest_ik::Result pushArmToExactClearance(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const closest_ik::Result& closest);
-	double getClearanceShortfall(moveit::core::RobotState& state, const Joints& q) const;
-	uint32_t getRandomIkSeed(const Eigen::Vector3d& position, size_t v) const;
 	ViewpointIkAtPosition solveViewpointIkAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds = {});
-	std::vector<Joints> getChosenPoses(const ViewpointIkAtPosition& placement) const;
-	Eigen::MatrixXd getToolJacobian(moveit::core::RobotState& state, const Joints& q) const;
-	Eigen::MatrixXd getSelfMotionProjector(const Eigen::MatrixXd& jacobian) const;
-	std::vector<Eigen::VectorXd> getTourCostSlopePerPose(const ViewpointIkAtPosition& placement, const std::vector<int>& order) const;
-	Eigen::Vector3d getReachDirection(const ViewpointIkAtPosition& placement);
-	DescentDirection getTourDirection(const ObjectPositionEvaluation& descent);
-	Eigen::Vector3d combineMovesWithoutConflict(const std::vector<Eigen::Vector3d>& moves) const;
-	std::vector<Joints> getPosesAfterJointSlides(const ViewpointIkAtPosition& placement, const DescentDirection& direction, double slide_step) const;
-	std::vector<int> reorderTourWithGtsp(ViewpointIkAtPosition& placement, const std::vector<int>& order);
+	std::vector<closest_ik::Result> solveClosestIkFromStarts(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts);
+
+	// Tour order and reconfigurations
+	bool isReconfiguration(const Joints& from, const Joints& to) const;
+	void swapInReconfigurationPostureMatches(ObjectPositionEvaluation& descent);
+	void unwrapFullTurnJointsToward(Joints& pose, const Joints& reference) const;
 	int findCandidateIndex(const std::vector<Joints>& candidates, const Joints& pose) const;
+	std::vector<int> reorderTourWithGtsp(ViewpointIkAtPosition& placement, const std::vector<int>& order);
+	int countReconfigurations(const ViewpointIkAtPosition& placement, const std::vector<int>& order) const;
+	void unwrapFullTurnJointsAlongTour(ViewpointIkAtPosition& placement, const std::vector<int>& order) const;
 	bool isStraightJointMoveCollisionFree(moveit::core::RobotState& state, const Joints& a, const Joints& b) const;
+	int countReconfigurationsAround(const ViewpointIkAtPosition& placement, const std::vector<int>& order, size_t k, const Joints& pose) const;
 	std::vector<std::pair<size_t, double>> getBlockedEdgeDetourCharges(const ViewpointIkAtPosition& placement, const std::vector<int>& order);
+	std::vector<ReconfigurationPostureMatch> findReconfigurationPostureMatches(const ViewpointIkAtPosition& placement, const std::vector<int>& order);
 
 	// Logging
-	void logObjectPositionEvaluation(const std::string& label, const ObjectPositionEvaluation& descent);
 	void logMissedViewpoints(const ViewpointIkAtPosition& placement);
+	void logObjectPositionEvaluation(const std::string& label, const ObjectPositionEvaluation& descent);
 
 	rclcpp::Node::SharedPtr node;
 	moveit::core::RobotModelConstPtr model;
 	std::unique_ptr<moveit::core::RobotState> state;
-	const moveit::core::JointModelGroup* group = nullptr;
 	const moveit::core::LinkModel* tool = nullptr;
+	const moveit::core::JointModelGroup* group = nullptr;
 	planning_scene_monitor::PlanningSceneMonitorPtr scene;
-	std::vector<Eigen::Isometry3d> viewpoints;	// relative to the object position
-	Eigen::Matrix3d rotation = Eigen::Matrix3d::Identity();
-	Joints home;
-	ProblemSetup problem_setup;
-	MethodSwitches method_switches;
-	CostWeights cost_weights;
+
+	// Settings
+	Joints home_pose;
 	StepSizes step_sizes;
 	IkSettings ik_settings;
+	CostWeights cost_weights;
 	TourSettings tour_settings;
-	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub;
+	DescentLimits descent_limits;
+	MethodSwitches method_switches;
+	std::vector<int> counted_joints;
+	std::vector<Eigen::Isometry3d> viewpoints;	// relative to the object position
+	Eigen::Matrix3d object_rotation = Eigen::Matrix3d::Identity();
+
+	// 
+	unsigned int num_threads = 1;
+	std::set<std::string> camera_side_links;
+	std::chrono::steady_clock::time_point start_time;
+
+	// Visualization
 	std::string mesh_path;  // object mesh for the progress markers
 	double mesh_scale = 0.01;
-	std::vector<int> counted_joints;
-	unsigned int num_threads = 1;
-	std::chrono::steady_clock::time_point start_time;
-	std::set<std::string> camera_side_links;
+	std::vector<Eigen::Vector3d> object_trail;	 // object positions this descent
 	std::set<std::pair<std::string, int>> progress_marker_keys;	 // markers in the last progress publish
-	std::vector<Eigen::Vector3d> trail;	 // object positions this descent
+	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub;
 };
 
 }  // namespace object_gtsp_co_optimize

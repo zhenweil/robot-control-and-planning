@@ -96,9 +96,9 @@ public:
 		const double mesh_scale = this->getParameter<double>("mesh_scale", 0.01);
 		const std::string tour_input_dir = this->getParameter<std::string>("tour_input_dir", "/tmp/viewpoint_planner_output");
 		const std::string output_dir = this->getParameter<std::string>("output_dir", "/tmp/object_gtsp_co_optimize_output");
-		const Joints home = this->getParameter<std::vector<double>>("initial_joints", std::vector<double>{0.0, -0.8745, 0.0, -2.356, 0.0, 1.571, 0.785});
+		const Joints home_pose = this->getParameter<std::vector<double>>("initial_joints", std::vector<double>{0.0, -0.8745, 0.0, -2.356, 0.0, 1.571, 0.785});
 		const Eigen::Vector3d nominal = ToVector3(this->getParameter<std::vector<double>>("object_translation_world", {0.5, 0.0, 0.15}), Eigen::Vector3d(0.5, 0.0, 0.15));
-		const Eigen::Matrix3d rotation = RotationFromRpyDeg(this->getParameter<std::vector<double>>("object_rotation_rpy_deg", {0.0, 0.0, 0.0}));
+		const Eigen::Matrix3d object_rotation = RotationFromRpyDeg(this->getParameter<std::vector<double>>("object_rotation_rpy_deg", {0.0, 0.0, 0.0}));
 		const Eigen::Vector3d start(this->getParameter<double>("initial_x", 0.5), this->getParameter<double>("initial_y", 0.0), this->getParameter<double>("initial_z", 0.15));
 		const double planning_time = this->getParameter<double>("real_cost_planning_time", 0.5);
 		const int planning_attempts = static_cast<int>(this->getParameter<int64_t>("real_cost_attempts", 3));
@@ -108,7 +108,7 @@ public:
 		const bool execute_on_robot = this->getParameter<bool>("execute_on_robot", false);
 		const double execution_planning_time = this->getParameter<double>("execution_planning_time", 5.0);
 		const int execution_planning_attempts = static_cast<int>(this->getParameter<int64_t>("execution_planning_attempts", 5));
-		const object_gtsp_co_optimize::ProblemSetup problem_setup = this->readProblemSetup();
+		const object_gtsp_co_optimize::DescentLimits descent_limits = this->readDescentLimits();
 		const object_gtsp_co_optimize::TourSettings tour_settings = this->readTourSettings();
 		if (mesh_path.empty())
 			mesh_path = ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs.stl";
@@ -121,18 +121,18 @@ public:
 
 		robot_model_loader::RobotModelLoader loader(this->shared_from_this(), "robot_description");
 		const moveit::core::RobotModelConstPtr model = loader.getModel();
-		const planning_scene_monitor::PlanningSceneMonitorPtr scene = BuildLocalCollisionScene(this->shared_from_this(), mesh_path, mesh_scale, nominal, rotation);
+		const planning_scene_monitor::PlanningSceneMonitorPtr scene = BuildLocalCollisionScene(this->shared_from_this(), mesh_path, mesh_scale, nominal, object_rotation);
 		AddMountingSurface(scene);
 		const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/object_placement_markers", rclcpp::QoS(1).transient_local());
 		const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub = this->create_publisher<visualization_msgs::msg::MarkerArray>("/object_placement_progress_markers", rclcpp::QoS(1).transient_local());
 		visualization_msgs::msg::MarkerArray surface_markers;
 		surface_markers.markers.push_back(GetMountingSurfaceMarker(model->getRootLinkName(), this->now()));
 		marker_pub->publish(surface_markers);
-		RCLCPP_INFO(this->get_logger(), "Loaded %d tour poses; co-optimizing in box (%.2f..%.2f, %.2f..%.2f, %.2f..%.2f) m, budget %.0f s", num_viewpoint, problem_setup.search_box_lower_bound.x(), problem_setup.search_box_upper_bound.x(), problem_setup.search_box_lower_bound.y(), problem_setup.search_box_upper_bound.y(), problem_setup.search_box_lower_bound.z(), problem_setup.search_box_upper_bound.z(), problem_setup.time_budget);
+		RCLCPP_INFO(this->get_logger(), "Loaded %d tour poses; co-optimizing in box (%.2f..%.2f, %.2f..%.2f, %.2f..%.2f) m, budget %.0f s", num_viewpoint, descent_limits.search_box_lower_bound.x(), descent_limits.search_box_upper_bound.x(), descent_limits.search_box_lower_bound.y(), descent_limits.search_box_upper_bound.y(), descent_limits.search_box_lower_bound.z(), descent_limits.search_box_upper_bound.z(), descent_limits.time_budget);
 
 		const auto start_time = std::chrono::steady_clock::now();
 		auto GetElapsedSeconds = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count(); };
-		object_gtsp_co_optimize::Optimizer optimizer(this->shared_from_this(), model, scene, group_name, viewpoints, rotation, home, problem_setup, this->readMethodSwitches(), this->readCostWeights(), this->readStepSizes(), this->readIkSettings(), tour_settings, progress_pub, mesh_path, mesh_scale);
+		object_gtsp_co_optimize::Optimizer optimizer(this->shared_from_this(), model, scene, group_name, viewpoints, object_rotation, home_pose, descent_limits, this->readMethodSwitches(), this->readCostWeights(), this->readStepSizes(), this->readIkSettings(), tour_settings, progress_pub, mesh_path, mesh_scale);
 		// One descent from the given start, no restarts.
 		const object_gtsp_co_optimize::ObjectPositionEvaluation best = optimizer.runDescent(start);
 		const double search_seconds = GetElapsedSeconds();
@@ -143,25 +143,25 @@ public:
 		const std::vector<Joints> tour_poses = optimizer.getPosesInTourOrder(best.placement, best.order);
 		const std::vector<int>& counted_joints = optimizer.getCountedJoints();
 		const joint_travel::EdgeWeights& edge_weights = optimizer.getEdgeWeights();
-		scene_geometry::MoveObject(scene, scene_geometry::MakeIsometry(best.placement.position, rotation));
-		const std::vector<double> edge_lengths = PlanTourEdgeLengths(this->shared_from_this(), model, scene, tour_poses, home, group_name, planning_time, planning_attempts, /*count_last_joint=*/false);
+		scene_geometry::MoveObject(scene, scene_geometry::MakeIsometry(best.placement.position, object_rotation));
+		const std::vector<double> edge_lengths = PlanTourEdgeLengths(this->shared_from_this(), model, scene, tour_poses, home_pose, group_name, planning_time, planning_attempts, /*count_last_joint=*/false);
 		double planned_length = 0.0;
 		int num_failed_length_edges = 0;
 		for (size_t k = 0; k < tour_poses.size(); ++k)
 		{
 			const bool edge_ok = k < edge_lengths.size() && edge_lengths[k] >= 0.0;
 			num_failed_length_edges += edge_ok ? 0 : 1;
-			planned_length += edge_ok ? edge_lengths[k] : joint_travel::JointDistance(k == 0 ? home : tour_poses[k - 1], tour_poses[k], counted_joints) + unreachable_penalty;
+			planned_length += edge_ok ? edge_lengths[k] : joint_travel::JointDistance(k == 0 ? home_pose : tour_poses[k - 1], tour_poses[k], counted_joints) + unreachable_penalty;
 		}
-		const std::vector<double> edge_times = PlanTourEdgeTimes(this->shared_from_this(), model, scene, tour_poses, home, group_name, planning_time, planning_attempts);
+		const std::vector<double> edge_times = PlanTourEdgeTimes(this->shared_from_this(), model, scene, tour_poses, home_pose, group_name, planning_time, planning_attempts);
 		double planned_time = 0.0;
 		for (size_t k = 0; k < tour_poses.size(); ++k)
 		{
 			const bool edge_ok = k < edge_times.size() && edge_times[k] >= 0.0;
-			planned_time += edge_ok ? edge_times[k] : joint_travel::StraightMoveTime(k == 0 ? home : tour_poses[k - 1], tour_poses[k], edge_weights.max_velocity, edge_weights.max_acceleration) + unreachable_penalty;
+			planned_time += edge_ok ? edge_times[k] : joint_travel::StraightMoveTime(k == 0 ? home_pose : tour_poses[k - 1], tour_poses[k], edge_weights.max_velocity, edge_weights.max_acceleration) + unreachable_penalty;
 		}
 		std::vector<Joints> poses_from_home = tour_poses;
-		poses_from_home.insert(poses_from_home.begin(), home);
+		poses_from_home.insert(poses_from_home.begin(), home_pose);
 		const int num_reconfigurations = joint_travel::CountReconfigs(poses_from_home, tour_settings.reconfig_threshold, counted_joints);
 		const double smallest_margin = optimizer.getSmallestJointMargin(tour_poses);
 		const double seconds = GetElapsedSeconds();
@@ -206,7 +206,7 @@ public:
 		result.tour_order = best.order;
 		for (int viewpoint : best.order)
 			result.joint_solutions.push_back(best.placement.reached[static_cast<size_t>(viewpoint)] ? best.placement.chosen_ik_per_viewpoint[static_cast<size_t>(viewpoint)].q : Joints());
-		visualization_msgs::msg::MarkerArray final_markers = BuildObjectPlacementMarkerArray(this->now(), mesh_path, mesh_scale, nominal, rotation, viewpoints_nominal, result);
+		visualization_msgs::msg::MarkerArray final_markers = BuildObjectPlacementMarkerArray(this->now(), mesh_path, mesh_scale, nominal, object_rotation, viewpoints_nominal, result);
 		final_markers.markers.push_back(GetMountingSurfaceMarker(model->getRootLinkName(), this->now()));
 		marker_pub->publish(final_markers);
 		optimizer.publishProgressMarkers(best.placement, best.order, Eigen::Vector3d::Zero());
@@ -233,7 +233,7 @@ public:
 				tour_viewpoints[k].reachable = true;
 				selected.push_back(&tour_viewpoints[k]);
 			}
-			ExecuteTourOnRobot(this->shared_from_this(), model, scene, move_group, marker_pub, selected, home, group_name, execution_planning_time, execution_planning_attempts);
+			ExecuteTourOnRobot(this->shared_from_this(), model, scene, move_group, marker_pub, selected, home_pose, group_name, execution_planning_time, execution_planning_attempts);
 		}
 		while (keep_alive && rclcpp::ok())
 		{
@@ -251,16 +251,15 @@ private:
 		return this->get_parameter(name).get_value<T>();
 	}
 
-	// The search box, seed and run limits.
-	object_gtsp_co_optimize::ProblemSetup readProblemSetup()
+	// The search box, time budget and iteration limit.
+	object_gtsp_co_optimize::DescentLimits readDescentLimits()
 	{
-		object_gtsp_co_optimize::ProblemSetup problem_setup;
-		problem_setup.search_box_lower_bound = Eigen::Vector3d(this->getParameter<double>("x_min", -0.6), this->getParameter<double>("y_min", -0.6), this->getParameter<double>("z_min", -0.2));
-		problem_setup.search_box_upper_bound = Eigen::Vector3d(this->getParameter<double>("x_max", 0.6), this->getParameter<double>("y_max", 0.6), this->getParameter<double>("z_max", 0.2));
-		problem_setup.seed = static_cast<int>(this->getParameter<int64_t>("random_seed", 42));
-		problem_setup.time_budget = this->getParameter<double>("co_time_budget_sec", 300.0);
-		problem_setup.max_steps = static_cast<int>(this->getParameter<int64_t>("co_max_steps", 200));
-		return problem_setup;
+		object_gtsp_co_optimize::DescentLimits descent_limits;
+		descent_limits.search_box_lower_bound = Eigen::Vector3d(this->getParameter<double>("x_min", -0.6), this->getParameter<double>("y_min", -0.6), this->getParameter<double>("z_min", -0.2));
+		descent_limits.search_box_upper_bound = Eigen::Vector3d(this->getParameter<double>("x_max", 0.6), this->getParameter<double>("y_max", 0.6), this->getParameter<double>("z_max", 0.2));
+		descent_limits.time_budget = this->getParameter<double>("co_time_budget_sec", 300.0);
+		descent_limits.max_steps = static_cast<int>(this->getParameter<int64_t>("co_max_steps", 200));
+		return descent_limits;
 	}
 
 	// Parts of the method that can be turned off (ablations).
@@ -323,6 +322,7 @@ private:
 		ik_settings.closest_options.try_exact_first = false;
 		ik_settings.jacobian_damping = this->getParameter<double>("jacobian_damping", 1e-3);
 		ik_settings.exact_finish_gap = this->getParameter<double>("exact_ik_finish_gap", 0.05);
+		ik_settings.random_ik_seed = static_cast<int>(this->getParameter<int64_t>("random_seed", 42));
 		ik_settings.ik_attempts = static_cast<int>(this->getParameter<int64_t>("co_ik_attempts", 10));
 		ik_settings.closest_gap_slack = this->getParameter<double>("co_closest_gap_slack", 0.005);
 		ik_settings.closest_ik_extra_starts = static_cast<int>(this->getParameter<int64_t>("co_closest_ik_extra_starts", 3));
