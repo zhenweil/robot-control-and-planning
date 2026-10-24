@@ -36,6 +36,15 @@ Optimizer::Optimizer(
 	SetJointSpeedLimits(this->model, group_name, this->tour_settings.edge_weights);
 	this->counted_joints = joint_travel::AllJoints(static_cast<int>(this->home_pose.size()) - 1);  // the last joint only spins the camera
 	this->num_threads = std::max(1u, std::min(std::thread::hardware_concurrency(), static_cast<unsigned int>(this->viewpoints.size())));
+	random_numbers::RandomNumberGenerator reference_rng(static_cast<uint32_t>(this->ik_settings.random_ik_seed));
+	moveit::core::RobotState reference_state(*this->state);
+	for (int reference_index = 0; reference_index < this->tour_settings.num_reference_postures; ++reference_index)
+	{
+		Joints reference_posture;
+		reference_state.setToRandomPositions(this->group, reference_rng);
+		reference_state.copyJointGroupPositions(this->group, reference_posture);
+		this->reference_postures.push_back(reference_posture);
+	}
 }
 
 ObjectPositionEvaluation Optimizer::runDescent(const Eigen::Vector3d& requested_start)
@@ -911,6 +920,37 @@ std::vector<int> Optimizer::reorderTourWithGtsp(ViewpointIkAtPosition& viewpoint
 					{
 						const closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, *neighbor_pose, this->ik_settings.exact_options);
 						if (result.exact)
+							candidates[viewpoint_index].push_back(result.q);
+					}
+				}
+			});
+		for (std::thread& thread : threads)
+			thread.join();
+	}
+	// Each reached viewpoint's IK from the fixed reference postures too, so GTSP can switch it to a posture family no tour
+	// pose uses yet (the poses above all come from the tour's own postures).
+	if (!this->reference_postures.empty())
+	{
+		scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(viewpoint_ik.position, this->object_rotation));
+		const double same_pose_distance = 0.1;	// rad: closer than this to a candidate already there adds nothing
+		std::vector<std::thread> threads;
+		for (unsigned int thread_index = 0; thread_index < this->num_threads; ++thread_index)
+			threads.emplace_back([&, thread_index]()
+			{
+				moveit::core::RobotState thread_state(*this->state);
+				for (size_t viewpoint_index = thread_index; viewpoint_index < this->viewpoints.size(); viewpoint_index += this->num_threads)
+				{
+					if (!viewpoint_ik.reached[viewpoint_index])
+						continue;
+					const Eigen::Isometry3d target = scene_geometry::Translation(viewpoint_ik.position) * this->viewpoints[viewpoint_index];
+					for (const Joints& reference_posture : this->reference_postures)
+					{
+						closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, reference_posture, this->ik_settings.exact_options);
+						if (!result.exact)
+							continue;
+						this->unwrapFullTurnJointsToward(result.q, viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q);
+						const bool is_new = std::none_of(candidates[viewpoint_index].begin(), candidates[viewpoint_index].end(), [&](const Joints& candidate) { return joint_travel::JointDistance(candidate, result.q, this->counted_joints) < same_pose_distance; });
+						if (is_new)
 							candidates[viewpoint_index].push_back(result.q);
 					}
 				}

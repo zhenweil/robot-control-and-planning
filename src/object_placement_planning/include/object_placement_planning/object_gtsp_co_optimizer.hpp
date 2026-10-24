@@ -163,6 +163,7 @@ struct TourSettings
 	int two_opt_rounds = 5;
 	double reconfig_threshold = 1.0;  // rad: a move turning any joint (the last aside) more than this is a reconfiguration
 	int gtsp_blocked_rounds = 2;  // GTSP re-solves charging blocked edges
+	int num_reference_postures = 4;  // fixed random arm postures; each reached viewpoint's IK from them is a GTSP candidate (0 = off)
 };
 
 // Downhill move of one step: the object's direction and each pose's joint slide along its self-motion.
@@ -263,6 +264,7 @@ private:
 	DescentLimits descent_limits;
 	MethodSwitches method_switches;
 	std::vector<int> counted_joints;
+	std::vector<Joints> reference_postures;  // fixed for the run (from the IK seed): GTSP candidates in posture families the tour may not use yet
 	std::vector<Eigen::Isometry3d> viewpoints;	// relative to the object position
 	Eigen::Matrix3d object_rotation = Eigen::Matrix3d::Identity();
 

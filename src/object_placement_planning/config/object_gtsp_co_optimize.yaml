@@ -42,6 +42,7 @@
     gtsp_two_opt_rounds: 5
     co_blocked_edge_charge: 4.0           # a blocked edge costs its detour through home if that is free, else this x its length extra (0 = off)
     co_gtsp_blocked_rounds: 2             # GTSP re-solves with the chosen blocked edges charged
+    gtsp_reference_postures: 4            # fixed random arm postures: each reached viewpoint's IK from them is also a GTSP candidate (0 = off)
     reconfig_threshold: 1.0               # rad: a move turning any joint (joint 7 aside) more than this is a reconfiguration
 
     # Final check of the result (measures only, changes nothing): planned length, and time for reference

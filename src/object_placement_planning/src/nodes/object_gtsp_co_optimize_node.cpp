@@ -347,6 +347,7 @@ private:
 		tour_settings.two_opt_rounds = static_cast<int>(this->getParameter<int64_t>("gtsp_two_opt_rounds", 5));
 		tour_settings.reconfig_threshold = this->getParameter<double>("reconfig_threshold", 1.0);
 		tour_settings.gtsp_blocked_rounds = static_cast<int>(this->getParameter<int64_t>("co_gtsp_blocked_rounds", 2));
+		tour_settings.num_reference_postures = static_cast<int>(this->getParameter<int64_t>("gtsp_reference_postures", 4));
 		return tour_settings;
 	}
 };
