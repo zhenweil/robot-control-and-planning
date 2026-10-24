@@ -1,11 +1,11 @@
 # Run settings for object_gtsp_co_optimize.launch.py params_file:=...
 # Same values as the runs so far (from object_placement_run.yaml). Positions and bounds are abs (m, base frame).
-# random_seed, co_time_budget_sec, visualize_progress_delay_sec and keep_alive come from the launch arguments.
+# random_seed, co_time_budget_sec and keep_alive come from the launch arguments.
 /**:
   ros__parameters:
     # Start position and search box
     initial_x: 0.292                      # below the home tool0, halfway between the table and the tool
-    initial_y: 0.0
+    initial_y: 0.1
     initial_z: 0.257
     x_min: 0.2
     x_max: 0.6

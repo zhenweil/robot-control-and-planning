@@ -23,7 +23,7 @@ def generate_launch_description():
         DeclareLaunchArgument("tour_input_dir", default_value="/tmp/viewpoint_planner_output"),
         DeclareLaunchArgument("params_file", default_value="", description="Optional YAML loaded last (e.g. object_placement_run.yaml)."),
         DeclareLaunchArgument("use_rviz", default_value="false", description="Launch RViz with the robot; the node then keeps its final markers up until Ctrl-C."),
-        DeclareLaunchArgument("visualize_progress_delay_sec", default_value="0.0", description="Pause after each kept step's progress markers, to watch the descent."),
+        DeclareLaunchArgument("execute_on_robot", default_value="false", description="Drive the robot through the final tour; needs move_group running (robot_sim.launch.py, or panda_arm.launch.py). Leave use_rviz false then."),
     ]
     use_rviz = LaunchConfiguration("use_rviz")
 
@@ -43,8 +43,8 @@ def generate_launch_description():
             "output_dir": LaunchConfiguration("output_dir").perform(context),
             "random_seed": int(seed),
             "co_time_budget_sec": float(LaunchConfiguration("time_budget_sec").perform(context)),
-            "visualize_progress_delay_sec": float(LaunchConfiguration("visualize_progress_delay_sec").perform(context)),
             "keep_alive": use_rviz.perform(context).lower() == "true",
+            "execute_on_robot": LaunchConfiguration("execute_on_robot").perform(context).lower() == "true",
         }
         nodes = [Node(
             package="object_placement_planning",
