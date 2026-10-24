@@ -66,7 +66,7 @@ struct ReconfigurationPostureMatch
 // One evaluated spot: poses, tour order, and the reconfiguration edges still left with their posture gaps.
 struct ObjectPositionEvaluation
 {
-	ViewpointIkAtPosition placement;
+	ViewpointIkAtPosition viewpoint_ik;
 	std::vector<int> order;	 // viewpoint visit order
 	std::vector<ReconfigurationPostureMatch> matches;  // per remaining reconfiguration edge
 
@@ -92,7 +92,6 @@ struct DescentLimits
 struct MethodSwitches
 {
 	bool use_room = true;  // room tries for blocked misses, and room-then-reach for viewpoints a reach step loses
-	bool room_in_reach_direction = false;  // also blend the room pull into every reach move
 	bool use_neighbor_ik = true;  // reorders also offer IK from each pose's tour neighbours
 	bool use_posture_match = true;  // reconfiguration edges pull the object and swap poses
 	bool use_slide = true;  // poses slide along their self-motion
@@ -165,70 +164,68 @@ public:
 		TourSettings tour_settings, rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub, std::string mesh_path,
 		double mesh_scale);
 
-	// The one descent from `start` (abs, clamped to the search box).
-	ObjectPositionEvaluation runDescent(const Eigen::Vector3d& start);
-	std::vector<Joints> getPosesInTourOrder(const ViewpointIkAtPosition& placement, const std::vector<int>& order) const;
+	// The one descent from `requested_start` (abs, clamped to the search box).
+	ObjectPositionEvaluation runDescent(const Eigen::Vector3d& requested_start);
+	std::vector<Joints> getPosesInTourOrder(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
 	double getSmallestJointMargin(const std::vector<Joints>& poses) const;
 	const joint_travel::EdgeWeights& getEdgeWeights() const;
 	const std::vector<int>& getCountedJoints() const;
 
-	void publishProgressMarkers(const ViewpointIkAtPosition& placement, const std::vector<int>& order, const Eigen::Vector3d& object_direction);
+	void publishProgressMarkers(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order, const Eigen::Vector3d& object_direction);
 
 private:
 	// Descent loop and its steps
 	Eigen::Vector3d clampToSearchBox(const Eigen::Vector3d& position) const;
-	ObjectPositionEvaluation runDescentFromStart(const Eigen::Vector3d& start);
-	void updateWeightedTotalCost(ObjectPositionEvaluation& descent, double penalty);
-	void evaluateCurrentAndReorderedTour(ObjectPositionEvaluation& descent, double penalty);
-	bool improveArmPosesWithObjectFixed(ObjectPositionEvaluation& current, double penalty, int iteration);
-	bool moveObjectToReachMore(ObjectPositionEvaluation& current, double& step, double penalty, int iteration);
-	bool moveObjectToLowerCost(ObjectPositionEvaluation& current, double& step, double penalty, int iteration);
-	bool moveObjectToUnblockMisses(ObjectPositionEvaluation& current, double step, double penalty, int iteration);
-	ObjectPositionEvaluation evaluateObjectPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds, const std::vector<int>& order, double penalty);
+	void updateWeightedTotalCost(ObjectPositionEvaluation& evaluation, double miss_gap_penalty);
+	void improveOrderAndPosturesWithObjectFixed(ObjectPositionEvaluation& evaluation, double miss_gap_penalty);
+	bool improveArmPosesWithObjectFixed(ObjectPositionEvaluation& current_evaluation, double miss_gap_penalty, int iteration);
+	bool moveObjectToReachMore(ObjectPositionEvaluation& current_evaluation, double& object_step, double miss_gap_penalty, int iteration);
+	bool moveObjectToLowerCost(ObjectPositionEvaluation& current_evaluation, double& object_step, double miss_gap_penalty, int iteration);
+	bool moveObjectToUnblockMisses(ObjectPositionEvaluation& current_evaluation, double object_step, double miss_gap_penalty, int iteration);
+	ObjectPositionEvaluation solveAndImproveAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds, const std::vector<int>& order, double miss_gap_penalty);
 
 	// Step directions
-	Eigen::Vector3d getReachDirection(const ViewpointIkAtPosition& placement);
-	DescentDirection getTourDirection(const ObjectPositionEvaluation& descent);
+	Eigen::Vector3d getReachDirection(const ViewpointIkAtPosition& viewpoint_ik);
+	DescentDirection getTourDirection(const ObjectPositionEvaluation& evaluation);
 	Eigen::MatrixXd getSelfMotionProjector(const Eigen::MatrixXd& jacobian) const;
-	Eigen::MatrixXd getToolJacobian(moveit::core::RobotState& state, const Joints& q) const;
+	Eigen::MatrixXd getToolJacobian(moveit::core::RobotState& state, const Joints& joint_values) const;
 	Eigen::Vector3d combineMovesWithoutConflict(const std::vector<Eigen::Vector3d>& moves) const;
-	Eigen::Vector3d getRoomDirectionOfMissedViewpoint(const ViewpointIkAtPosition& placement, size_t v);
-	std::vector<Eigen::VectorXd> getTourCostSlopePerPose(const ViewpointIkAtPosition& placement, const std::vector<int>& order) const;
-	std::vector<Joints> getPosesAfterJointSlides(const ViewpointIkAtPosition& placement, const DescentDirection& direction, double slide_step) const;
-	Eigen::Vector3d getRoomThenReachDirection(const ViewpointIkAtPosition& placement, const std::vector<size_t>& lost, const Eigen::Vector3d& aim, double step);
+	std::vector<Eigen::VectorXd> getTourCostSlopePerPose(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
+	std::vector<Joints> getPosesAfterJointSlides(const ViewpointIkAtPosition& viewpoint_ik, const DescentDirection& direction, double slide_step) const;
+	Eigen::Vector3d getRoomThenReachDirection(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& lost_viewpoints, const Eigen::Vector3d& aim, double object_step);
 
 	// Joint room and blocking margins
-	double getSmallestJacobianSingularValue(const Joints& q);
-	double getJointRoomShortfall(const Joints& q, Eigen::VectorXd* slope) const;
-	std::vector<room_margins::Margin> getBlockingMarginsOfPose(size_t v, const Joints& q, double near_floors = 2.0);
-	std::vector<room_margins::Margin> getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& placement, const std::vector<size_t>& misses, double near_floors);
+	double getSmallestJacobianSingularValue(const Joints& joint_values);
+	double getJointRoomShortfall(const Joints& joint_values, Eigen::VectorXd* slope) const;
+	std::vector<room_margins::Margin> getBlockingMarginsOfPose(size_t viewpoint_index, const Joints& joint_values, double near_floors = 2.0);
+	std::vector<room_margins::Margin> getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, double near_floors);
 
 	// IK
-	uint32_t getRandomIkSeed(const Eigen::Vector3d& position, size_t v) const;
-	std::vector<Joints> getChosenPoses(const ViewpointIkAtPosition& placement) const;
-	double getClearanceShortfall(moveit::core::RobotState& state, const Joints& q) const;
-	std::vector<ClosestIkCandidate> keepCandidatesNearBestGap(moveit::core::RobotState& state, const std::vector<closest_ik::Result>& closest);
+	uint32_t getRandomIkSeed(const Eigen::Vector3d& position, size_t viewpoint_index) const;
+	std::vector<Joints> getChosenPoses(const ViewpointIkAtPosition& viewpoint_ik) const;
+	double getClearanceShortfall(moveit::core::RobotState& state, const Joints& joint_values) const;
+	std::vector<ClosestIkCandidate> keepCandidatesNearBestGap(moveit::core::RobotState& state, const std::vector<closest_ik::Result>& closest_results);
 	closest_ik::Result solveSmallestGapIk(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts);
-	closest_ik::Result pushArmToExactClearance(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const closest_ik::Result& closest);
+	closest_ik::Result pushArmToExactClearance(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const closest_ik::Result& closest_result);
 	ViewpointIkAtPosition solveViewpointIkAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds = {});
 	std::vector<closest_ik::Result> solveClosestIkFromStarts(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts);
 
 	// Tour order and reconfigurations
 	bool isReconfiguration(const Joints& from, const Joints& to) const;
-	void swapInReconfigurationPostureMatches(ObjectPositionEvaluation& descent);
+	void swapInReconfigurationPostureMatches(ObjectPositionEvaluation& evaluation);
 	void unwrapFullTurnJointsToward(Joints& pose, const Joints& reference) const;
 	int findCandidateIndex(const std::vector<Joints>& candidates, const Joints& pose) const;
-	std::vector<int> reorderTourWithGtsp(ViewpointIkAtPosition& placement, const std::vector<int>& order);
-	int countReconfigurations(const ViewpointIkAtPosition& placement, const std::vector<int>& order) const;
-	void unwrapFullTurnJointsAlongTour(ViewpointIkAtPosition& placement, const std::vector<int>& order) const;
-	bool isStraightJointMoveCollisionFree(moveit::core::RobotState& state, const Joints& a, const Joints& b) const;
-	int countReconfigurationsAround(const ViewpointIkAtPosition& placement, const std::vector<int>& order, size_t k, const Joints& pose) const;
-	std::vector<std::pair<size_t, double>> getBlockedEdgeDetourCharges(const ViewpointIkAtPosition& placement, const std::vector<int>& order);
-	std::vector<ReconfigurationPostureMatch> findReconfigurationPostureMatches(const ViewpointIkAtPosition& placement, const std::vector<int>& order);
+	std::vector<int> reorderTourWithGtsp(ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order);
+	int countReconfigurations(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
+	void unwrapFullTurnJointsAlongTour(ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
+	bool isStraightJointMoveCollisionFree(moveit::core::RobotState& state, const Joints& from_pose, const Joints& to_pose) const;
+	int countReconfigurationsAround(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order, size_t tour_position, const Joints& pose) const;
+	std::vector<std::pair<size_t, double>> getBlockedEdgeDetourCharges(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order);
+	std::vector<ReconfigurationPostureMatch> findReconfigurationPostureMatches(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order);
 
 	// Logging
-	void logMissedViewpoints(const ViewpointIkAtPosition& placement);
-	void logObjectPositionEvaluation(const std::string& label, const ObjectPositionEvaluation& descent);
+	void logMissedViewpoints(const ViewpointIkAtPosition& viewpoint_ik);
+	void logObjectPositionEvaluation(const std::string& label, const ObjectPositionEvaluation& evaluation);
 
 	rclcpp::Node::SharedPtr node;
 	moveit::core::RobotModelConstPtr model;

@@ -59,7 +59,6 @@
     co_penalty_growth: 10.0               # when settled with misses, the penalty grows this much
     co_max_penalty: 100000.0
     co_room: true                         # room tries for blocked misses, and room-then-reach for viewpoints a reach step loses
-    co_room_in_reach_direction: false     # also blend the room pull into every reach move (can bend the path the wrong way)
 
     # Reconfigurations
     co_neighbor_ik: true                  # reorders also try IK from each pose's tour neighbours

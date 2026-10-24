@@ -136,14 +136,14 @@ public:
 		// One descent from the given start, no restarts.
 		const object_gtsp_co_optimize::ObjectPositionEvaluation best = optimizer.runDescent(start);
 		const double search_seconds = GetElapsedSeconds();
-		const bool all_reached = best.placement.num_reached == num_viewpoint;
+		const bool all_reached = best.viewpoint_ik.num_reached == num_viewpoint;
 
 		// Planned tour length and, for reference, execution time: straight moves where collision-free, else OMPL (camera spin
 		// aside in the length; timed with TOTG for the time).
-		const std::vector<Joints> tour_poses = optimizer.getPosesInTourOrder(best.placement, best.order);
+		const std::vector<Joints> tour_poses = optimizer.getPosesInTourOrder(best.viewpoint_ik, best.order);
 		const std::vector<int>& counted_joints = optimizer.getCountedJoints();
 		const joint_travel::EdgeWeights& edge_weights = optimizer.getEdgeWeights();
-		scene_geometry::MoveObject(scene, scene_geometry::MakeIsometry(best.placement.position, object_rotation));
+		scene_geometry::MoveObject(scene, scene_geometry::MakeIsometry(best.viewpoint_ik.position, object_rotation));
 		const std::vector<double> edge_lengths = PlanTourEdgeLengths(this->shared_from_this(), model, scene, tour_poses, home_pose, group_name, planning_time, planning_attempts, /*count_last_joint=*/false);
 		double planned_length = 0.0;
 		int num_failed_length_edges = 0;
@@ -166,18 +166,18 @@ public:
 		const double smallest_margin = optimizer.getSmallestJointMargin(tour_poses);
 		const double seconds = GetElapsedSeconds();
 		if (all_reached)
-			RCLCPP_INFO(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned length %.2f rad (%d failed edges), %d reconfigurations, smallest joint margin %.3f rad beyond the hard limit; planned time %.2f s for reference (%.1f s).", best.placement.position.x(), best.placement.position.y(), best.placement.position.z(), num_viewpoint, planned_length, num_failed_length_edges, num_reconfigurations, smallest_margin, planned_time, seconds);
+			RCLCPP_INFO(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned length %.2f rad (%d failed edges), %d reconfigurations, smallest joint margin %.3f rad beyond the hard limit; planned time %.2f s for reference (%.1f s).", best.viewpoint_ik.position.x(), best.viewpoint_ik.position.y(), best.viewpoint_ik.position.z(), num_viewpoint, planned_length, num_failed_length_edges, num_reconfigurations, smallest_margin, planned_time, seconds);
 		else
-			RCLCPP_WARN(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses (%.1f s).", best.placement.position.x(), best.placement.position.y(), best.placement.position.z(), std::max(0, best.placement.num_reached), num_viewpoint, seconds);
+			RCLCPP_WARN(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses (%.1f s).", best.viewpoint_ik.position.x(), best.viewpoint_ik.position.y(), best.viewpoint_ik.position.z(), std::max(0, best.viewpoint_ik.num_reached), num_viewpoint, seconds);
 
 		std::filesystem::create_directories(output_dir);
 		Json::Value out;
 		out["ok"] = all_reached;
-		out["num_reachable"] = std::max(0, best.placement.num_reached);
+		out["num_reachable"] = std::max(0, best.viewpoint_ik.num_reached);
 		out["num_total"] = num_viewpoint;
-		out["x"] = best.placement.position.x();
-		out["y"] = best.placement.position.y();
-		out["z"] = best.placement.position.z();
+		out["x"] = best.viewpoint_ik.position.x();
+		out["y"] = best.viewpoint_ik.position.y();
+		out["z"] = best.viewpoint_ik.position.z();
 		out["planned_travel"] = all_reached ? planned_length : -1.0;  // rad
 		out["planned_time"] = all_reached ? planned_time : -1.0;  // s, reference only
 		out["straight_tour_cost"] = best.joint_travel_cost;
@@ -200,22 +200,22 @@ public:
 		// Final markers on /object_placement_markers, as object_placement draws them: the object and the tour's viewpoints.
 		ObjectPlacementResult result;
 		result.ok = all_reached;
-		result.x = best.placement.position.x();
-		result.y = best.placement.position.y();
-		result.z = best.placement.position.z();
+		result.x = best.viewpoint_ik.position.x();
+		result.y = best.viewpoint_ik.position.y();
+		result.z = best.viewpoint_ik.position.z();
 		result.tour_order = best.order;
 		for (int viewpoint : best.order)
-			result.joint_solutions.push_back(best.placement.reached[static_cast<size_t>(viewpoint)] ? best.placement.chosen_ik_per_viewpoint[static_cast<size_t>(viewpoint)].q : Joints());
+			result.joint_solutions.push_back(best.viewpoint_ik.reached[static_cast<size_t>(viewpoint)] ? best.viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(viewpoint)].q : Joints());
 		visualization_msgs::msg::MarkerArray final_markers = BuildObjectPlacementMarkerArray(this->now(), mesh_path, mesh_scale, nominal, object_rotation, viewpoints_nominal, result);
 		final_markers.markers.push_back(GetMountingSurfaceMarker(model->getRootLinkName(), this->now()));
 		marker_pub->publish(final_markers);
-		optimizer.publishProgressMarkers(best.placement, best.order, Eigen::Vector3d::Zero());
+		optimizer.publishProgressMarkers(best.viewpoint_ik, best.order, Eigen::Vector3d::Zero());
 
 		if (execute_on_robot && !all_reached)
 			RCLCPP_WARN(this->get_logger(), "Not executing: the tour misses viewpoints.");
 		else if (execute_on_robot)
 		{
-			RCLCPP_WARN(this->get_logger(), "execute_on_robot: driving the robot against the object at abs (%.4f, %.4f, %.4f) m -- on a real robot only correct if the object is actually fixtured there.", best.placement.position.x(), best.placement.position.y(), best.placement.position.z());
+			RCLCPP_WARN(this->get_logger(), "execute_on_robot: driving the robot against the object at abs (%.4f, %.4f, %.4f) m -- on a real robot only correct if the object is actually fixtured there.", best.viewpoint_ik.position.x(), best.viewpoint_ik.position.y(), best.viewpoint_ik.position.z());
 			const moveit::planning_interface::MoveGroupInterfacePtr move_group = std::make_shared<moveit::planning_interface::MoveGroupInterface>(this->shared_from_this(), group_name);
 			move_group->startStateMonitor();
 			move_group->setPlanningTime(execution_planning_time);
@@ -228,7 +228,7 @@ public:
 			std::vector<const ViewpointCandidate*> selected;
 			for (size_t k = 0; k < tour_poses.size(); ++k)
 			{
-				tour_viewpoints[k].tcp_pose = scene_geometry::ToPoseMsg(scene_geometry::Translation(best.placement.position) * viewpoints[static_cast<size_t>(best.order[k])]);
+				tour_viewpoints[k].tcp_pose = scene_geometry::ToPoseMsg(scene_geometry::Translation(best.viewpoint_ik.position) * viewpoints[static_cast<size_t>(best.order[k])]);
 				tour_viewpoints[k].joint_solution = tour_poses[k];
 				tour_viewpoints[k].reachable = true;
 				selected.push_back(&tour_viewpoints[k]);
@@ -267,7 +267,6 @@ private:
 	{
 		object_gtsp_co_optimize::MethodSwitches method_switches;
 		method_switches.use_room = this->getParameter<bool>("co_room", true);
-		method_switches.room_in_reach_direction = this->getParameter<bool>("co_room_in_reach_direction", false);
 		method_switches.use_neighbor_ik = this->getParameter<bool>("co_neighbor_ik", true);
 		method_switches.use_posture_match = this->getParameter<bool>("co_posture_match", true);
 		method_switches.use_slide = this->getParameter<bool>("co_slide", true);
