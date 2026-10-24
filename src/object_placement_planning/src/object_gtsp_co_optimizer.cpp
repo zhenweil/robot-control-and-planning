@@ -139,12 +139,25 @@ ObjectPositionEvaluation Optimizer::solveAndImproveAtPosition(const Eigen::Vecto
 
 void Optimizer::improveOrderAndPosturesWithObjectFixed(ObjectPositionEvaluation& evaluation, double miss_gap_penalty)
 {
+	// Timed for the log: posture matches, GTSP and the cost (mostly the blocked-edge checks).
+	auto get_seconds_since = [](std::chrono::steady_clock::time_point since) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count(); };
 	ObjectPositionEvaluation reordered_evaluation = evaluation;
+	auto since = std::chrono::steady_clock::now();
 	this->swapInReconfigurationPostureMatches(evaluation);
+	double posture_match_seconds = get_seconds_since(since);
+	since = std::chrono::steady_clock::now();
 	this->updateWeightedTotalCost(evaluation, miss_gap_penalty);
+	double cost_seconds = get_seconds_since(since);
+	since = std::chrono::steady_clock::now();
 	reordered_evaluation.order = this->reorderTourWithGtsp(reordered_evaluation.viewpoint_ik, reordered_evaluation.order);
+	const double gtsp_seconds = get_seconds_since(since);
+	since = std::chrono::steady_clock::now();
 	this->swapInReconfigurationPostureMatches(reordered_evaluation);
+	posture_match_seconds += get_seconds_since(since);
+	since = std::chrono::steady_clock::now();
 	this->updateWeightedTotalCost(reordered_evaluation, miss_gap_penalty);
+	cost_seconds += get_seconds_since(since);
+	RCLCPP_INFO(this->node->get_logger(), "  tour work: posture matches %.2f s, GTSP %.2f s, cost with blocked-edge checks %.2f s", posture_match_seconds, gtsp_seconds, cost_seconds);
 	// Reach first: more viewpoints reached wins; at equal reach the lower weighted total cost.
 	const bool reordered_reaches_more = reordered_evaluation.viewpoint_ik.num_reached > evaluation.viewpoint_ik.num_reached;
 	const bool reordered_cheaper = reordered_evaluation.viewpoint_ik.num_reached == evaluation.viewpoint_ik.num_reached && reordered_evaluation.weighted_total_cost < evaluation.weighted_total_cost;
@@ -189,6 +202,7 @@ bool Optimizer::moveObjectToReachMore(ObjectPositionEvaluation& current_evaluati
 	if (aim.norm() < 0.5)
 		return false;
 	Eigen::Vector3d direction = aim;
+	bool is_room_then_reach = false;  // the direction was turned to keep room for viewpoints the last try lost
 	bool tried_miss_room = false;
 	for (int attempt = 0; attempt < this->step_sizes.max_line_search_tries && object_step >= this->step_sizes.min_step; ++attempt)
 	{
@@ -198,7 +212,7 @@ bool Optimizer::moveObjectToReachMore(ObjectPositionEvaluation& current_evaluati
 			if (current_evaluation.viewpoint_ik.reached[viewpoint_index] && !candidate_evaluation.viewpoint_ik.reached[viewpoint_index])
 				lost_viewpoints.push_back(viewpoint_index);
 		const bool kept = candidate_evaluation.viewpoint_ik.num_reached > current_evaluation.viewpoint_ik.num_reached || (candidate_evaluation.viewpoint_ik.num_reached == current_evaluation.viewpoint_ik.num_reached && candidate_evaluation.viewpoint_ik.gap_sum < current_evaluation.viewpoint_ik.gap_sum);
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %zu)  gap sum %.4f m vs %.4f%s", iteration, object_step, candidate_evaluation.viewpoint_ik.position.x(), candidate_evaluation.viewpoint_ik.position.y(), candidate_evaluation.viewpoint_ik.position.z(), candidate_evaluation.viewpoint_ik.num_reached, lost_viewpoints.size(), candidate_evaluation.viewpoint_ik.gap_sum, current_evaluation.viewpoint_ik.gap_sum, kept ? "  <-- kept" : "");
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d %s: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %zu)  gap sum %.4f m vs %.4f%s", iteration, is_room_then_reach ? "room-then-reach" : "reach", object_step, candidate_evaluation.viewpoint_ik.position.x(), candidate_evaluation.viewpoint_ik.position.y(), candidate_evaluation.viewpoint_ik.position.z(), candidate_evaluation.viewpoint_ik.num_reached, lost_viewpoints.size(), candidate_evaluation.viewpoint_ik.gap_sum, current_evaluation.viewpoint_ik.gap_sum, kept ? "  <-- kept" : "");
 		if (kept)
 		{
 			current_evaluation = candidate_evaluation;
@@ -219,6 +233,7 @@ bool Optimizer::moveObjectToReachMore(ObjectPositionEvaluation& current_evaluati
 			if (room_direction.norm() > 0.5 && (room_direction - direction).norm() > 1e-3)
 			{
 				direction = room_direction;
+				is_room_then_reach = true;
 				continue;
 			}
 		}
@@ -604,6 +619,8 @@ double Optimizer::getJointRoomShortfall(const Joints& joint_values, Eigen::Vecto
 ViewpointIkAtPosition Optimizer::solveViewpointIkAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds)
 {
 	scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(position, this->object_rotation));
+	const auto solve_start = std::chrono::steady_clock::now();
+	closest_ik::ResetWeightedSolveTiming();
 	ViewpointIkAtPosition viewpoint_ik;
 	viewpoint_ik.position = position;
 	viewpoint_ik.chosen_ik_per_viewpoint.assign(this->viewpoints.size(), ClosestIkCandidate());
@@ -673,6 +690,9 @@ ViewpointIkAtPosition Optimizer::solveViewpointIkAtPosition(const Eigen::Vector3
 		viewpoint_ik.num_reached += viewpoint_ik.reached[viewpoint_index] ? 1 : 0;
 		viewpoint_ik.gap_sum += viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].gap;
 	}
+	const closest_ik::WeightedSolveTiming& timing = closest_ik::GetWeightedSolveTiming();
+	if (timing.solves > 0)
+		RCLCPP_INFO(this->node->get_logger(), "  IK at abs (%.4f, %.4f, %.4f): %.2f s wall; weighted closest IK %ld solves, %.1f steps each, distance queries %.2f s, checks %.2f s (summed over %u threads)", position.x(), position.y(), position.z(), std::chrono::duration<double>(std::chrono::steady_clock::now() - solve_start).count(), timing.solves.load(), static_cast<double>(timing.steps.load()) / static_cast<double>(timing.solves.load()), 1e-6 * static_cast<double>(timing.distance_microseconds.load()), 1e-6 * static_cast<double>(timing.check_microseconds.load()), this->num_threads);
 	return viewpoint_ik;
 }
 
@@ -716,6 +736,19 @@ std::vector<ClosestIkCandidate> Optimizer::keepCandidatesNearBestGap(moveit::cor
 		best_gap = std::min(best_gap, candidate.gap);
 		is_roomy.push_back(candidate.clearance_shortfall <= 0.0 && this->getSmallestJointMargin({result.q}) >= this->cost_weights.joint_room_band);
 		all_candidates.push_back(candidate);
+	}
+	if (this->ik_settings.closest_options.use_weighted_cost)
+	{
+		// The weighted cost already counts room and clearance: the cheapest is the default, those within the gap slack of it GTSP choices.
+		size_t cheapest_index = 0;
+		for (size_t candidate_index = 1; candidate_index < closest_results.size(); ++candidate_index)
+			if (closest_results[candidate_index].weighted_cost < closest_results[cheapest_index].weighted_cost)
+				cheapest_index = candidate_index;
+		std::vector<ClosestIkCandidate> near_candidates = {all_candidates[cheapest_index]};
+		for (size_t candidate_index = 0; candidate_index < all_candidates.size(); ++candidate_index)
+			if (candidate_index != cheapest_index && all_candidates[candidate_index].gap <= all_candidates[cheapest_index].gap + this->ik_settings.closest_gap_slack)
+				near_candidates.push_back(all_candidates[candidate_index]);
+		return near_candidates;
 	}
 	std::vector<ClosestIkCandidate> near_candidates, near_roomy_candidates;
 	for (size_t candidate_index = 0; candidate_index < all_candidates.size(); ++candidate_index)
@@ -798,6 +831,7 @@ closest_ik::Result Optimizer::pushArmToExactClearance(moveit::core::RobotState& 
 	finished.pose_error = closest_ik::GetPoseError(target, state.getGlobalLinkTransform(this->tool), this->ik_settings.exact_options.ignore_roll);
 	finished.gap = scene_geometry::PoseGap(finished.pose_error, this->ik_settings.closest_options.rot_scale);
 	finished.q = joint_values;
+	finished.weighted_cost = closest_result.weighted_cost;	// the push only moves the arm out to the exact clearance
 	const double finished_gap = finished.gap + this->getClearanceShortfall(state, joint_values);
 	const double closest_gap = scene_geometry::PoseGap(closest_result.pose_error, this->ik_settings.closest_options.rot_scale) + this->getClearanceShortfall(state, closest_result.q);
 	return finished_gap < closest_gap ? finished : closest_result;

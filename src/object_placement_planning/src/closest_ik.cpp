@@ -1,6 +1,7 @@
 #include "object_placement_planning/closest_ik.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <memory>
 
@@ -82,6 +83,21 @@ std::pair<collision_detection::DistanceResult, collision_detection::DistanceResu
 	return res;
 }
 
+WeightedSolveTiming& GetWeightedSolveTiming()
+{
+	static WeightedSolveTiming timing;
+	return timing;
+}
+
+void ResetWeightedSolveTiming()
+{
+	WeightedSolveTiming& timing = GetWeightedSolveTiming();
+	timing.solves = 0;
+	timing.steps = 0;
+	timing.distance_microseconds = 0;
+	timing.check_microseconds = 0;
+}
+
 ClosePairs FindClosePairs(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& scene, const moveit::core::RobotState& state,
 	const moveit::core::JointModelGroup* group, const collision_detection::DistanceRequest& req, double margin)
@@ -112,7 +128,7 @@ std::set<std::string> ToolSideLinks(const moveit::core::LinkModel* tool)
 // between can't slide onto the viewpoint, so its gap and slope would mislead.
 bool ClearPathToTarget(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state,
-	const moveit::core::LinkModel* tool, const Eigen::Vector3d& target, const std::set<std::string>& tool_side)
+	const moveit::core::LinkModel* tool, const Eigen::Vector3d& target, const std::set<std::string>& tool_side, bool ignore_object)
 {
 	const Eigen::Vector3d local = state.getGlobalLinkTransform(tool).inverse() * target;
 	const double length = local.norm();
@@ -130,7 +146,10 @@ bool ClearPathToTarget(
 	collision_detection::CollisionResult res;
 	{
 		planning_scene_monitor::LockedPlanningSceneRO locked(scene);
-		locked->checkCollision(req, res, state);
+		collision_detection::AllowedCollisionMatrix acm = locked->getAllowedCollisionMatrix();
+		if (ignore_object)
+			acm.setEntry(id, "object", true);
+		locked->checkCollision(req, res, state, acm);
 	}
 	state.clearAttachedBody(id);
 	return !res.collision;
@@ -170,14 +189,75 @@ bool IsWithinExactTolerance(const scene_geometry::Vector6d& pose_error, const Op
 	return pose_error.head<3>().norm() < options.exact_position_tolerance && pose_error.tail<3>().norm() < options.exact_rotation_tolerance;
 }
 
+// The group's joint bounds; an unbounded joint gets +-max.
+void GetJointBounds(const moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, std::vector<double>& lower, std::vector<double>& upper)
+{
+	lower.resize(group->getVariableCount());
+	upper.resize(group->getVariableCount());
+	for (size_t k = 0; k < lower.size(); ++k)
+	{
+		const moveit::core::VariableBounds& b = state.getRobotModel()->getVariableBounds(group->getVariableNames()[k]);
+		lower[k] = b.position_bounded_ ? b.min_position_ : -std::numeric_limits<double>::max();
+		upper[k] = b.position_bounded_ ? b.max_position_ : std::numeric_limits<double>::max();
+	}
+}
+
+// The camera side: the tool side without its wrist link.
+std::set<std::string> GetCameraLinks(const moveit::core::LinkModel* tool)
+{
+	std::set<std::string> camera_links = ToolSideLinks(tool);
+	camera_links.erase(moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(tool)->getName());
+	return camera_links;
+}
+
+bool IsCameraObjectPair(const std::string& pair_name, const std::set<std::string>& camera_links)
+{
+	const size_t split = pair_name.find(" - ");
+	const std::string first = pair_name.substr(0, split);
+	const std::string second = pair_name.substr(split + 3);
+	return (first == "object" && camera_links.count(second)) || (second == "object" && camera_links.count(first));
+}
+
+ClosePairs DropCameraObjectPairs(const ClosePairs& pairs, const std::set<std::string>& camera_links)
+{
+	ClosePairs kept;
+	for (size_t pair_index = 0; pair_index < pairs.names.size(); ++pair_index)
+	{
+		if (IsCameraObjectPair(pairs.names[pair_index], camera_links))
+			continue;
+		kept.gradients.push_back(pairs.gradients[pair_index]);
+		kept.dists.push_back(pairs.dists[pair_index]);
+		kept.object_slopes.push_back(pairs.object_slopes[pair_index]);
+		kept.names.push_back(pairs.names[pair_index]);
+	}
+	return kept;
+}
+
+// The validity check with the camera allowed inside the object; every other collision still counts.
+bool IsStateValidWithCameraInObject(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const std::vector<double>& q, const std::set<std::string>& camera_links)
+{
+	state.setJointGroupPositions(group, q);
+	state.update();
+	if (!state.satisfiesBounds(group))
+		return false;
+	planning_scene_monitor::LockedPlanningSceneRO locked(scene);
+	collision_detection::AllowedCollisionMatrix acm = locked->getAllowedCollisionMatrix();
+	for (const std::string& link : camera_links)
+		acm.setEntry("object", link, true);
+	collision_detection::CollisionRequest req;
+	req.group_name = group->getName();
+	collision_detection::CollisionResult res;
+	locked->checkCollision(req, res, state, acm);
+	return !res.collision;
+}
+
 // Exact stage, like KDL: full damped Newton steps on the pose error, no collision terms; one validity check once within
 // the tolerances. Not found if it doesn't converge or the pose is invalid.
 // True if no arm link is within margin of anything. The camera side (links past the last wrist link) is left out: the
 // viewpoint planner already set its standoff from the object.
 bool HasArmClearance(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, const moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, double margin)
 {
-	std::set<std::string> camera_side = ToolSideLinks(tool);
-	camera_side.erase(moveit::core::RobotModel::getRigidlyConnectedParentLinkModel(tool)->getName());
+	const std::set<std::string> camera_side = GetCameraLinks(tool);
 	const ClosePairs pairs = FindClosePairs(scene, state, group, CloseRequest(state, group, margin), margin);
 	for (const std::string& name : pairs.names)
 	{
@@ -219,6 +299,181 @@ Result SolveExact(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, 
 	return {};
 }
 
+// The weighted closest-stage cost at one pose: total = |residuals|^2.
+struct WeightedCost
+{
+	double total = 0.0;
+	scene_geometry::Vector6d pose_error = scene_geometry::Vector6d::Zero();
+	Eigen::VectorXd residuals;
+	Eigen::MatrixXd residual_slopes;  // d(residuals)/dq
+};
+
+WeightedCost GetWeightedCost(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& q, const Options& options, const std::set<std::string>& camera_links, const std::vector<double>& lower, const std::vector<double>& upper)
+{
+	const Eigen::Index dof = static_cast<Eigen::Index>(q.size());
+	const Eigen::MatrixXd J = GetToolJacobian(state, group, tool, q, options.ignore_roll);
+	WeightedCost cost;
+	cost.pose_error = GetPoseError(target, state.getGlobalLinkTransform(tool), options.ignore_roll);
+	std::vector<double> residuals;
+	std::vector<Eigen::RowVectorXd> slopes;
+	for (Eigen::Index row = 0; row < 6; ++row)
+	{
+		const double scale = std::sqrt(row < 3 ? options.position_weight : options.angle_weight);
+		residuals.push_back(scale * cost.pose_error(row));
+		slopes.push_back(-scale * J.row(row));	// the error is target minus tool
+	}
+	// One distance query out to the wider margin; the arm's own pairs pay the collision term inside margin and the
+	// self-distance term inside self_distance_margin.
+	const double self_margin = options.self_distance_weight > 0.0 ? std::max(options.margin, options.self_distance_margin) : options.margin;
+	const auto distance_start = std::chrono::steady_clock::now();
+	collision_detection::DistanceResult self_distances, world_distances;
+	{
+		// Separate queries: only the arm's own pairs need the wider threshold, and a small one lets the checker skip far pairs.
+		planning_scene_monitor::LockedPlanningSceneRO locked(scene);
+		collision_detection::DistanceRequest self_request = CloseRequest(state, group, self_margin);
+		self_request.acm = &locked->getAllowedCollisionMatrix();
+		self_request.enableGroup(locked->getRobotModel());
+		locked->getCollisionEnv()->distanceSelf(self_request, self_distances, state);
+		collision_detection::DistanceRequest world_request = CloseRequest(state, group, options.margin);
+		world_request.acm = &locked->getAllowedCollisionMatrix();
+		world_request.enableGroup(locked->getRobotModel());
+		locked->getCollisionEnv()->distanceRobot(world_request, world_distances, state);
+	}
+	GetWeightedSolveTiming().distance_microseconds += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - distance_start).count();
+	const ClosePairs world_pairs = ClosePairGradients(world_distances, state, group, options.margin);
+	for (size_t pair_index = 0; pair_index < world_pairs.names.size(); ++pair_index)
+	{
+		const double scale = std::sqrt(IsCameraObjectPair(world_pairs.names[pair_index], camera_links) ? options.camera_object_weight : options.collision_weight);
+		residuals.push_back(scale * (options.margin - world_pairs.dists[pair_index]));
+		slopes.push_back(-scale * world_pairs.gradients[pair_index]);
+	}
+	const ClosePairs self_pairs = ClosePairGradients(self_distances, state, group, self_margin);
+	for (size_t pair_index = 0; pair_index < self_pairs.names.size(); ++pair_index)
+	{
+		if (self_pairs.dists[pair_index] < options.margin)
+		{
+			const double scale = std::sqrt(options.collision_weight);
+			residuals.push_back(scale * (options.margin - self_pairs.dists[pair_index]));
+			slopes.push_back(-scale * self_pairs.gradients[pair_index]);
+		}
+		if (options.self_distance_weight > 0.0 && self_pairs.dists[pair_index] < options.self_distance_margin)
+		{
+			const double scale = std::sqrt(options.self_distance_weight);
+			residuals.push_back(scale * (options.self_distance_margin - self_pairs.dists[pair_index]));
+			slopes.push_back(-scale * self_pairs.gradients[pair_index]);
+		}
+	}
+	// Joint room over the whole range: s^2 / (1 - s^2) with s the share of the half range from the middle. About s^2
+	// mid-range, steep near a limit (s 0.9: 4.3, s 0.99: 49); s is capped at 0.999 since bounds put joints right on a limit.
+	const double room_scale = std::sqrt(options.joint_room_weight);
+	for (size_t joint_index = 0; joint_index < q.size(); ++joint_index)
+	{
+		if (upper[joint_index] - lower[joint_index] > 1e6)
+			continue;  // unbounded
+		const double half_range = 0.5 * (upper[joint_index] - lower[joint_index]);
+		const double middle = 0.5 * (upper[joint_index] + lower[joint_index]);
+		const double share = std::clamp((q[joint_index] - middle) / half_range, -0.999, 0.999);
+		const double room_left = 1.0 - share * share;
+		Eigen::RowVectorXd slope = Eigen::RowVectorXd::Zero(dof);
+		slope(static_cast<Eigen::Index>(joint_index)) = room_scale / (room_left * std::sqrt(room_left) * half_range);
+		residuals.push_back(room_scale * share / std::sqrt(room_left));
+		slopes.push_back(slope);
+	}
+	cost.residuals = Eigen::Map<const Eigen::VectorXd>(residuals.data(), static_cast<Eigen::Index>(residuals.size()));
+	cost.residual_slopes.resize(static_cast<Eigen::Index>(slopes.size()), dof);
+	for (size_t row = 0; row < slopes.size(); ++row)
+		cost.residual_slopes.row(static_cast<Eigen::Index>(row)) = slopes[row];
+	cost.total = cost.residuals.squaredNorm();
+	return cost;
+}
+
+// Weighted closest stage: Levenberg-Marquardt steps on the weighted cost (damping grows on a step that doesn't lower it).
+// The checks run once at the end, from the cheapest pose passed through down, so most steps skip them; a pose within
+// the exact tolerances is checked at once and ends the solve if it is exact.
+Result SolveWeighted(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const Options& options)
+{
+	const double max_joint_step = 0.1;	// rad
+	const int max_damping_tries = 3;
+	const int stall_window = 5;	 // stop once the best gap improves < 1 mm over this many steps, as the priority stage
+	const double stall_gain = 1e-3;
+	WeightedSolveTiming& timing = GetWeightedSolveTiming();
+	++timing.solves;
+	std::vector<double> lower, upper;
+	GetJointBounds(state, group, lower, upper);
+	const std::set<std::string> tool_side = ToolSideLinks(tool);
+	const std::set<std::string> camera_links = GetCameraLinks(tool);
+	const Eigen::Index dof = static_cast<Eigen::Index>(start.size());
+	// The kept-pose checks: valid (camera in the object if allowed), clear path, and whether it is exact.
+	auto check_pose = [&](const std::vector<double>& q, const WeightedCost& cost) {
+		const auto check_start = std::chrono::steady_clock::now();
+		Result result;
+		const bool valid = options.camera_can_enter_object ? IsStateValidWithCameraInObject(scene, state, group, q, camera_links) : scene_geometry::IsStateValid(scene, &state, group, q.data());
+		if (valid && ClearPathToTarget(scene, state, tool, target.translation(), tool_side, options.camera_can_enter_object))
+		{
+			const bool exact = IsWithinExactTolerance(cost.pose_error, options) && (options.exact_margin <= 0.0 || HasArmClearance(scene, state, group, tool, options.exact_margin)) && (!options.camera_can_enter_object || scene_geometry::IsStateValid(scene, &state, group, q.data()));
+			result = {true, exact, cost.pose_error, scene_geometry::PoseGap(cost.pose_error, options.rot_scale), q, cost.total};
+		}
+		timing.check_microseconds += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - check_start).count();
+		return result;
+	};
+	std::vector<double> q = start;
+	WeightedCost cost = GetWeightedCost(scene, state, group, tool, target, q, options, camera_links, lower, upper);
+	std::vector<std::pair<std::vector<double>, WeightedCost>> visited = {{q, cost}};
+	std::vector<double> best_gap_history;
+	double damping = 1e-3;
+	for (int step = 0; step < options.weighted_iters; ++step)
+	{
+		if (IsWithinExactTolerance(cost.pose_error, options))
+		{
+			const Result result = check_pose(q, cost);
+			if (result.exact)
+				return result;
+		}
+		const double gap = scene_geometry::PoseGap(cost.pose_error, options.rot_scale);
+		best_gap_history.push_back(std::min(gap, best_gap_history.empty() ? gap : best_gap_history.back()));
+		if (static_cast<int>(best_gap_history.size()) > stall_window && best_gap_history[best_gap_history.size() - 1 - stall_window] - best_gap_history.back() < stall_gain)
+			break;
+		++timing.steps;
+		const Eigen::VectorXd gradient = 2.0 * cost.residual_slopes.transpose() * cost.residuals;
+		const Eigen::MatrixXd hessian = 2.0 * cost.residual_slopes.transpose() * cost.residual_slopes;
+		bool lowered = false;
+		for (int damping_try = 0; damping_try < max_damping_tries && !lowered; ++damping_try)
+		{
+			Eigen::VectorXd dq = -(hessian + damping * Eigen::MatrixXd::Identity(dof, dof)).ldlt().solve(gradient);
+			const double step_max = dq.cwiseAbs().maxCoeff();
+			if (step_max > max_joint_step)
+				dq *= max_joint_step / step_max;
+			std::vector<double> candidate = q;
+			for (Eigen::Index k = 0; k < dof; ++k)
+				candidate[static_cast<size_t>(k)] += dq(k);
+			state.setJointGroupPositions(group, candidate);
+			state.enforceBounds(group);
+			state.copyJointGroupPositions(group, candidate);
+			const WeightedCost candidate_cost = GetWeightedCost(scene, state, group, tool, target, candidate, options, camera_links, lower, upper);
+			if (candidate_cost.total < cost.total)
+			{
+				q = candidate;
+				cost = candidate_cost;
+				visited.emplace_back(q, cost);
+				damping = std::max(1e-6, 0.5 * damping);
+				lowered = true;
+			}
+			else
+				damping *= 10.0;
+		}
+		if (!lowered)
+			break;
+	}
+	// The cost only falls, so the last pose is the cheapest: check back from it until one passes.
+	for (auto visited_pose = visited.rbegin(); visited_pose != visited.rend(); ++visited_pose)
+	{
+		const Result result = check_pose(visited_pose->first, visited_pose->second);
+		if (result.found)
+			return result;
+	}
+	return {};
+}
+
 }  // namespace
 
 Result Solve(
@@ -232,6 +487,8 @@ Result Solve(
 		if (exact.found || options.exact_only)
 			return exact;
 	}
+	if (options.use_weighted_cost)
+		return SolveWeighted(scene, state, group, tool, target, start, options);
 	const int iters = options.iters;
 	const double margin = options.margin;
 	const double rot_scale = options.rot_scale;
@@ -244,15 +501,11 @@ Result Solve(
 	const int dof = static_cast<int>(group->getVariableCount());
 	const collision_detection::DistanceRequest req = CloseRequest(state, group, margin);
 
-	std::vector<double> lower(static_cast<size_t>(dof)), upper(static_cast<size_t>(dof));
-	for (size_t k = 0; k < lower.size(); ++k)
-	{
-		const moveit::core::VariableBounds& b = state.getRobotModel()->getVariableBounds(group->getVariableNames()[k]);
-		lower[k] = b.position_bounded_ ? b.min_position_ : -std::numeric_limits<double>::max();
-		upper[k] = b.position_bounded_ ? b.max_position_ : std::numeric_limits<double>::max();
-	}
+	std::vector<double> lower, upper;
+	GetJointBounds(state, group, lower, upper);
 
 	const std::set<std::string> tool_side = ToolSideLinks(tool);
+	const std::set<std::string> camera_links = GetCameraLinks(tool);
 	std::vector<double> q = start;
 	Result best;
 	std::vector<double> best_gap_history;
@@ -262,13 +515,15 @@ Result Solve(
 		state.update();
 		const scene_geometry::Vector6d pose_error = GetPoseError(target, state.getGlobalLinkTransform(tool), options.ignore_roll);
 		const double gap = scene_geometry::PoseGap(pose_error, rot_scale);
-		const ClosePairs pairs = FindClosePairs(scene, state, group, req, margin);
+		// With camera_can_enter_object the camera's pairs with the object neither push the step nor make a pose invalid.
+		const ClosePairs found_pairs = FindClosePairs(scene, state, group, req, margin);
+		const ClosePairs pairs = options.camera_can_enter_object ? DropCameraObjectPairs(found_pairs, camera_links) : found_pairs;
 		// The full validity check, not just the distance query, which lets self-collisions near the base through.
-		if (gap < best.gap && scene_geometry::IsStateValid(scene, &state, group, q.data()) &&
-			ClearPathToTarget(scene, state, tool, target.translation(), tool_side))
+		const bool valid = options.camera_can_enter_object ? IsStateValidWithCameraInObject(scene, state, group, q, camera_links) : scene_geometry::IsStateValid(scene, &state, group, q.data());
+		if (gap < best.gap && valid && ClearPathToTarget(scene, state, tool, target.translation(), tool_side, options.camera_can_enter_object))
 		{
-			// Exact only with the exact poses' arm clearance too, as the exact stage requires.
-			const bool exact = IsWithinExactTolerance(pose_error, options) && (options.exact_margin <= 0.0 || HasArmClearance(scene, state, group, tool, options.exact_margin));
+			// Exact only with the exact poses' arm clearance too, as the exact stage requires, and the camera outside the object.
+			const bool exact = IsWithinExactTolerance(pose_error, options) && (options.exact_margin <= 0.0 || HasArmClearance(scene, state, group, tool, options.exact_margin)) && (!options.camera_can_enter_object || scene_geometry::IsStateValid(scene, &state, group, q.data()));
 			best = {true, exact, pose_error, gap, q};
 			if (gap < 1e-6)
 				break;

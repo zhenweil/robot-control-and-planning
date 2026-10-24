@@ -311,6 +311,16 @@ private:
 		closest_ik::Options ik_options;
 		ik_options.iters = static_cast<int>(this->getParameter<int64_t>("closest_ik_iters", 60));
 		ik_options.margin = this->getParameter<double>("closest_ik_margin", 0.02);
+		ik_options.camera_can_enter_object = this->getParameter<bool>("camera_can_enter_object", false);
+		ik_options.use_weighted_cost = this->getParameter<bool>("closest_ik_weighted_cost", false);
+		ik_options.weighted_iters = static_cast<int>(this->getParameter<int64_t>("closest_ik_weighted_iters", 20));
+		ik_options.position_weight = this->getParameter<double>("closest_ik_position_weight", 1.0);
+		ik_options.angle_weight = this->getParameter<double>("closest_ik_angle_weight", 0.01);
+		ik_options.collision_weight = this->getParameter<double>("closest_ik_collision_weight", 1.0);
+		ik_options.camera_object_weight = this->getParameter<double>("closest_ik_camera_object_weight", 1.0);
+		ik_options.self_distance_weight = this->getParameter<double>("closest_ik_self_distance_weight", 0.0);
+		ik_options.self_distance_margin = this->getParameter<double>("closest_ik_self_distance_margin", 0.08);
+		ik_options.joint_room_weight = this->getParameter<double>("closest_ik_joint_room_weight", 1e-3);
 		ik_options.rot_scale = this->getParameter<double>("rot_metric_scale", 0.1);
 		ik_options.limit_sharpness = this->getParameter<double>("manipulability_limit_sharpness", 20.0);
 		ik_options.ignore_roll = this->getParameter<bool>("ignore_camera_roll", false);
