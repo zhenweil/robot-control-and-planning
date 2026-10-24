@@ -25,12 +25,12 @@
     closest_ik_weighted_cost: true        # closest IK lowers one weighted cost (below) instead of the priority steps
     closest_ik_weighted_iters: 20         # steps per weighted closest-IK solve
     closest_ik_position_weight: 1.0       # per m^2 of position error to the viewpoint
-    closest_ik_angle_weight: 1.0          # per rad^2 of angle error to the viewpoint
+    closest_ik_angle_weight: 0.01          # per rad^2 of angle error to the viewpoint
     closest_ik_collision_weight: 1.0      # per m^2 a close pair is short of closest_ik_margin
     closest_ik_camera_object_weight: 0.0  # the same for camera vs object (0: free to go in)
     closest_ik_self_distance_weight: 0.0  # per m^2 the arm's own link pairs are short of the margin below (keeps it unfolded)
     closest_ik_self_distance_margin: 0.08 # m
-    closest_ik_joint_room_weight: 0.001   # per joint: x s^2/(1-s^2), s = share of the half range from the middle (steep near a limit)
+    closest_ik_joint_room_weight: 0.0001   # per joint: x s^2/(1-s^2), s = share of the half range from the middle (steep near a limit)
     rot_metric_scale: 0.1                 # m per rad: weighs a gap's angle against its distance
     manipulability_limit_sharpness: 20.0  # closest IK: joints near a limit count less in manipulability
     ignore_camera_roll: false             # the camera's spin about its axis is free

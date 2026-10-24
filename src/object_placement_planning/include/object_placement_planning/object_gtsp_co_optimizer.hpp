@@ -5,9 +5,12 @@
 // object is moved. Each pose follows the object by IK from its last pose, so it keeps its posture. Repeats until nothing
 // changes.
 
+#include <map>
 #include <chrono>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <utility>
 #include <string>
@@ -61,6 +64,23 @@ struct ReconfigurationPostureMatch
 	double angle_error = 0.0;  // rad
 	double clearance_shortfall = 0.0;  // m, its clearance part
 	bool exact = false;
+	bool is_later_viewpoint = true;  // true: the edge's later viewpoint solved from the earlier one's pose; false: the reverse
+};
+
+// One posture-match IK solve, kept so a repeat (same object position, viewpoint and start pose) is not solved again.
+struct PostureMatchSolve
+{
+	closest_ik::Result result;
+	double clearance_shortfall = 0.0;  // m
+};
+
+// Posture swaps made during the run, by direction and by what they did (for the log).
+struct PostureSwapCounts
+{
+	int later_from_earlier_removed = 0;	 // later viewpoint solved from the earlier pose, removed a reconfiguration
+	int later_from_earlier_closer = 0;	 // the same, brought a missed viewpoint closer
+	int earlier_from_later_removed = 0;
+	int earlier_from_later_closer = 0;
 };
 
 // One evaluated spot: poses, tour order, and the reconfiguration edges still left with their posture gaps.
@@ -250,6 +270,11 @@ private:
 	unsigned int num_threads = 1;
 	std::set<std::string> camera_side_links;
 	std::chrono::steady_clock::time_point start_time;
+	PostureSwapCounts posture_swap_counts;
+	// Posture-match solves at one object position, keyed by (viewpoint, start pose); cleared when the object moves.
+	std::map<std::pair<size_t, Joints>, PostureMatchSolve> posture_match_cache;
+	Eigen::Vector3d posture_match_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+	std::mutex posture_match_cache_mutex;
 
 	// Visualization
 	std::string mesh_path;  // object mesh for the progress markers

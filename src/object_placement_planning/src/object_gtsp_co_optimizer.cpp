@@ -157,7 +157,8 @@ void Optimizer::improveOrderAndPosturesWithObjectFixed(ObjectPositionEvaluation&
 	since = std::chrono::steady_clock::now();
 	this->updateWeightedTotalCost(reordered_evaluation, miss_gap_penalty);
 	cost_seconds += get_seconds_since(since);
-	RCLCPP_INFO(this->node->get_logger(), "  tour work: posture matches %.2f s, GTSP %.2f s, cost with blocked-edge checks %.2f s", posture_match_seconds, gtsp_seconds, cost_seconds);
+	const PostureSwapCounts& swaps = this->posture_swap_counts;
+	RCLCPP_INFO(this->node->get_logger(), "  tour work: posture matches %.2f s, GTSP %.2f s, cost with blocked-edge checks %.2f s; posture swaps so far: later from earlier %d removed / %d closer, earlier from later %d removed / %d closer", posture_match_seconds, gtsp_seconds, cost_seconds, swaps.later_from_earlier_removed, swaps.later_from_earlier_closer, swaps.earlier_from_later_removed, swaps.earlier_from_later_closer);
 	// Reach first: more viewpoints reached wins; at equal reach the lower weighted total cost.
 	const bool reordered_reaches_more = reordered_evaluation.viewpoint_ik.num_reached > evaluation.viewpoint_ik.num_reached;
 	const bool reordered_cheaper = reordered_evaluation.viewpoint_ik.num_reached == evaluation.viewpoint_ik.num_reached && reordered_evaluation.weighted_total_cost < evaluation.weighted_total_cost;
@@ -1047,6 +1048,10 @@ void Optimizer::swapInReconfigurationPostureMatches(ObjectPositionEvaluation& ev
 			const bool closer_miss = !viewpoint_ik.reached[match.viewpoint_index] && !match.exact && match.gap < viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].gap && reconfigurations_after <= reconfigurations_before;
 			if (!removes_reconfiguration && !closer_miss)
 				continue;
+			if (match.is_later_viewpoint)
+				(removes_reconfiguration ? this->posture_swap_counts.later_from_earlier_removed : this->posture_swap_counts.later_from_earlier_closer) += 1;
+			else
+				(removes_reconfiguration ? this->posture_swap_counts.earlier_from_later_removed : this->posture_swap_counts.earlier_from_later_closer) += 1;
 			viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].q = match.pose_in_neighbor_posture;
 			if (match.exact && !viewpoint_ik.reached[match.viewpoint_index])
 			{
@@ -1078,6 +1083,11 @@ std::vector<ReconfigurationPostureMatch> Optimizer::findReconfigurationPostureMa
 	if (reconfiguration_edges.empty())
 		return {};
 	scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(viewpoint_ik.position, this->object_rotation));
+	if (!(this->posture_match_cache_position == viewpoint_ik.position))
+	{
+		this->posture_match_cache.clear();
+		this->posture_match_cache_position = viewpoint_ik.position;
+	}
 	const unsigned int num_workers = std::min(this->num_threads, static_cast<unsigned int>(reconfiguration_edges.size()));
 	std::vector<std::thread> threads;
 	for (unsigned int thread_index = 0; thread_index < num_workers; ++thread_index)
@@ -1095,13 +1105,33 @@ std::vector<ReconfigurationPostureMatch> Optimizer::findReconfigurationPostureMa
 					posture_options.push_back({static_cast<size_t>(order[tour_position - 1]), &viewpoint_ik.chosen_ik_per_viewpoint[to_viewpoint].q});
 				for (const std::pair<size_t, const Joints*>& posture_option : posture_options)
 				{
-					const Eigen::Isometry3d target = scene_geometry::Translation(viewpoint_ik.position) * this->viewpoints[posture_option.first];
-					closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, *posture_option.second, this->ik_settings.exact_options);
-					if (!result.exact)
-						result = this->solveSmallestGapIk(thread_state, target, {*posture_option.second});
+					// The same viewpoint from the same start pose at this object position gives the same answer: solve it once.
+					const std::pair<size_t, Joints> cache_key(posture_option.first, *posture_option.second);
+					PostureMatchSolve solve;
+					bool is_cached = false;
+					{
+						std::lock_guard<std::mutex> lock(this->posture_match_cache_mutex);
+						const auto cached = this->posture_match_cache.find(cache_key);
+						if (cached != this->posture_match_cache.end())
+						{
+							solve = cached->second;
+							is_cached = true;
+						}
+					}
+					if (!is_cached)
+					{
+						const Eigen::Isometry3d target = scene_geometry::Translation(viewpoint_ik.position) * this->viewpoints[posture_option.first];
+						solve.result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, *posture_option.second, this->ik_settings.exact_options);
+						if (!solve.result.exact)
+							solve.result = this->solveSmallestGapIk(thread_state, target, {*posture_option.second});
+						solve.clearance_shortfall = solve.result.found && !solve.result.exact ? this->getClearanceShortfall(thread_state, solve.result.q) : 0.0;
+						std::lock_guard<std::mutex> lock(this->posture_match_cache_mutex);
+						this->posture_match_cache[cache_key] = solve;
+					}
+					const closest_ik::Result& result = solve.result;
 					if (!result.found || this->isReconfiguration(*posture_option.second, result.q))
 						continue;
-					const double clearance_shortfall = result.exact ? 0.0 : this->getClearanceShortfall(thread_state, result.q);
+					const double clearance_shortfall = solve.clearance_shortfall;
 					const double gap = result.exact ? 0.0 : scene_geometry::PoseGap(result.pose_error, this->ik_settings.closest_options.rot_scale) + clearance_shortfall;
 					if (found_per_edge[edge_index] && gap >= matches[edge_index].gap)
 						continue;
@@ -1114,6 +1144,7 @@ std::vector<ReconfigurationPostureMatch> Optimizer::findReconfigurationPostureMa
 					matches[edge_index].clearance_shortfall = clearance_shortfall;
 					matches[edge_index].angle_error = result.exact ? 0.0 : result.pose_error.tail<3>().norm();
 					matches[edge_index].exact = result.exact;
+					matches[edge_index].is_later_viewpoint = posture_option.first == to_viewpoint;
 				}
 			}
 		});
