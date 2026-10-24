@@ -128,7 +128,7 @@ std::set<std::string> ToolSideLinks(const moveit::core::LinkModel* tool)
 // between can't slide onto the viewpoint, so its gap and slope would mislead.
 bool ClearPathToTarget(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state,
-	const moveit::core::LinkModel* tool, const Eigen::Vector3d& target, const std::set<std::string>& tool_side, bool ignore_object)
+	const moveit::core::LinkModel* tool, const Eigen::Vector3d& target, const std::set<std::string>& tool_side)
 {
 	const Eigen::Vector3d local = state.getGlobalLinkTransform(tool).inverse() * target;
 	const double length = local.norm();
@@ -146,10 +146,7 @@ bool ClearPathToTarget(
 	collision_detection::CollisionResult res;
 	{
 		planning_scene_monitor::LockedPlanningSceneRO locked(scene);
-		collision_detection::AllowedCollisionMatrix acm = locked->getAllowedCollisionMatrix();
-		if (ignore_object)
-			acm.setEntry(id, "object", true);
-		locked->checkCollision(req, res, state, acm);
+		locked->checkCollision(req, res, state);
 	}
 	state.clearAttachedBody(id);
 	return !res.collision;
@@ -216,39 +213,6 @@ bool IsCameraObjectPair(const std::string& pair_name, const std::set<std::string
 	const std::string first = pair_name.substr(0, split);
 	const std::string second = pair_name.substr(split + 3);
 	return (first == "object" && camera_links.count(second)) || (second == "object" && camera_links.count(first));
-}
-
-ClosePairs DropCameraObjectPairs(const ClosePairs& pairs, const std::set<std::string>& camera_links)
-{
-	ClosePairs kept;
-	for (size_t pair_index = 0; pair_index < pairs.names.size(); ++pair_index)
-	{
-		if (IsCameraObjectPair(pairs.names[pair_index], camera_links))
-			continue;
-		kept.gradients.push_back(pairs.gradients[pair_index]);
-		kept.dists.push_back(pairs.dists[pair_index]);
-		kept.object_slopes.push_back(pairs.object_slopes[pair_index]);
-		kept.names.push_back(pairs.names[pair_index]);
-	}
-	return kept;
-}
-
-// The validity check with the camera allowed inside the object; every other collision still counts.
-bool IsStateValidWithCameraInObject(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const std::vector<double>& q, const std::set<std::string>& camera_links)
-{
-	state.setJointGroupPositions(group, q);
-	state.update();
-	if (!state.satisfiesBounds(group))
-		return false;
-	planning_scene_monitor::LockedPlanningSceneRO locked(scene);
-	collision_detection::AllowedCollisionMatrix acm = locked->getAllowedCollisionMatrix();
-	for (const std::string& link : camera_links)
-		acm.setEntry("object", link, true);
-	collision_detection::CollisionRequest req;
-	req.group_name = group->getName();
-	collision_detection::CollisionResult res;
-	locked->checkCollision(req, res, state, acm);
-	return !res.collision;
 }
 
 // Exact stage, like KDL: full damped Newton steps on the pose error, no collision terms; one validity check once within
@@ -403,14 +367,13 @@ Result SolveWeighted(const planning_scene_monitor::PlanningSceneMonitorPtr& scen
 	const std::set<std::string> tool_side = ToolSideLinks(tool);
 	const std::set<std::string> camera_links = GetCameraLinks(tool);
 	const Eigen::Index dof = static_cast<Eigen::Index>(start.size());
-	// The kept-pose checks: valid (camera in the object if allowed), clear path, and whether it is exact.
+	// The kept-pose checks: valid, clear path, and whether it is exact.
 	auto check_pose = [&](const std::vector<double>& q, const WeightedCost& cost) {
 		const auto check_start = std::chrono::steady_clock::now();
 		Result result;
-		const bool valid = options.camera_can_enter_object ? IsStateValidWithCameraInObject(scene, state, group, q, camera_links) : scene_geometry::IsStateValid(scene, &state, group, q.data());
-		if (valid && ClearPathToTarget(scene, state, tool, target.translation(), tool_side, options.camera_can_enter_object))
+		if (scene_geometry::IsStateValid(scene, &state, group, q.data()) && ClearPathToTarget(scene, state, tool, target.translation(), tool_side))
 		{
-			const bool exact = IsWithinExactTolerance(cost.pose_error, options) && (options.exact_margin <= 0.0 || HasArmClearance(scene, state, group, tool, options.exact_margin)) && (!options.camera_can_enter_object || scene_geometry::IsStateValid(scene, &state, group, q.data()));
+			const bool exact = IsWithinExactTolerance(cost.pose_error, options) && (options.exact_margin <= 0.0 || HasArmClearance(scene, state, group, tool, options.exact_margin));
 			result = {true, exact, cost.pose_error, scene_geometry::PoseGap(cost.pose_error, options.rot_scale), q, cost.total};
 		}
 		timing.check_microseconds += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - check_start).count();
@@ -505,7 +468,6 @@ Result Solve(
 	GetJointBounds(state, group, lower, upper);
 
 	const std::set<std::string> tool_side = ToolSideLinks(tool);
-	const std::set<std::string> camera_links = GetCameraLinks(tool);
 	std::vector<double> q = start;
 	Result best;
 	std::vector<double> best_gap_history;
@@ -515,15 +477,13 @@ Result Solve(
 		state.update();
 		const scene_geometry::Vector6d pose_error = GetPoseError(target, state.getGlobalLinkTransform(tool), options.ignore_roll);
 		const double gap = scene_geometry::PoseGap(pose_error, rot_scale);
-		// With camera_can_enter_object the camera's pairs with the object neither push the step nor make a pose invalid.
-		const ClosePairs found_pairs = FindClosePairs(scene, state, group, req, margin);
-		const ClosePairs pairs = options.camera_can_enter_object ? DropCameraObjectPairs(found_pairs, camera_links) : found_pairs;
+		const ClosePairs pairs = FindClosePairs(scene, state, group, req, margin);
 		// The full validity check, not just the distance query, which lets self-collisions near the base through.
-		const bool valid = options.camera_can_enter_object ? IsStateValidWithCameraInObject(scene, state, group, q, camera_links) : scene_geometry::IsStateValid(scene, &state, group, q.data());
-		if (gap < best.gap && valid && ClearPathToTarget(scene, state, tool, target.translation(), tool_side, options.camera_can_enter_object))
+		if (gap < best.gap && scene_geometry::IsStateValid(scene, &state, group, q.data()) &&
+			ClearPathToTarget(scene, state, tool, target.translation(), tool_side))
 		{
-			// Exact only with the exact poses' arm clearance too, as the exact stage requires, and the camera outside the object.
-			const bool exact = IsWithinExactTolerance(pose_error, options) && (options.exact_margin <= 0.0 || HasArmClearance(scene, state, group, tool, options.exact_margin)) && (!options.camera_can_enter_object || scene_geometry::IsStateValid(scene, &state, group, q.data()));
+			// Exact only with the exact poses' arm clearance too, as the exact stage requires.
+			const bool exact = IsWithinExactTolerance(pose_error, options) && (options.exact_margin <= 0.0 || HasArmClearance(scene, state, group, tool, options.exact_margin));
 			best = {true, exact, pose_error, gap, q};
 			if (gap < 1e-6)
 				break;

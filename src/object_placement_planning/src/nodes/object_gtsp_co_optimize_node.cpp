@@ -311,7 +311,6 @@ private:
 		closest_ik::Options ik_options;
 		ik_options.iters = static_cast<int>(this->getParameter<int64_t>("closest_ik_iters", 60));
 		ik_options.margin = this->getParameter<double>("closest_ik_margin", 0.02);
-		ik_options.camera_can_enter_object = this->getParameter<bool>("camera_can_enter_object", false);
 		ik_options.use_weighted_cost = this->getParameter<bool>("closest_ik_weighted_cost", false);
 		ik_options.weighted_iters = static_cast<int>(this->getParameter<int64_t>("closest_ik_weighted_iters", 20));
 		ik_options.position_weight = this->getParameter<double>("closest_ik_position_weight", 1.0);

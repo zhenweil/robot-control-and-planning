@@ -50,10 +50,10 @@ ClosePairs FindClosePairs(
 // Links rigid with the tool, plus what hangs off them (hand, fingers).
 std::set<std::string> ToolSideLinks(const moveit::core::LinkModel* tool);
 
-// True if a 1 cm rod from the tool to the target hits nothing (tool side excepted, and the object if ignore_object).
+// True if a 1 cm rod from the tool to the target hits nothing (tool side excepted).
 bool ClearPathToTarget(
 	const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state,
-	const moveit::core::LinkModel* tool, const Eigen::Vector3d& target, const std::set<std::string>& tool_side, bool ignore_object = false);
+	const moveit::core::LinkModel* tool, const Eigen::Vector3d& target, const std::set<std::string>& tool_side);
 
 struct Options
 {
@@ -63,7 +63,6 @@ struct Options
 	double limit_sharpness = 20.0;	 // manipulability's joint-limit falloff
 	bool ignore_roll = false;		 // the tool's spin about its z axis (the camera axis) is free
 	bool try_exact_first = true;	 // exact stage first: plain damped Newton steps, one validity check at the end
-	bool camera_can_enter_object = false;  // closest stage: the camera may go into the object (exact poses still may not)
 	// Weighted closest stage: one cost, no priorities. Each term is weight x squared shortfall.
 	bool use_weighted_cost = false;
 	int weighted_iters = 20;			   // steps of the weighted closest stage

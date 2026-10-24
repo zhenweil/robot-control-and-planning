@@ -103,6 +103,16 @@ public:
 		ik_options.ignore_roll = this->GetParameter<bool>("ignore_camera_roll", false);
 		ik_options.exact_margin = this->GetParameter<double>("exact_ik_margin", 0.0);
 		ik_options.try_exact_first = true;
+		// The same closest IK as object_gtsp_co_optimize, so the comparison is between the methods only.
+		ik_options.use_weighted_cost = this->GetParameter<bool>("closest_ik_weighted_cost", false);
+		ik_options.weighted_iters = static_cast<int>(this->GetParameter<int64_t>("closest_ik_weighted_iters", 20));
+		ik_options.position_weight = this->GetParameter<double>("closest_ik_position_weight", 1.0);
+		ik_options.angle_weight = this->GetParameter<double>("closest_ik_angle_weight", 0.01);
+		ik_options.collision_weight = this->GetParameter<double>("closest_ik_collision_weight", 1.0);
+		ik_options.camera_object_weight = this->GetParameter<double>("closest_ik_camera_object_weight", 1.0);
+		ik_options.self_distance_weight = this->GetParameter<double>("closest_ik_self_distance_weight", 0.0);
+		ik_options.self_distance_margin = this->GetParameter<double>("closest_ik_self_distance_margin", 0.08);
+		ik_options.joint_room_weight = this->GetParameter<double>("closest_ik_joint_room_weight", 1e-3);
 		// Adam (Kingma and Ba, 2015) on the object position; the paper tunes these with Optuna, values not published.
 		const double time_budget = this->GetParameter<double>("sgd_time_budget_sec", 300.0);
 		const int max_steps = static_cast<int>(this->GetParameter<int64_t>("sgd_max_steps", 50));	// per restart
