@@ -1,7 +1,7 @@
 #pragma once
 // Object placement in one descent (object_gtsp_co_optimize). Each iteration: a reach step moves the object to reach more
 // viewpoints (room-then-reach when it loses reached ones); then, for the tour (length + reconfigurations, joints kept off
-// their limits), IK is re-solved with the object held still (self-motion slides, GTSP reorder, posture swaps) and the
+// their limits), IK is re-solved with the object held still (self-motion slides, GTSP reorder, straight camera paths) and the
 // object is moved. Each pose follows the object by IK from its last pose, so it keeps its posture. Repeats until nothing
 // changes.
 
@@ -52,60 +52,15 @@ struct ViewpointIkAtPosition
 	std::vector<std::vector<ClosestIkCandidate>> closest_ik_candidates;  // per missed viewpoint: closest poses GTSP may choose from
 };
 
-// One reconfiguration edge's posture gap: `viewpoint_index`'s closest pose started from `neighbor_pose` (its tour neighbour
-// across the edge), i.e. the viewpoint in the neighbour's arm posture. Exact = the reconfiguration can be removed by swapping.
-struct ReconfigurationPostureMatch
-{
-	size_t viewpoint_index = 0;
-	Joints neighbor_pose;
-	Joints pose_in_neighbor_posture;
-	Eigen::Vector3d position_error = Eigen::Vector3d::Zero();
-	double gap = 0.0;  // m, as the reach gaps (position, angle, clearance shortfall)
-	double angle_error = 0.0;  // rad
-	double clearance_shortfall = 0.0;  // m, its clearance part
-	bool exact = false;
-	bool is_later_viewpoint = true;  // true: the edge's later viewpoint solved from the earlier one's pose; false: the reverse
-};
-
-// One posture-match IK solve, kept so a repeat (same object position, viewpoint and start pose) is not solved again.
-struct PostureMatchSolve
-{
-	closest_ik::Result result;
-	double clearance_shortfall = 0.0;  // m
-};
-
-// Posture swaps made during the run, by direction and by what they did (for the log).
-struct PostureSwapCounts
-{
-	int later_from_earlier_removed = 0;	 // later viewpoint solved from the earlier pose, removed a reconfiguration
-	int later_from_earlier_closer = 0;	 // the same, brought a missed viewpoint closer
-	int earlier_from_later_removed = 0;
-	int earlier_from_later_closer = 0;
-};
-
-// Posture-match IK solves so far, by outcome, with their summed thread seconds (for the log).
-struct PostureMatchTiming
-{
-	int cached = 0;  // answered from the cache, not solved
-	int exact_found = 0;  // exact IK from the neighbour pose succeeded
-	int exact_failed = 0;  // it failed, so closest IK ran after
-	int closest_usable = 0;  // of those, the closest pose kept the neighbour's posture
-	double exact_found_seconds = 0.0;
-	double exact_failed_seconds = 0.0;
-	double closest_seconds = 0.0;
-};
-
-// One evaluated spot: poses, tour order, and the reconfiguration edges still left with their posture gaps.
+// One evaluated spot: poses and tour order.
 struct ObjectPositionEvaluation
 {
 	ViewpointIkAtPosition viewpoint_ik;
 	std::vector<int> order;	 // viewpoint visit order
-	std::vector<ReconfigurationPostureMatch> matches;  // per remaining reconfiguration edge
 
 	int num_blocked_edges = 0;  // tour edges whose straight move collides
-	int num_reconfigurations = 0;
+	int num_reconfigurations = 0;  // tour edges the arm can't follow along the straight camera path
 	double room_shortfall = 0.0;  // rad^2: summed squared shortfall of joint room below room_band, over all poses
-	double posture_gap_sum = 0.0;  // m	
 	double smallest_margin = 0.0;  // rad beyond the hard limit, over the reached poses
 	double joint_travel_cost = 0.0;	 // GTSP edge cost summed from home (tour length in rad with joint_distance_weight 1)
 	double weighted_total_cost = 0.0; // Joint_travel_cost+miss_cost+gap_cost+reconfiguration_cost+joint_room
@@ -125,7 +80,6 @@ struct MethodSwitches
 {
 	bool use_room = true;  // room tries for blocked misses, and room-then-reach for viewpoints a reach step loses
 	bool use_neighbor_ik = true;  // reorders also offer IK from each pose's tour neighbours
-	bool use_posture_match = true;  // reconfiguration edges pull the object and swap poses
 	bool use_slide = true;  // poses slide along their self-motion
 	bool tour_object_move = true;  // false = the object moves only for reach
 	bool freeze_object_when_reached = false;  // true = the object stays put once every viewpoint is reached
@@ -139,7 +93,6 @@ struct CostWeights
 	double penalty_growth = 10.0;
 	double max_penalty = 1e5;
 	double reconfiguration_cost = 2.0;  // cost per reconfiguration
-	double reconfiguration_weight = 10.0;  // cost per m of posture gap
 	double joint_room_band = 0.2;  // rad beyond the hard limit a joint should keep
 	double joint_room_weight = 50.0;  // cost per rad^2 of room shortfall
 	double blocked_edge_charge = 4.0;  // x edge length extra for a blocked edge with no free detour through home; 0 = off
@@ -154,6 +107,7 @@ struct StepSizes
 	int max_line_search_tries = 4;  // tries per sub-step
 	double initial_slide_step = 0.3;  // rad, largest pose slide
 	double slide_joint_margin = 0.05;  // rad a slide stays from each (hard) joint limit
+	double min_slide_gain = 0.05;  // a pose slide is kept only if the cost drops by more than this
 };
 
 struct IkSettings
@@ -173,8 +127,14 @@ struct TourSettings
 {
 	joint_travel::EdgeWeights edge_weights;  // the joint speed limits are filled in by the optimizer
 	int two_opt_rounds = 5;
-	double reconfig_threshold = 1.0;  // rad: a move turning any joint (the last aside) more than this is a reconfiguration
-	int gtsp_blocked_rounds = 2;  // GTSP re-solves charging blocked edges
+	// Reconfiguration: the arm can't follow the camera on a straight line (position) with an even turn (angle) from one
+	// viewpoint's pose to the next, one Jacobian update per step and exact IK at the end, without a joint jump, a joint near
+	// its limit or a collision.
+	double path_check_position_step = 0.01;  // m of camera travel per step
+	double path_check_angle_step = 0.035;  // rad of camera turn per step
+	double path_check_max_joint_jump = 0.2;  // rad: a larger change of any joint in one step is a flip
+	double path_check_joint_margin = 0.05;  // rad: a step this near a (hard) joint limit fails
+	int gtsp_blocked_rounds = 2;  // GTSP re-solves charging blocked and reconfiguration edges
 	int num_reference_postures = 4;  // fixed random arm postures; each reached viewpoint's IK from them is a GTSP candidate (0 = off)
 };
 
@@ -244,17 +204,16 @@ private:
 	std::vector<closest_ik::Result> solveClosestIkFromStarts(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts);
 
 	// Tour order and reconfigurations
-	bool isReconfiguration(const Joints& from, const Joints& to) const;
-	void swapInReconfigurationPostureMatches(ObjectPositionEvaluation& evaluation);
+	bool followStraightCameraPath(moveit::core::RobotState& state, const Joints& from_pose, const Joints& to_pose, Joints& arrival_pose);
+	int followTourAlongStraightCameraPaths(ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order);
+	void bringMissesCloserFromNeighbors(ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order);
+	std::vector<size_t> getReconfigurationEdges(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order, std::vector<Joints>* arrival_poses = nullptr);
 	void unwrapFullTurnJointsToward(Joints& pose, const Joints& reference) const;
 	int findCandidateIndex(const std::vector<Joints>& candidates, const Joints& pose) const;
 	std::vector<int> reorderTourWithGtsp(ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order);
-	int countReconfigurations(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
 	void unwrapFullTurnJointsAlongTour(ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
 	bool isStraightJointMoveCollisionFree(moveit::core::RobotState& state, const Joints& from_pose, const Joints& to_pose) const;
-	int countReconfigurationsAround(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order, size_t tour_position, const Joints& pose) const;
 	std::vector<std::pair<size_t, double>> getBlockedEdgeDetourCharges(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order);
-	std::vector<ReconfigurationPostureMatch> findReconfigurationPostureMatches(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order);
 
 	// Logging
 	void logMissedViewpoints(const ViewpointIkAtPosition& viewpoint_ik);
@@ -284,12 +243,10 @@ private:
 	unsigned int num_threads = 1;
 	std::set<std::string> camera_side_links;
 	std::chrono::steady_clock::time_point start_time;
-	PostureSwapCounts posture_swap_counts;
-	// Posture-match solves at one object position, keyed by (viewpoint, start pose); cleared when the object moves.
-	std::map<std::pair<size_t, Joints>, PostureMatchSolve> posture_match_cache;
-	Eigen::Vector3d posture_match_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
-	std::mutex posture_match_cache_mutex;
-	PostureMatchTiming posture_match_timing;  // guarded by posture_match_cache_mutex
+	// Straight camera path results at one object position, keyed by (from pose, to pose): (followed, arrival pose); cleared when the object moves.
+	std::map<std::pair<Joints, Joints>, std::pair<bool, Joints>> straight_path_cache;
+	Eigen::Vector3d straight_path_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+	std::mutex straight_path_cache_mutex;
 
 	// Visualization
 	std::string mesh_path;  // object mesh for the progress markers

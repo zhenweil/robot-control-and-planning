@@ -41,9 +41,14 @@
     travel_time_weight: 0.0               # GTSP edge cost per second of a straight move (0: time not optimized)
     gtsp_two_opt_rounds: 5
     co_blocked_edge_charge: 4.0           # a blocked edge costs its detour through home if that is free, else this x its length extra (0 = off)
-    co_gtsp_blocked_rounds: 2             # GTSP re-solves with the chosen blocked edges charged
+    co_gtsp_blocked_rounds: 2             # GTSP re-solves with the chosen blocked and reconfiguration edges charged
     gtsp_reference_postures: 4            # fixed random arm postures: each reached viewpoint's IK from them is also a GTSP candidate (0 = off)
-    reconfig_threshold: 1.0               # rad: a move turning any joint (joint 7 aside) more than this is a reconfiguration
+    # Reconfiguration: an edge the arm can't follow with the camera on a straight line and an even turn (one Jacobian update per
+    # step, exact IK at the end; no joint jump, joint near its limit or collision on the way). Otherwise the next viewpoint takes the arrival pose.
+    path_check_position_step: 0.01        # m of camera travel per step
+    path_check_angle_step: 0.035          # rad of camera turn per step
+    path_check_max_joint_jump: 0.2        # rad: a larger change of any joint in one step is a flip
+    path_check_joint_margin: 0.05         # rad: a step this near a (hard) joint limit fails
 
     # Final check of the result (measures only, changes nothing): planned length, and time for reference
     real_cost_planning_time: 0.5          # s per OMPL attempt on an edge
@@ -72,9 +77,7 @@
 
     # Reconfigurations
     co_neighbor_ik: true                  # reorders also try IK from each pose's tour neighbours
-    co_posture_match: true                # reconfiguration edges pull the object and swap poses
     co_reconfiguration_cost: 2.0          # cost per reconfiguration
-    co_reconfiguration_weight: 10.0       # cost per m of posture gap
 
     # Joints kept off their limits
     co_joint_room_band: 0.05              # rad beyond the hard limit each joint should keep
@@ -84,6 +87,7 @@
     co_slide: true                        # each step also slides poses along their self-motion
     co_initial_slide_step: 0.3            # rad: largest pose slide at co_initial_step
     co_slide_joint_margin: 0.05           # rad a slide stays from each (hard) joint limit
+    co_min_slide_gain: 0.05               # a pose slide is kept only if the cost drops by more than this
 
     # Ablation switches
     co_tour_object_move: true             # false: the object moves only for reach, never for the tour

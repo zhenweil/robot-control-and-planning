@@ -160,9 +160,7 @@ public:
 			const bool edge_ok = k < edge_times.size() && edge_times[k] >= 0.0;
 			planned_time += edge_ok ? edge_times[k] : joint_travel::StraightMoveTime(k == 0 ? home_pose : tour_poses[k - 1], tour_poses[k], edge_weights.max_velocity, edge_weights.max_acceleration) + unreachable_penalty;
 		}
-		std::vector<Joints> poses_from_home = tour_poses;
-		poses_from_home.insert(poses_from_home.begin(), home_pose);
-		const int num_reconfigurations = joint_travel::CountReconfigs(poses_from_home, tour_settings.reconfig_threshold, counted_joints);
+		const int num_reconfigurations = best.num_reconfigurations;  // edges the arm can't follow on the straight camera path
 		const double smallest_margin = optimizer.getSmallestJointMargin(tour_poses);
 		const double seconds = GetElapsedSeconds();
 		if (all_reached)
@@ -268,7 +266,6 @@ private:
 		object_gtsp_co_optimize::MethodSwitches method_switches;
 		method_switches.use_room = this->getParameter<bool>("co_room", true);
 		method_switches.use_neighbor_ik = this->getParameter<bool>("co_neighbor_ik", true);
-		method_switches.use_posture_match = this->getParameter<bool>("co_posture_match", true);
 		method_switches.use_slide = this->getParameter<bool>("co_slide", true);
 		method_switches.tour_object_move = this->getParameter<bool>("co_tour_object_move", true);
 		method_switches.freeze_object_when_reached = this->getParameter<bool>("co_freeze_object_when_reached", false);
@@ -284,7 +281,6 @@ private:
 		cost_weights.max_penalty = this->getParameter<double>("co_max_penalty", 1e5);
 		cost_weights.miss_cost = this->getParameter<double>("co_miss_cost", 10.0);
 		cost_weights.reconfiguration_cost = this->getParameter<double>("co_reconfiguration_cost", 2.0);
-		cost_weights.reconfiguration_weight = this->getParameter<double>("co_reconfiguration_weight", 10.0);
 		cost_weights.blocked_edge_charge = this->getParameter<double>("co_blocked_edge_charge", 4.0);
 		cost_weights.joint_room_band = this->getParameter<double>("co_joint_room_band", 0.2);
 		cost_weights.joint_room_weight = this->getParameter<double>("co_joint_room_weight", 50.0);
@@ -301,6 +297,7 @@ private:
 		step_sizes.max_step = this->getParameter<double>("co_max_step", 0.05);
 		step_sizes.initial_slide_step = this->getParameter<double>("co_initial_slide_step", 0.3);
 		step_sizes.slide_joint_margin = this->getParameter<double>("co_slide_joint_margin", 0.05);
+		step_sizes.min_slide_gain = this->getParameter<double>("co_min_slide_gain", 0.05);
 		return step_sizes;
 	}
 
@@ -345,7 +342,10 @@ private:
 		tour_settings.edge_weights.max_turn = this->getParameter<double>("max_joint_deviation_weight", 1.0);
 		tour_settings.edge_weights.time = this->getParameter<double>("travel_time_weight", 0.0);
 		tour_settings.two_opt_rounds = static_cast<int>(this->getParameter<int64_t>("gtsp_two_opt_rounds", 5));
-		tour_settings.reconfig_threshold = this->getParameter<double>("reconfig_threshold", 1.0);
+		tour_settings.path_check_position_step = this->getParameter<double>("path_check_position_step", 0.01);
+		tour_settings.path_check_angle_step = this->getParameter<double>("path_check_angle_step", 0.035);
+		tour_settings.path_check_max_joint_jump = this->getParameter<double>("path_check_max_joint_jump", 0.2);
+		tour_settings.path_check_joint_margin = this->getParameter<double>("path_check_joint_margin", 0.05);
 		tour_settings.gtsp_blocked_rounds = static_cast<int>(this->getParameter<int64_t>("co_gtsp_blocked_rounds", 2));
 		tour_settings.num_reference_postures = static_cast<int>(this->getParameter<int64_t>("gtsp_reference_postures", 4));
 		return tour_settings;

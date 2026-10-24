@@ -148,28 +148,19 @@ ObjectPositionEvaluation Optimizer::solveAndImproveAtPosition(const Eigen::Vecto
 
 void Optimizer::improveOrderAndPosturesWithObjectFixed(ObjectPositionEvaluation& evaluation, double miss_gap_penalty)
 {
-	// Timed for the log: posture matches, GTSP and the cost (mostly the blocked-edge checks).
+	// Timed for the log: GTSP (with its straight-path and blocked-edge rounds) and the cost (straight paths along the tour, blocked-edge checks).
 	auto get_seconds_since = [](std::chrono::steady_clock::time_point since) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count(); };
 	ObjectPositionEvaluation reordered_evaluation = evaluation;
 	auto since = std::chrono::steady_clock::now();
-	this->swapInReconfigurationPostureMatches(evaluation);
-	double posture_match_seconds = get_seconds_since(since);
-	since = std::chrono::steady_clock::now();
 	this->updateWeightedTotalCost(evaluation, miss_gap_penalty);
 	double cost_seconds = get_seconds_since(since);
 	since = std::chrono::steady_clock::now();
 	reordered_evaluation.order = this->reorderTourWithGtsp(reordered_evaluation.viewpoint_ik, reordered_evaluation.order);
 	const double gtsp_seconds = get_seconds_since(since);
 	since = std::chrono::steady_clock::now();
-	this->swapInReconfigurationPostureMatches(reordered_evaluation);
-	posture_match_seconds += get_seconds_since(since);
-	since = std::chrono::steady_clock::now();
 	this->updateWeightedTotalCost(reordered_evaluation, miss_gap_penalty);
 	cost_seconds += get_seconds_since(since);
-	const PostureSwapCounts& swaps = this->posture_swap_counts;
-	RCLCPP_INFO(this->node->get_logger(), "  tour work: posture matches %.2f s, GTSP %.2f s, cost with blocked-edge checks %.2f s; posture swaps so far: later from earlier %d removed / %d closer, earlier from later %d removed / %d closer", posture_match_seconds, gtsp_seconds, cost_seconds, swaps.later_from_earlier_removed, swaps.later_from_earlier_closer, swaps.earlier_from_later_removed, swaps.earlier_from_later_closer);
-	const PostureMatchTiming& timing = this->posture_match_timing;
-	RCLCPP_INFO(this->node->get_logger(), "  posture-match solves so far (thread s): %d cached; exact found %d (%.2f s); exact failed %d (%.2f s), then closest %.2f s, %d of them kept the posture", timing.cached, timing.exact_found, timing.exact_found_seconds, timing.exact_failed, timing.exact_failed_seconds, timing.closest_seconds, timing.closest_usable);
+	RCLCPP_INFO(this->node->get_logger(), "  tour work: GTSP %.2f s, cost with straight-path and blocked-edge checks %.2f s", gtsp_seconds, cost_seconds);
 	// Reach first: more viewpoints reached wins; at equal reach the lower weighted total cost.
 	const bool reordered_reaches_more = reordered_evaluation.viewpoint_ik.num_reached > evaluation.viewpoint_ik.num_reached;
 	const bool reordered_cheaper = reordered_evaluation.viewpoint_ik.num_reached == evaluation.viewpoint_ik.num_reached && reordered_evaluation.weighted_total_cost < evaluation.weighted_total_cost;
@@ -180,6 +171,9 @@ void Optimizer::improveOrderAndPosturesWithObjectFixed(ObjectPositionEvaluation&
 void Optimizer::updateWeightedTotalCost(ObjectPositionEvaluation& evaluation, double miss_gap_penalty)
 {
 	this->unwrapFullTurnJointsAlongTour(evaluation.viewpoint_ik, evaluation.order);
+	// Misses first (they may come closer in a neighbour's posture), then reconfigurations: following the straight camera paths may change poses.
+	this->bringMissesCloserFromNeighbors(evaluation.viewpoint_ik, evaluation.order);
+	evaluation.num_reconfigurations = this->followTourAlongStraightCameraPaths(evaluation.viewpoint_ik, evaluation.order);
 	// Tour length, with each edge whose straight move collides charged its estimated detour (see getBlockedEdgeDetourCharges).
 	double detour_charge = 0.0;
 	const std::vector<std::pair<size_t, double>> blocked_edges = this->getBlockedEdgeDetourCharges(evaluation.viewpoint_ik, evaluation.order);
@@ -189,10 +183,6 @@ void Optimizer::updateWeightedTotalCost(ObjectPositionEvaluation& evaluation, do
 	std::vector<Joints> poses_from_home = this->getPosesInTourOrder(evaluation.viewpoint_ik, evaluation.order);
 	poses_from_home.insert(poses_from_home.begin(), this->home_pose);
 	evaluation.joint_travel_cost = joint_travel::TravelCost(poses_from_home, this->tour_settings.edge_weights, this->counted_joints) + detour_charge;
-	evaluation.num_reconfigurations = this->countReconfigurations(evaluation.viewpoint_ik, evaluation.order);
-	evaluation.posture_gap_sum = 0.0;
-	for (const ReconfigurationPostureMatch& match : evaluation.matches)
-		evaluation.posture_gap_sum += match.gap;
 	evaluation.room_shortfall = 0.0;
 	std::vector<Joints> reached_poses;
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
@@ -205,7 +195,7 @@ void Optimizer::updateWeightedTotalCost(ObjectPositionEvaluation& evaluation, do
 	}
 	evaluation.smallest_margin = this->getSmallestJointMargin(reached_poses);
 	const int num_missed = static_cast<int>(this->viewpoints.size()) - evaluation.viewpoint_ik.num_reached;
-	evaluation.weighted_total_cost = evaluation.joint_travel_cost + this->cost_weights.miss_cost * num_missed + miss_gap_penalty * evaluation.viewpoint_ik.gap_sum + this->cost_weights.reconfiguration_cost * evaluation.num_reconfigurations + this->cost_weights.reconfiguration_weight * evaluation.posture_gap_sum + this->cost_weights.joint_room_weight * evaluation.room_shortfall;
+	evaluation.weighted_total_cost = evaluation.joint_travel_cost + this->cost_weights.miss_cost * num_missed + miss_gap_penalty * evaluation.viewpoint_ik.gap_sum + this->cost_weights.reconfiguration_cost * evaluation.num_reconfigurations + this->cost_weights.joint_room_weight * evaluation.room_shortfall;
 }
 
 bool Optimizer::moveObjectToReachMore(ObjectPositionEvaluation& current_evaluation, double& object_step, double miss_gap_penalty, int iteration)
@@ -280,7 +270,7 @@ bool Optimizer::improveArmPosesWithObjectFixed(ObjectPositionEvaluation& current
 	for (int attempt = 0; attempt < this->step_sizes.max_line_search_tries && direction.has_slide; ++attempt)
 	{
 		const ObjectPositionEvaluation candidate_evaluation = this->solveAndImproveAtPosition(current_evaluation.viewpoint_ik.position, this->getPosesAfterJointSlides(current_evaluation.viewpoint_ik, direction, slide_step), this->getChosenPoses(current_evaluation.viewpoint_ik), current_evaluation.order, miss_gap_penalty);
-		const bool kept = candidate_evaluation.weighted_total_cost < current_evaluation.weighted_total_cost - 1e-9;
+		const bool kept = candidate_evaluation.weighted_total_cost < current_evaluation.weighted_total_cost - this->step_sizes.min_slide_gain;
 		RCLCPP_INFO(this->node->get_logger(), "iteration %d poses: slide %.3f rad  reached %d  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f vs %.2f%s", iteration, slide_step, candidate_evaluation.viewpoint_ik.num_reached, candidate_evaluation.num_reconfigurations, candidate_evaluation.num_blocked_edges, candidate_evaluation.joint_travel_cost, candidate_evaluation.smallest_margin, candidate_evaluation.weighted_total_cost, current_evaluation.weighted_total_cost, kept ? "  <-- kept" : "");
 		if (kept)
 		{
@@ -376,7 +366,6 @@ DescentDirection Optimizer::getTourDirection(const ObjectPositionEvaluation& eva
 	const std::vector<Eigen::VectorXd> pose_slopes = this->getTourCostSlopePerPose(viewpoint_ik, evaluation.order);
 	Eigen::MatrixXd object_twist = Eigen::MatrixXd::Zero(6, 3);
 	object_twist.topRows<3>() = Eigen::Matrix3d::Identity();
-	Eigen::Vector3d reconfiguration_move = Eigen::Vector3d::Zero();
 	Eigen::Vector3d length_move = Eigen::Vector3d::Zero();
 	Eigen::Vector3d room_move = Eigen::Vector3d::Zero();
 	DescentDirection direction;
@@ -399,19 +388,7 @@ DescentDirection Optimizer::getTourDirection(const ObjectPositionEvaluation& eva
 	for (Eigen::VectorXd& slide : direction.joint_slides)
 		if (slide.size() > 0)
 			slide = largest_slide > 1e-9 ? Eigen::VectorXd(slide / largest_slide) : Eigen::VectorXd();
-	for (const ReconfigurationPostureMatch& match : evaluation.matches)
-	{
-		if (match.gap > 1e-9)
-			reconfiguration_move -= this->cost_weights.reconfiguration_weight * match.position_error / match.gap;
-		if (!this->method_switches.use_slide || !viewpoint_ik.reached[match.viewpoint_index])
-			continue;
-		// Toward the neighbour's joints along the self-motion, full slide step.
-		const Eigen::VectorXd toward = Eigen::Map<const Eigen::VectorXd>(match.neighbor_pose.data(), static_cast<Eigen::Index>(match.neighbor_pose.size())) - Eigen::Map<const Eigen::VectorXd>(viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].q.data(), static_cast<Eigen::Index>(match.neighbor_pose.size()));
-		const Eigen::VectorXd slide = this->getSelfMotionProjector(this->getToolJacobian(*this->state, viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].q)) * toward;
-		if (slide.norm() > 1e-9)
-			direction.joint_slides[match.viewpoint_index] = slide.normalized();
-	}
-	const Eigen::Vector3d object_move = this->combineMovesWithoutConflict({reconfiguration_move, length_move, room_move});
+	const Eigen::Vector3d object_move = this->combineMovesWithoutConflict({length_move, room_move});
 	if (object_move.norm() > 1e-12)
 		direction.object_direction = object_move.normalized();
 	direction.has_slide = std::any_of(direction.joint_slides.begin(), direction.joint_slides.end(), [](const Eigen::VectorXd& slide) { return slide.size() > 0; });
@@ -967,17 +944,20 @@ std::vector<int> Optimizer::reorderTourWithGtsp(ViewpointIkAtPosition& viewpoint
 	gtsp::Solver solver(candidates, this->home_pose, this->tour_settings.edge_weights, this->tour_settings.two_opt_rounds);
 	solver.SetTravelJoints(this->counted_joints);
 	gtsp::Tour tour = solver.Solve(order);
-	// GTSP sees straight-line lengths only: charge the chosen edges whose straight move collides and solve again, so the
-	// order can route around them (checking every pair up front would be too slow).
-	for (int round = 0; round < this->tour_settings.gtsp_blocked_rounds && this->cost_weights.blocked_edge_charge > 0.0; ++round)
+	// GTSP sees straight-line lengths only: charge the chosen edges whose straight move collides (their detour) or that the
+	// arm can't follow on the straight camera path (a reconfiguration) and solve again, so the order can route around them
+	// (checking every pair up front would be too slow).
+	for (int round = 0; round < this->tour_settings.gtsp_blocked_rounds; ++round)
 	{
 		ViewpointIkAtPosition tour_viewpoint_ik = viewpoint_ik;
 		for (size_t tour_position = 0; tour_position < tour.order.size(); ++tour_position)
 			tour_viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(tour.order[tour_position])].q = tour.poses[tour_position];
-		const std::vector<std::pair<size_t, double>> blocked_edges = this->getBlockedEdgeDetourCharges(tour_viewpoint_ik, tour.order);
-		if (blocked_edges.empty())
+		std::vector<std::pair<size_t, double>> charged_edges = this->cost_weights.blocked_edge_charge > 0.0 ? this->getBlockedEdgeDetourCharges(tour_viewpoint_ik, tour.order) : std::vector<std::pair<size_t, double>>();
+		for (size_t tour_position : this->getReconfigurationEdges(tour_viewpoint_ik, tour.order))
+			charged_edges.push_back({tour_position, this->cost_weights.reconfiguration_cost});
+		if (charged_edges.empty())
 			break;
-		for (const std::pair<size_t, double>& edge : blocked_edges)
+		for (const std::pair<size_t, double>& edge : charged_edges)
 		{
 			const size_t tour_position = edge.first;
 			const size_t to_viewpoint = static_cast<size_t>(tour.order[tour_position]);
@@ -1044,183 +1024,221 @@ void Optimizer::unwrapFullTurnJointsToward(Joints& pose, const Joints& reference
 	}
 }
 
-bool Optimizer::isReconfiguration(const Joints& from, const Joints& to) const
+// Follows the camera from from_pose's camera pose to to_pose's on a straight line with an even turn, in small steps of one
+// Jacobian update each (the next step corrects what is left); then one exact IK onto to_pose's camera pose gives the arrival
+// pose. False at a joint jump, a joint near its limit or a collision on the way, or no exact IK at the end. Results are kept
+// per (from pose, to pose) at this object position.
+bool Optimizer::followStraightCameraPath(moveit::core::RobotState& state, const Joints& from_pose, const Joints& to_pose, Joints& arrival_pose)
 {
-	return joint_travel::MaxJointTurn(from, to, this->counted_joints) > this->tour_settings.reconfig_threshold;
-}
-
-int Optimizer::countReconfigurations(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const
-{
-	int num_reconfigurations = 0;
-	for (size_t tour_position = 0; tour_position < order.size(); ++tour_position)
-		num_reconfigurations += this->isReconfiguration(tour_position == 0 ? this->home_pose : viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position - 1])].q, viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position])].q) ? 1 : 0;
-	return num_reconfigurations;
-}
-
-int Optimizer::countReconfigurationsAround(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order, size_t tour_position, const Joints& pose) const
-{
-	const Joints& previous_pose = tour_position == 0 ? this->home_pose : viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position - 1])].q;
-	int num_reconfigurations = this->isReconfiguration(previous_pose, pose) ? 1 : 0;
-	if (tour_position + 1 < order.size())
-		num_reconfigurations += this->isReconfiguration(pose, viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position + 1])].q) ? 1 : 0;
-	return num_reconfigurations;
-}
-
-void Optimizer::swapInReconfigurationPostureMatches(ObjectPositionEvaluation& evaluation)
-{
-	this->unwrapFullTurnJointsAlongTour(evaluation.viewpoint_ik, evaluation.order);
-	evaluation.matches.clear();
-	if (!this->method_switches.use_posture_match)
-		return;
-	ViewpointIkAtPosition& viewpoint_ik = evaluation.viewpoint_ik;
-	const std::vector<int>& order = evaluation.order;
-	std::vector<size_t> tour_position_of_viewpoint(this->viewpoints.size(), 0);
-	for (size_t tour_position = 0; tour_position < order.size(); ++tour_position)
-		tour_position_of_viewpoint[static_cast<size_t>(order[tour_position])] = tour_position;
-	for (int round = 0; round < 2; ++round)
+	const std::pair<Joints, Joints> cache_key(from_pose, to_pose);
 	{
-		evaluation.matches = this->findReconfigurationPostureMatches(viewpoint_ik, order);
-		bool swapped = false;
-		for (const ReconfigurationPostureMatch& match : evaluation.matches)
+		std::lock_guard<std::mutex> lock(this->straight_path_cache_mutex);
+		const auto cached = this->straight_path_cache.find(cache_key);
+		if (cached != this->straight_path_cache.end())
 		{
-			const size_t tour_position = tour_position_of_viewpoint[match.viewpoint_index];
-			const int reconfigurations_before = this->countReconfigurationsAround(viewpoint_ik, order, tour_position, viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].q);
-			const int reconfigurations_after = this->countReconfigurationsAround(viewpoint_ik, order, tour_position, match.pose_in_neighbor_posture);
-			const bool removes_reconfiguration = match.exact && reconfigurations_after < reconfigurations_before;
-			const bool closer_miss = !viewpoint_ik.reached[match.viewpoint_index] && !match.exact && match.gap < viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].gap && reconfigurations_after <= reconfigurations_before;
-			if (!removes_reconfiguration && !closer_miss)
-				continue;
-			if (match.is_later_viewpoint)
-				(removes_reconfiguration ? this->posture_swap_counts.later_from_earlier_removed : this->posture_swap_counts.later_from_earlier_closer) += 1;
-			else
-				(removes_reconfiguration ? this->posture_swap_counts.earlier_from_later_removed : this->posture_swap_counts.earlier_from_later_closer) += 1;
-			viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].q = match.pose_in_neighbor_posture;
-			if (match.exact && !viewpoint_ik.reached[match.viewpoint_index])
-			{
-				viewpoint_ik.reached[match.viewpoint_index] = true;
-				viewpoint_ik.num_reached += 1;
-			}
-			const double new_gap = match.exact ? 0.0 : match.gap;
-			viewpoint_ik.gap_sum += new_gap - viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].gap;
-			viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].gap = new_gap;
-			viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].clearance_shortfall = match.clearance_shortfall;
-			viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].angle_error = match.angle_error;
-			viewpoint_ik.chosen_ik_per_viewpoint[match.viewpoint_index].position_error = match.exact ? Eigen::Vector3d::Zero() : match.position_error;
-			swapped = true;
+			arrival_pose = cached->second.second;
+			return cached->second.first;
 		}
-		if (!swapped)
-			return;
 	}
-	evaluation.matches = this->findReconfigurationPostureMatches(viewpoint_ik, order);
+	auto remember = [&](bool followed, const Joints& pose)
+	{
+		std::lock_guard<std::mutex> lock(this->straight_path_cache_mutex);
+		this->straight_path_cache[cache_key] = {followed, pose};
+		if (followed)
+			arrival_pose = pose;
+		return followed;
+	};
+	state.setJointGroupPositions(this->group, from_pose);
+	state.update();
+	const Eigen::Isometry3d from_camera = state.getGlobalLinkTransform(this->tool);
+	state.setJointGroupPositions(this->group, to_pose);
+	state.update();
+	const Eigen::Isometry3d to_camera = state.getGlobalLinkTransform(this->tool);
+	const Eigen::Quaterniond from_rotation(from_camera.rotation());
+	const Eigen::Quaterniond to_rotation(to_camera.rotation());
+	const double camera_travel = (to_camera.translation() - from_camera.translation()).norm();
+	const double camera_turn = from_rotation.angularDistance(to_rotation);
+	const int num_steps = std::max(1, static_cast<int>(std::ceil(std::max(camera_travel / this->tour_settings.path_check_position_step, camera_turn / this->tour_settings.path_check_angle_step))));
+	const std::vector<const moveit::core::JointModel*>& joints = this->group->getActiveJointModels();
+	auto is_joint_step_ok = [&](const Joints& before, const Joints& after)
+	{
+		for (size_t joint_index = 0; joint_index < after.size(); ++joint_index)
+		{
+			if (std::abs(after[joint_index] - before[joint_index]) > this->tour_settings.path_check_max_joint_jump)
+				return false;
+			const moveit::core::VariableBounds& bounds = joints[joint_index]->getVariableBounds()[0];
+			if (bounds.position_bounded_ && (after[joint_index] < bounds.min_position_ + this->tour_settings.path_check_joint_margin || after[joint_index] > bounds.max_position_ - this->tour_settings.path_check_joint_margin))
+				return false;
+		}
+		return true;
+	};
+	Joints pose = from_pose;
+	for (int step = 1; step < num_steps; ++step)
+	{
+		const double share = static_cast<double>(step) / static_cast<double>(num_steps);
+		Eigen::Isometry3d camera = Eigen::Isometry3d::Identity();
+		camera.translation() = (1.0 - share) * from_camera.translation() + share * to_camera.translation();
+		camera.linear() = from_rotation.slerp(share, to_rotation).toRotationMatrix();
+		state.setJointGroupPositions(this->group, pose);
+		state.update();
+		const scene_geometry::Vector6d pose_error = closest_ik::GetPoseError(camera, state.getGlobalLinkTransform(this->tool), this->ik_settings.exact_options.ignore_roll);
+		const Eigen::VectorXd joint_step = scene_geometry::DampedPinv(this->getToolJacobian(state, pose), this->ik_settings.jacobian_damping) * pose_error;
+		Joints next_pose = pose;
+		for (size_t joint_index = 0; joint_index < next_pose.size(); ++joint_index)
+			next_pose[joint_index] += joint_step(static_cast<Eigen::Index>(joint_index));
+		if (!is_joint_step_ok(pose, next_pose) || !scene_geometry::IsStateValid(this->scene, &state, this->group, next_pose.data()))
+			return remember(false, {});
+		pose = next_pose;
+	}
+	const closest_ik::Result arrival = closest_ik::Solve(this->scene, state, this->group, this->tool, to_camera, pose, this->ik_settings.exact_options);
+	if (!arrival.exact || !is_joint_step_ok(pose, arrival.q))
+		return remember(false, {});
+	return remember(true, arrival.q);
 }
 
-std::vector<ReconfigurationPostureMatch> Optimizer::findReconfigurationPostureMatches(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order)
+// Each missed viewpoint is also solved from its tour neighbours' poses (exact IK, else closest IK) and takes the result if
+// its gap is smaller: the miss comes closer in a neighbour's posture.
+void Optimizer::bringMissesCloserFromNeighbors(ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order)
 {
-	std::vector<size_t> reconfiguration_edges;  // tour position k of each reconfiguration edge order[k-1] (or home) -> order[k]
+	std::vector<size_t> miss_positions;
 	for (size_t tour_position = 0; tour_position < order.size(); ++tour_position)
-		if (this->isReconfiguration(tour_position == 0 ? this->home_pose : viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position - 1])].q, viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position])].q))
-			reconfiguration_edges.push_back(tour_position);
-	std::vector<ReconfigurationPostureMatch> matches(reconfiguration_edges.size());
-	std::vector<bool> found_per_edge(reconfiguration_edges.size(), false);
-	if (reconfiguration_edges.empty())
-		return {};
+		if (!viewpoint_ik.reached[static_cast<size_t>(order[tour_position])])
+			miss_positions.push_back(tour_position);
+	if (miss_positions.empty())
+		return;
 	scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(viewpoint_ik.position, this->object_rotation));
-	if (!(this->posture_match_cache_position == viewpoint_ik.position))
-	{
-		this->posture_match_cache.clear();
-		this->posture_match_cache_position = viewpoint_ik.position;
-	}
-	// One solve per (edge, direction): B in A's posture, and A in B's (home has no viewpoint to move). Solves, not edges, are split over the threads.
-	struct PostureMatchJob
-	{
-		size_t edge_index;
-		size_t viewpoint_index;
-		const Joints* neighbor_pose;
-		bool is_later_viewpoint;
-	};
-	std::vector<PostureMatchJob> jobs;
-	for (size_t edge_index = 0; edge_index < reconfiguration_edges.size(); ++edge_index)
-	{
-		const size_t tour_position = reconfiguration_edges[edge_index];
-		const size_t to_viewpoint = static_cast<size_t>(order[tour_position]);
-		jobs.push_back({edge_index, to_viewpoint, tour_position == 0 ? &this->home_pose : &viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position - 1])].q, true});
-		if (tour_position > 0)
-			jobs.push_back({edge_index, static_cast<size_t>(order[tour_position - 1]), &viewpoint_ik.chosen_ik_per_viewpoint[to_viewpoint].q, false});
-	}
-	std::vector<PostureMatchSolve> solves(jobs.size());
-	const unsigned int num_workers = std::min(this->num_threads, static_cast<unsigned int>(jobs.size()));
+	std::vector<ClosestIkCandidate> closer_poses(miss_positions.size());
+	std::vector<char> found(miss_positions.size(), 0);  // one byte per miss: written from parallel threads
+	const unsigned int num_workers = std::min(this->num_threads, static_cast<unsigned int>(miss_positions.size()));
 	std::vector<std::thread> threads;
 	for (unsigned int thread_index = 0; thread_index < num_workers; ++thread_index)
 		threads.emplace_back([&, thread_index]()
 		{
 			moveit::core::RobotState thread_state(*this->state);
-			for (size_t job_index = thread_index; job_index < jobs.size(); job_index += num_workers)
+			for (size_t miss_index = thread_index; miss_index < miss_positions.size(); miss_index += num_workers)
 			{
-				const PostureMatchJob& job = jobs[job_index];
-				// The same viewpoint from the same start pose at this object position gives the same answer: solve it once.
-				const std::pair<size_t, Joints> cache_key(job.viewpoint_index, *job.neighbor_pose);
-				PostureMatchSolve& solve = solves[job_index];
+				const size_t tour_position = miss_positions[miss_index];
+				const size_t viewpoint_index = static_cast<size_t>(order[tour_position]);
+				const Eigen::Isometry3d target = scene_geometry::Translation(viewpoint_ik.position) * this->viewpoints[viewpoint_index];
+				std::vector<Joints> neighbor_poses = {tour_position == 0 ? this->home_pose : viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position - 1])].q};
+				if (tour_position + 1 < order.size())
+					neighbor_poses.push_back(viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position + 1])].q);
+				double best_gap = viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].gap;
+				for (const Joints& neighbor_pose : neighbor_poses)
 				{
-					std::lock_guard<std::mutex> lock(this->posture_match_cache_mutex);
-					const auto cached = this->posture_match_cache.find(cache_key);
-					if (cached != this->posture_match_cache.end())
-					{
-						solve = cached->second;
-						this->posture_match_timing.cached += 1;
+					closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, neighbor_pose, this->ik_settings.exact_options);
+					if (!result.exact)
+						result = this->solveSmallestGapIk(thread_state, target, {neighbor_pose});
+					if (!result.found)
 						continue;
+					ClosestIkCandidate candidate;
+					candidate.q = result.q;
+					if (!result.exact)
+					{
+						candidate.clearance_shortfall = this->getClearanceShortfall(thread_state, result.q);
+						candidate.gap = scene_geometry::PoseGap(result.pose_error, this->ik_settings.closest_options.rot_scale) + candidate.clearance_shortfall;
+						candidate.position_error = result.pose_error.head<3>();
+						candidate.angle_error = result.pose_error.tail<3>().norm();
 					}
-				}
-				const Eigen::Isometry3d target = scene_geometry::Translation(viewpoint_ik.position) * this->viewpoints[job.viewpoint_index];
-				const auto exact_start = std::chrono::steady_clock::now();
-				solve.result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, *job.neighbor_pose, this->ik_settings.exact_options);
-				const bool exact_found = solve.result.exact;
-				const auto closest_start = std::chrono::steady_clock::now();
-				if (!solve.result.exact)
-					solve.result = this->solveSmallestGapIk(thread_state, target, {*job.neighbor_pose});
-				solve.clearance_shortfall = solve.result.found && !solve.result.exact ? this->getClearanceShortfall(thread_state, solve.result.q) : 0.0;
-				const auto solve_end = std::chrono::steady_clock::now();
-				std::lock_guard<std::mutex> lock(this->posture_match_cache_mutex);
-				this->posture_match_cache[cache_key] = solve;
-				PostureMatchTiming& timing = this->posture_match_timing;
-				(exact_found ? timing.exact_found : timing.exact_failed) += 1;
-				(exact_found ? timing.exact_found_seconds : timing.exact_failed_seconds) += std::chrono::duration<double>(closest_start - exact_start).count();
-				if (!exact_found)
-				{
-					timing.closest_seconds += std::chrono::duration<double>(solve_end - closest_start).count();
-					timing.closest_usable += solve.result.found && !this->isReconfiguration(*job.neighbor_pose, solve.result.q) ? 1 : 0;
+					if (candidate.gap >= best_gap)
+						continue;
+					best_gap = candidate.gap;
+					closer_poses[miss_index] = candidate;
+					found[miss_index] = 1;
+					if (result.exact)
+						break;
 				}
 			}
 		});
 	for (std::thread& thread : threads)
 		thread.join();
-	// Per edge, the direction with the smaller gap that keeps the neighbour's posture (the later viewpoint first on a tie).
-	for (size_t job_index = 0; job_index < jobs.size(); ++job_index)
+	for (size_t miss_index = 0; miss_index < miss_positions.size(); ++miss_index)
 	{
-		const PostureMatchJob& job = jobs[job_index];
-		const closest_ik::Result& result = solves[job_index].result;
-		if (!result.found || this->isReconfiguration(*job.neighbor_pose, result.q))
+		if (!found[miss_index])
 			continue;
-		const double clearance_shortfall = solves[job_index].clearance_shortfall;
-		const double gap = result.exact ? 0.0 : scene_geometry::PoseGap(result.pose_error, this->ik_settings.closest_options.rot_scale) + clearance_shortfall;
-		ReconfigurationPostureMatch& match = matches[job.edge_index];
-		if (found_per_edge[job.edge_index] && gap >= match.gap)
-			continue;
-		found_per_edge[job.edge_index] = true;
-		match.viewpoint_index = job.viewpoint_index;
-		match.neighbor_pose = *job.neighbor_pose;
-		match.pose_in_neighbor_posture = result.q;
-		match.position_error = result.exact ? Eigen::Vector3d::Zero() : Eigen::Vector3d(result.pose_error.head<3>());
-		match.gap = gap;
-		match.clearance_shortfall = clearance_shortfall;
-		match.angle_error = result.exact ? 0.0 : result.pose_error.tail<3>().norm();
-		match.exact = result.exact;
-		match.is_later_viewpoint = job.is_later_viewpoint;
+		const size_t viewpoint_index = static_cast<size_t>(order[miss_positions[miss_index]]);
+		viewpoint_ik.gap_sum += closer_poses[miss_index].gap - viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].gap;
+		viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index] = closer_poses[miss_index];
+		if (closer_poses[miss_index].gap <= 0.0)
+		{
+			viewpoint_ik.reached[viewpoint_index] = true;
+			viewpoint_ik.num_reached += 1;
+		}
 	}
-	std::vector<ReconfigurationPostureMatch> kept;
-	for (size_t edge_index = 0; edge_index < reconfiguration_edges.size(); ++edge_index)
-		if (found_per_edge[edge_index])
-			kept.push_back(matches[edge_index]);
-	return kept;
+}
+
+// Tour positions whose edge (from the previous pose, or home) the arm can't follow on the straight camera path, each edge
+// from its start pose as it is now, in parallel; arrival_poses (if given) gets each followed edge's arrival pose.
+std::vector<size_t> Optimizer::getReconfigurationEdges(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order, std::vector<Joints>* arrival_poses)
+{
+	scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(viewpoint_ik.position, this->object_rotation));
+	if (!(this->straight_path_cache_position == viewpoint_ik.position))
+	{
+		this->straight_path_cache.clear();
+		this->straight_path_cache_position = viewpoint_ik.position;
+	}
+	std::vector<char> followed(order.size(), 0);  // one byte per edge: written from parallel threads
+	std::vector<Joints> arrivals(order.size());
+	const unsigned int num_workers = std::max(1u, std::min(this->num_threads, static_cast<unsigned int>(order.size())));
+	std::vector<std::thread> threads;
+	for (unsigned int thread_index = 0; thread_index < num_workers; ++thread_index)
+		threads.emplace_back([&, thread_index]()
+		{
+			moveit::core::RobotState thread_state(*this->state);
+			for (size_t tour_position = thread_index; tour_position < order.size(); tour_position += num_workers)
+			{
+				const Joints& from_pose = tour_position == 0 ? this->home_pose : viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position - 1])].q;
+				followed[tour_position] = this->followStraightCameraPath(thread_state, from_pose, viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position])].q, arrivals[tour_position]) ? 1 : 0;
+			}
+		});
+	for (std::thread& thread : threads)
+		thread.join();
+	std::vector<size_t> reconfiguration_edges;
+	for (size_t tour_position = 0; tour_position < order.size(); ++tour_position)
+		if (!followed[tour_position])
+			reconfiguration_edges.push_back(tour_position);
+	if (arrival_poses)
+		*arrival_poses = arrivals;
+	return reconfiguration_edges;
+}
+
+// Walks the tour: each reached viewpoint whose edge the arm can follow takes the pose it arrives in. Edges are first
+// followed in parallel from the poses as they are; an edge whose start pose then changed is followed again. Returns the
+// number of reconfigurations.
+int Optimizer::followTourAlongStraightCameraPaths(ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order)
+{
+	const double same_pose_tolerance = 1e-3;  // rad: an arrival this near the pose in use leaves it as it is
+	std::vector<Joints> arrival_poses;
+	const std::vector<size_t> reconfiguration_edges = this->getReconfigurationEdges(viewpoint_ik, order, &arrival_poses);
+	std::vector<char> followed(order.size(), 1);
+	for (size_t tour_position : reconfiguration_edges)
+		followed[tour_position] = 0;
+	moveit::core::RobotState path_state(*this->state);
+	int num_reconfigurations = 0;
+	bool start_pose_changed = false;  // the previous viewpoint took an arrival pose, so this edge starts elsewhere
+	for (size_t tour_position = 0; tour_position < order.size(); ++tour_position)
+	{
+		const size_t viewpoint_index = static_cast<size_t>(order[tour_position]);
+		Joints& pose = viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q;
+		if (start_pose_changed)
+			followed[tour_position] = this->followStraightCameraPath(path_state, viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position - 1])].q, pose, arrival_poses[tour_position]) ? 1 : 0;
+		start_pose_changed = false;
+		if (!followed[tour_position])
+		{
+			++num_reconfigurations;
+			continue;
+		}
+		if (!viewpoint_ik.reached[viewpoint_index])
+			continue;
+		double largest_change = 0.0;
+		for (size_t joint_index = 0; joint_index < pose.size(); ++joint_index)
+			largest_change = std::max(largest_change, std::abs(arrival_poses[tour_position][joint_index] - pose[joint_index]));
+		if (largest_change <= same_pose_tolerance)
+			continue;
+		pose = arrival_poses[tour_position];
+		start_pose_changed = true;
+	}
+	return num_reconfigurations;
 }
 
 bool Optimizer::isStraightJointMoveCollisionFree(moveit::core::RobotState& state, const Joints& from_pose, const Joints& to_pose) const
@@ -1277,7 +1295,7 @@ std::vector<std::pair<size_t, double>> Optimizer::getBlockedEdgeDetourCharges(co
 
 void Optimizer::logObjectPositionEvaluation(const std::string& label, const ObjectPositionEvaluation& evaluation)
 {
-	RCLCPP_INFO(this->node->get_logger(), "%s: abs (%.4f, %.4f, %.4f) m  reached %d/%zu  gap sum %.4f m  reconfigurations %d (posture gap sum %.3f m)  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f", label.c_str(), evaluation.viewpoint_ik.position.x(), evaluation.viewpoint_ik.position.y(), evaluation.viewpoint_ik.position.z(), evaluation.viewpoint_ik.num_reached, this->viewpoints.size(), evaluation.viewpoint_ik.gap_sum, evaluation.num_reconfigurations, evaluation.posture_gap_sum, evaluation.num_blocked_edges, evaluation.joint_travel_cost, evaluation.smallest_margin, evaluation.weighted_total_cost);
+	RCLCPP_INFO(this->node->get_logger(), "%s: abs (%.4f, %.4f, %.4f) m  reached %d/%zu  gap sum %.4f m  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f", label.c_str(), evaluation.viewpoint_ik.position.x(), evaluation.viewpoint_ik.position.y(), evaluation.viewpoint_ik.position.z(), evaluation.viewpoint_ik.num_reached, this->viewpoints.size(), evaluation.viewpoint_ik.gap_sum, evaluation.num_reconfigurations, evaluation.num_blocked_edges, evaluation.joint_travel_cost, evaluation.smallest_margin, evaluation.weighted_total_cost);
 }
 
 void Optimizer::logMissedViewpoints(const ViewpointIkAtPosition& viewpoint_ik)
