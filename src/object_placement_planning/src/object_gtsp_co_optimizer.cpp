@@ -71,7 +71,7 @@ ObjectPositionEvaluation Optimizer::runDescent(const Eigen::Vector3d& requested_
 	{
 		bool any_step_accepted = false;
 		if (current_evaluation.viewpoint_ik.num_reached < num_viewpoint && !object_frozen)
-			any_step_accepted = this->moveObjectToReachMore(current_evaluation, reach_step, miss_gap_penalty, iteration) || any_step_accepted; // Room-then-reach if viewpoints are missing
+			any_step_accepted = this->moveObjectToReachMore(current_evaluation, reach_step, miss_gap_penalty, iteration) || any_step_accepted; // with room-then-reach for blocked misses
 			
 		// Checked after the reach step, so the iteration that reaches the last viewpoint takes no tour move.
 		if (this->method_switches.freeze_object_when_reached && !object_frozen && current_evaluation.viewpoint_ik.num_reached == num_viewpoint)
@@ -203,9 +203,8 @@ bool Optimizer::moveObjectToReachMore(ObjectPositionEvaluation& current_evaluati
 	const Eigen::Vector3d aim = this->getReachDirection(current_evaluation.viewpoint_ik);
 	if (aim.norm() < 0.5)
 		return false;
-	Eigen::Vector3d direction = aim;
-	bool is_room_then_reach = false;  // the direction was turned to keep room for viewpoints the last try lost
-	bool tried_miss_room = false;
+	const Eigen::Vector3d& direction = aim;
+	bool tried_room_then_reach = false;
 	for (int attempt = 0; attempt < this->step_sizes.max_line_search_tries && object_step >= this->step_sizes.min_step; ++attempt)
 	{
 		const ObjectPositionEvaluation candidate_evaluation = this->solveAndImproveAtPosition(current_evaluation.viewpoint_ik.position + object_step * direction, this->getChosenPoses(current_evaluation.viewpoint_ik), {}, current_evaluation.order, miss_gap_penalty);
@@ -213,11 +212,8 @@ bool Optimizer::moveObjectToReachMore(ObjectPositionEvaluation& current_evaluati
 		for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
 			if (current_evaluation.viewpoint_ik.reached[viewpoint_index] && !candidate_evaluation.viewpoint_ik.reached[viewpoint_index])
 				lost_viewpoints.push_back(viewpoint_index);
-		// A room-then-reach try losing up to allowed_reach_loss of the reached viewpoints is judged by the gap sum alone (the lost
-		// ones count in it); a plain reach try, or one losing more, must reach more or as many with a smaller gap sum.
-		const bool loss_allowed = is_room_then_reach && static_cast<double>(lost_viewpoints.size()) <= this->cost_weights.allowed_reach_loss * static_cast<double>(current_evaluation.viewpoint_ik.num_reached);
-		const bool kept = candidate_evaluation.viewpoint_ik.num_reached > current_evaluation.viewpoint_ik.num_reached || ((candidate_evaluation.viewpoint_ik.num_reached == current_evaluation.viewpoint_ik.num_reached || loss_allowed) && candidate_evaluation.viewpoint_ik.gap_sum < current_evaluation.viewpoint_ik.gap_sum);
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d %s: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %zu)  gap sum %.4f m vs %.4f%s", iteration, is_room_then_reach ? "room-then-reach" : "reach", object_step, candidate_evaluation.viewpoint_ik.position.x(), candidate_evaluation.viewpoint_ik.position.y(), candidate_evaluation.viewpoint_ik.position.z(), candidate_evaluation.viewpoint_ik.num_reached, lost_viewpoints.size(), candidate_evaluation.viewpoint_ik.gap_sum, current_evaluation.viewpoint_ik.gap_sum, kept ? "  <-- kept" : "");
+		const bool kept = candidate_evaluation.viewpoint_ik.num_reached > current_evaluation.viewpoint_ik.num_reached || (candidate_evaluation.viewpoint_ik.num_reached == current_evaluation.viewpoint_ik.num_reached && candidate_evaluation.viewpoint_ik.gap_sum < current_evaluation.viewpoint_ik.gap_sum);
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %zu)  gap sum %.4f m vs %.4f%s", iteration, object_step, candidate_evaluation.viewpoint_ik.position.x(), candidate_evaluation.viewpoint_ik.position.y(), candidate_evaluation.viewpoint_ik.position.z(), candidate_evaluation.viewpoint_ik.num_reached, lost_viewpoints.size(), candidate_evaluation.viewpoint_ik.gap_sum, current_evaluation.viewpoint_ik.gap_sum, kept ? "  <-- kept" : "");
 		if (kept)
 		{
 			current_evaluation = candidate_evaluation;
@@ -232,24 +228,10 @@ bool Optimizer::moveObjectToReachMore(ObjectPositionEvaluation& current_evaluati
 				this->logMissedViewpoints(current_evaluation.viewpoint_ik);
 			return true;
 		}
-		if (!lost_viewpoints.empty() && this->method_switches.use_room)
+		// Room-then-reach: once per step, a move that frees what blocks the misses; the next iteration aims again.
+		if (this->method_switches.use_room && !tried_room_then_reach)
 		{
-			const Eigen::Vector3d bounce_axis = this->getBounceAxis();
-			if (bounce_axis.norm() > 0.5 && !is_room_then_reach)
-				RCLCPP_INFO(this->node->get_logger(), "iteration %d: the object went back and forth along (%.2f, %.2f, %.2f); room-then-reach tries across it", iteration, bounce_axis.x(), bounce_axis.y(), bounce_axis.z());
-			const Eigen::Vector3d room_direction = this->getRoomThenReachDirection(current_evaluation.viewpoint_ik, lost_viewpoints, aim, bounce_axis, object_step);
-			if (room_direction.norm() > 0.5 && (room_direction - direction).norm() > 1e-3)
-			{
-				direction = room_direction;
-				is_room_then_reach = true;
-				continue;
-			}
-		}
-		// Room-then-reach for the misses: once per step, a move that frees what blocks them (joint limits, stretch,
-		// collisions), kept if it raises their tightest margin and loses nothing; the next iteration aims again.
-		if (this->method_switches.use_room && !tried_miss_room)
-		{
-			tried_miss_room = true;
+			tried_room_then_reach = true;
 			if (this->moveObjectToUnblockMisses(current_evaluation, object_step, miss_gap_penalty, iteration))
 				return true;
 		}
@@ -334,20 +316,32 @@ bool Optimizer::moveObjectToUnblockMisses(ObjectPositionEvaluation& current_eval
 	const Eigen::Vector3d room_direction = room_margins::MostRoomDirection(margins_before, object_step);
 	if (room_direction.norm() < 0.5)
 		return false;
-	const ObjectPositionEvaluation candidate_evaluation = this->solveAndImproveAtPosition(current_evaluation.viewpoint_ik.position + object_step * room_direction, this->getChosenPoses(current_evaluation.viewpoint_ik), {}, current_evaluation.order, miss_gap_penalty);
-	bool lost_any = false;
+	// Keep the reached viewpoints: drop the parts of the move that tighten what blocks them. If too little is left, the
+	// misses' room conflicts with them here, and the move goes for the room anyway (the loss allowance decides).
+	const double reached_near_floors = 2.0;
+	std::vector<size_t> reached_viewpoints;
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
-		lost_any = lost_any || (current_evaluation.viewpoint_ik.reached[viewpoint_index] && !candidate_evaluation.viewpoint_ik.reached[viewpoint_index]);
+		if (current_evaluation.viewpoint_ik.reached[viewpoint_index])
+			reached_viewpoints.push_back(viewpoint_index);
+	const Eigen::Vector3d kept_clear_direction = this->dropPartsTighteningMargins(room_direction, this->getBlockingMarginsOfViewpoints(current_evaluation.viewpoint_ik, reached_viewpoints, reached_near_floors));
+	const bool keeps_reached_clear = kept_clear_direction.norm() >= 0.3;
+	const Eigen::Vector3d move_direction = keeps_reached_clear ? Eigen::Vector3d(kept_clear_direction.normalized()) : room_direction;
+	const ObjectPositionEvaluation candidate_evaluation = this->solveAndImproveAtPosition(current_evaluation.viewpoint_ik.position + object_step * move_direction, this->getChosenPoses(current_evaluation.viewpoint_ik), {}, current_evaluation.order, miss_gap_penalty);
+	int num_lost = 0;
+	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
+		num_lost += current_evaluation.viewpoint_ik.reached[viewpoint_index] && !candidate_evaluation.viewpoint_ik.reached[viewpoint_index] ? 1 : 0;
 	const std::vector<room_margins::Margin> margins_after = this->getBlockingMarginsOfViewpoints(candidate_evaluation.viewpoint_ik, blocked_viewpoints, near_floors);
 	const double tightest_before = room_margins::Tightest(margins_before);
 	const double tightest_after = margins_after.empty() ? std::numeric_limits<double>::infinity() : room_margins::Tightest(margins_after);
-	const bool kept = !lost_any && candidate_evaluation.viewpoint_ik.num_reached >= current_evaluation.viewpoint_ik.num_reached && tightest_after > tightest_before + 1e-3;
-	RCLCPP_INFO(this->node->get_logger(), "iteration %d reach room: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d  blocked misses %zu  tightest margin %.2f -> %.2f floors%s", iteration, object_step, candidate_evaluation.viewpoint_ik.position.x(), candidate_evaluation.viewpoint_ik.position.y(), candidate_evaluation.viewpoint_ik.position.z(), candidate_evaluation.viewpoint_ik.num_reached, blocked_viewpoints.size(), tightest_before, tightest_after, kept ? "  <-- kept" : "");
+	// Kept if it loses at most allowed_reach_loss of the reached viewpoints and reaches more or frees the misses.
+	const bool loss_allowed = static_cast<double>(num_lost) <= this->cost_weights.allowed_reach_loss * static_cast<double>(current_evaluation.viewpoint_ik.num_reached);
+	const bool kept = loss_allowed && (candidate_evaluation.viewpoint_ik.num_reached > current_evaluation.viewpoint_ik.num_reached || tightest_after > tightest_before + 1e-3);
+	RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %d)  blocked misses %zu  tightest margin %.2f -> %.2f floors  reached kept clear: %s%s", iteration, object_step, candidate_evaluation.viewpoint_ik.position.x(), candidate_evaluation.viewpoint_ik.position.y(), candidate_evaluation.viewpoint_ik.position.z(), candidate_evaluation.viewpoint_ik.num_reached, num_lost, blocked_viewpoints.size(), tightest_before, tightest_after, keeps_reached_clear ? "yes" : "no", kept ? "  <-- kept" : "");
 	if (!kept)
 		return false;
 	current_evaluation = candidate_evaluation;
 	this->object_trail.push_back(current_evaluation.viewpoint_ik.position);
-	this->publishProgressMarkers(current_evaluation.viewpoint_ik, current_evaluation.order, room_direction);
+	this->publishProgressMarkers(current_evaluation.viewpoint_ik, current_evaluation.order, move_direction);
 	return true;
 }
 
@@ -401,44 +395,10 @@ DescentDirection Optimizer::getTourDirection(const ObjectPositionEvaluation& eva
 	return direction;
 }
 
-// The line the object went back and forth on: it came back near a spot it left a few kept moves ago; the axis points from
-// here to the farthest spot since. Zero if there was no such return.
-Eigen::Vector3d Optimizer::getBounceAxis() const
+// The move without its parts that would tighten any of the margins (repeated, as dropping one part can tighten another).
+Eigen::Vector3d Optimizer::dropPartsTighteningMargins(const Eigen::Vector3d& move, const std::vector<room_margins::Margin>& margins) const
 {
-	const double return_distance = 0.01;  // m: this near an earlier spot counts as back
-	const size_t skipped_moves = 2;  // the last moves before now don't count as earlier spots
-	const size_t looked_back_moves = 10;
-	const std::vector<Eigen::Vector3d>& trail = this->object_trail;
-	if (trail.size() < skipped_moves + 2)
-		return Eigen::Vector3d::Zero();
-	const Eigen::Vector3d& now = trail.back();
-	const size_t oldest = trail.size() > looked_back_moves + 1 ? trail.size() - 1 - looked_back_moves : 0;
-	for (size_t earlier = trail.size() - 1 - skipped_moves; earlier + 1 > oldest; --earlier)
-	{
-		if ((trail[earlier] - now).norm() < return_distance)
-		{
-			Eigen::Vector3d farthest = now;
-			for (size_t since = earlier + 1; since + 1 < trail.size(); ++since)
-				if ((trail[since] - now).norm() > (farthest - now).norm())
-					farthest = trail[since];
-			if ((farthest - now).norm() > return_distance)
-				return (farthest - now).normalized();
-		}
-		if (earlier == 0)
-			break;
-	}
-	return Eigen::Vector3d::Zero();
-}
-
-Eigen::Vector3d Optimizer::getRoomThenReachDirection(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& lost_viewpoints, const Eigen::Vector3d& aim, const Eigen::Vector3d& bounce_axis, double object_step)
-{
-	const double lost_margin_floors = 6.0;  // margins up to this many floors count as at risk
-	const std::vector<room_margins::Margin> margins = this->getBlockingMarginsOfViewpoints(viewpoint_ik, lost_viewpoints, lost_margin_floors);
-	if (margins.empty())
-		return Eigen::Vector3d::Zero();
-	// After a back and forth, the part along that line is dropped first, so the move goes across it.
-	auto drop_bounce_part = [&](const Eigen::Vector3d& move) { return Eigen::Vector3d(move - move.dot(bounce_axis) * bounce_axis); };
-	Eigen::Vector3d direction = drop_bounce_part(aim);
+	Eigen::Vector3d direction = move;
 	for (int round = 0; round < 20; ++round)
 	{
 		bool changed = false;
@@ -453,11 +413,7 @@ Eigen::Vector3d Optimizer::getRoomThenReachDirection(const ViewpointIkAtPosition
 		if (!changed)
 			break;
 	}
-	if (direction.norm() >= 0.3 * aim.norm())
-		return direction.normalized();
-	const Eigen::Vector3d most_room = room_margins::MostRoomDirection(margins, object_step);
-	const Eigen::Vector3d most_room_across = drop_bounce_part(most_room);
-	return most_room_across.norm() > 0.3 ? Eigen::Vector3d(most_room_across.normalized()) : most_room;
+	return direction;
 }
 
 Eigen::Vector3d Optimizer::combineMovesWithoutConflict(const std::vector<Eigen::Vector3d>& moves) const

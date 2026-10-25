@@ -5,8 +5,8 @@
   ros__parameters:
     # Start position and search box
     initial_x: 0.242                      # below the home tool0, halfway between the table and the tool
-    initial_y: 0.05
-    initial_z: 0.107
+    initial_y: -0.05
+    initial_z: 0.307
     x_min: 0.2
     x_max: 0.6
     y_min: -0.6
@@ -66,15 +66,15 @@
     co_closest_ik_extra_starts: 3         # random starts also tried for a miss's closest pose
     co_closest_gap_slack: 0.005           # m: closest poses this near the best gap (with room, if any) are GTSP choices
 
-    # Reach step: kept if it reaches more viewpoints, or as many with smaller gaps; room-then-reach when it loses some.
+    # Reach step: kept if it reaches more viewpoints, or as many with smaller gaps; else room-then-reach frees what blocks the misses.
     # Tour steps: kept if the total cost drops (rad of tour length); they may lose viewpoints if the gain beats their gaps.
     # Reach
     co_miss_cost: 0.0                     # cost per missed viewpoint at equal reach (0: only the smooth gap charge below)
     co_initial_penalty: 100.0             # cost per m of missed gap
     co_penalty_growth: 10.0               # when settled with misses, the penalty grows this much
     co_max_penalty: 100000.0
-    co_room: true                         # room tries for blocked misses, and room-then-reach for viewpoints a reach step loses
-    co_allowed_reach_loss: 0.15           # share of the reached viewpoints a room-then-reach try may lose if the gap sum drops
+    co_room: true                         # room-then-reach: moves that free what blocks the misses, steered off what blocks the reached ones
+    co_allowed_reach_loss: 0.10           # share of the reached viewpoints a room-then-reach move may lose
 
     # Reconfigurations
     co_neighbor_ik: true                  # reorders also try IK from each pose's tour neighbours

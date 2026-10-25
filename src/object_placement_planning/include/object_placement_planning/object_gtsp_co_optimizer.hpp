@@ -1,6 +1,6 @@
 #pragma once
 // Object placement in one descent (object_gtsp_co_optimize). Each iteration: a reach step moves the object to reach more
-// viewpoints (room-then-reach when it loses reached ones); then, for the tour (length + reconfigurations, joints kept off
+// viewpoints (room-then-reach frees what blocks the misses); then, for the tour (length + reconfigurations, joints kept off
 // their limits), IK is re-solved with the object held still (self-motion slides, GTSP reorder, straight camera paths) and the
 // object is moved. Each pose follows the object by IK from its last pose, so it keeps its posture. Repeats until nothing
 // changes.
@@ -78,7 +78,7 @@ struct DescentLimits
 // Parts of the method that can be turned off (ablations).
 struct MethodSwitches
 {
-	bool use_room = true;  // room tries for blocked misses, and room-then-reach for viewpoints a reach step loses
+	bool use_room = true;  // room-then-reach: moves that free what blocks the misses
 	bool use_neighbor_ik = true;  // reorders also offer IK from each pose's tour neighbours
 	bool use_slide = true;  // poses slide along their self-motion
 	bool tour_object_move = true;  // false = the object moves only for reach
@@ -92,7 +92,7 @@ struct CostWeights
 	double initial_penalty = 100.0;  // cost per m of missed gap
 	double penalty_growth = 10.0;
 	double max_penalty = 1e5;
-	double allowed_reach_loss = 0.15;  // share of the reached viewpoints a room-then-reach try may lose if the gap sum drops
+	double allowed_reach_loss = 0.15;  // share of the reached viewpoints a room-then-reach move may lose
 	double reconfiguration_cost = 2.0;  // cost per reconfiguration
 	double joint_room_band = 0.2;  // rad beyond the hard limit a joint should keep
 	double joint_room_weight = 50.0;  // cost per rad^2 of room shortfall
@@ -186,8 +186,7 @@ private:
 	Eigen::Vector3d combineMovesWithoutConflict(const std::vector<Eigen::Vector3d>& moves) const;
 	std::vector<Eigen::VectorXd> getTourCostSlopePerPose(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
 	std::vector<Joints> getPosesAfterJointSlides(const ViewpointIkAtPosition& viewpoint_ik, const DescentDirection& direction, double slide_step) const;
-	Eigen::Vector3d getRoomThenReachDirection(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& lost_viewpoints, const Eigen::Vector3d& aim, const Eigen::Vector3d& bounce_axis, double object_step);
-	Eigen::Vector3d getBounceAxis() const;
+	Eigen::Vector3d dropPartsTighteningMargins(const Eigen::Vector3d& move, const std::vector<room_margins::Margin>& margins) const;
 
 	// Joint room and blocking margins
 	double getSmallestJacobianSingularValue(const Joints& joint_values);
