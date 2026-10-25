@@ -1,6 +1,7 @@
 #pragma once
 // Object placement in one descent (object_gtsp_co_optimize). Each iteration: a reach step moves the object to reach more
-// viewpoints (room-then-reach frees what blocks the misses); then, for the tour (length + reconfigurations, joints kept off
+// viewpoints (room-then-reach frees what blocks the misses; once all are reached, what stops the reconfiguration edges'
+// camera paths); then, for the tour (length + reconfigurations, joints kept off
 // their limits), IK is re-solved with the object held still (self-motion slides, GTSP reorder, straight camera paths) and the
 // object is moved. Each pose follows the object by IK from its last pose, so it keeps its posture. Repeats until nothing
 // changes.
@@ -79,6 +80,7 @@ struct DescentLimits
 struct MethodSwitches
 {
 	bool use_room = true;  // room-then-reach: moves that free what blocks the misses
+	bool use_reconfiguration_room = true;  // once all are reached: moves that free what stops the reconfiguration edges' camera paths
 	bool use_neighbor_ik = true;  // reorders also offer IK from each pose's tour neighbours
 	bool use_slide = true;  // poses slide along their self-motion
 	bool tour_object_move = true;  // false = the object moves only for reach
@@ -176,6 +178,7 @@ private:
 	bool moveObjectToReachMore(ObjectPositionEvaluation& current_evaluation, double& object_step, double miss_gap_penalty, int iteration);
 	bool moveObjectToLowerCost(ObjectPositionEvaluation& current_evaluation, double& object_step, double miss_gap_penalty, int iteration);
 	bool moveObjectToUnblockMisses(ObjectPositionEvaluation& current_evaluation, double object_step, double miss_gap_penalty, int iteration);
+	bool moveObjectToFreeReconfigurations(ObjectPositionEvaluation& current_evaluation, double& object_step, double miss_gap_penalty, int iteration);
 	ObjectPositionEvaluation solveAndImproveAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds, const std::vector<int>& order, double miss_gap_penalty);
 
 	// Step directions
@@ -187,12 +190,14 @@ private:
 	std::vector<Eigen::VectorXd> getTourCostSlopePerPose(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
 	std::vector<Joints> getPosesAfterJointSlides(const ViewpointIkAtPosition& viewpoint_ik, const DescentDirection& direction, double slide_step) const;
 	Eigen::Vector3d dropPartsTighteningMargins(const Eigen::Vector3d& move, const std::vector<room_margins::Margin>& margins) const;
+	Eigen::Vector3d getRoomMoveDirection(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<room_margins::Margin>& margins, double object_step, bool& keeps_reached_clear);
 
 	// Joint room and blocking margins
 	double getSmallestJacobianSingularValue(const Joints& joint_values);
 	double getJointRoomShortfall(const Joints& joint_values, Eigen::VectorXd* slope) const;
 	std::vector<room_margins::Margin> getBlockingMarginsOfPose(size_t viewpoint_index, const Joints& joint_values, double near_floors = 2.0);
 	std::vector<room_margins::Margin> getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, double near_floors);
+	std::vector<room_margins::Margin> getBlockingMarginsOfReconfigurations(const ObjectPositionEvaluation& evaluation, double near_floors);
 
 	// IK
 	uint32_t getRandomIkSeed(const Eigen::Vector3d& position, size_t viewpoint_index) const;
@@ -205,7 +210,7 @@ private:
 	std::vector<closest_ik::Result> solveClosestIkFromStarts(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts);
 
 	// Tour order and reconfigurations
-	bool followStraightCameraPath(moveit::core::RobotState& state, const Joints& from_pose, const Joints& to_pose, Joints& arrival_pose);
+	bool followStraightCameraPath(moveit::core::RobotState& state, const Joints& from_pose, const Joints& to_pose, Joints& end_pose);
 	int followTourAlongStraightCameraPaths(ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order);
 	void bringMissesCloserFromNeighbors(ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order);
 	std::vector<size_t> getReconfigurationEdges(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order, std::vector<Joints>* arrival_poses = nullptr);
