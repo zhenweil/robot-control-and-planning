@@ -195,9 +195,9 @@ private:
 	// Joint room and blocking margins
 	double getSmallestJacobianSingularValue(const Joints& joint_values);
 	double getJointRoomShortfall(const Joints& joint_values, Eigen::VectorXd* slope) const;
-	std::vector<room_margins::Margin> getBlockingMarginsOfPose(size_t viewpoint_index, const Joints& joint_values, double near_floors = 2.0);
-	std::vector<room_margins::Margin> getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, double near_floors);
-	std::vector<room_margins::Margin> getBlockingMarginsOfReconfigurations(const TourSolutionAtObjectPosition& solution, double near_floors);
+	std::vector<room_margins::Margin> getBlockingMarginsOfPose(size_t viewpoint_index, const Joints& joint_values, double blocking_distance_multiple = 2.0);
+	std::vector<room_margins::Margin> getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, double blocking_distance_multiple);
+	std::vector<room_margins::Margin> getBlockingMarginsOfReconfigurations(const TourSolutionAtObjectPosition& solution, double blocking_distance_multiple);
 
 	// IK
 	uint32_t getRandomIkSeed(const Eigen::Vector3d& position, size_t viewpoint_index) const;

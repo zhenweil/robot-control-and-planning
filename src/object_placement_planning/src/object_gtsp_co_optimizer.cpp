@@ -149,7 +149,7 @@ TourSolutionAtObjectPosition Optimizer::solveIkAndImproveTourAtPosition(const Ei
 	solution.viewpoint_ik = this->solveViewpointIkAtPosition(this->clampToSearchBox(position), start_poses, fallback_start_poses);
 	// No order yet (the descent start): a first one from GTSP, since an empty tour would score as almost free.
 	if (order.empty())
-		solution.order = this->reorderTourWithGtsp(solution.viewpoint_ik, {});
+		solution.order = this->reorderTourWithGtsp(solution.viewpoint_ik, {}); // Sample multiple IKs for each viewpoint once, then solve GTSP multiple times.
 	else
 		solution.order = order;
 	this->improveOrderAndPosturesWithObjectFixed(solution);
@@ -165,7 +165,7 @@ void Optimizer::improveOrderAndPosturesWithObjectFixed(TourSolutionAtObjectPosit
 	this->refinePosesAndComputeCost(solution_to_complete); // Keeps order fixed and refine IK solutions.
 	double cost_seconds = get_seconds_since(since);
 	since = std::chrono::steady_clock::now();
-	reordered_solution.order = this->reorderTourWithGtsp(reordered_solution.viewpoint_ik, reordered_solution.order);
+	reordered_solution.order = this->reorderTourWithGtsp(reordered_solution.viewpoint_ik, reordered_solution.order); // Sample multiple IKs for each viewpoint once, then solve GTSP multiple times.
 	const double gtsp_seconds = get_seconds_since(since);
 	since = std::chrono::steady_clock::now();
 	this->refinePosesAndComputeCost(reordered_solution);
@@ -320,7 +320,7 @@ bool Optimizer::moveObjectToLowerCost(TourSolutionAtObjectPosition& current_solu
 
 bool Optimizer::moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_solution, double object_step, int iteration)
 {
-	const double near_floors = 6.0;
+	const double blocking_distance_multiple = 6.0;  // a limit is blocking if closer than this multiple of its safe distance (joint 0.05 rad, stretch 0.02, collision 1 cm)
 	// All misses: this runs after a reach step toward them failed; a miss with nothing limiting its pose adds no margin.
 	std::vector<size_t> missed_viewpoints;
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
@@ -328,16 +328,17 @@ bool Optimizer::moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_
 			missed_viewpoints.push_back(viewpoint_index);
 	if (missed_viewpoints.empty())
 		return false;
-	const std::vector<room_margins::Margin> margins_before = this->getBlockingMarginsOfViewpoints(current_solution.viewpoint_ik, missed_viewpoints, near_floors);
+	const std::vector<room_margins::Margin> margins_before = this->getBlockingMarginsOfViewpoints(current_solution.viewpoint_ik, missed_viewpoints, blocking_distance_multiple);
 	bool keeps_reached_clear = false;
 	const Eigen::Vector3d move_direction = this->getRoomMoveDirection(current_solution.viewpoint_ik, margins_before, object_step, keeps_reached_clear);
 	if (move_direction.isZero())
 		return false;
+	
 	const TourSolutionAtObjectPosition candidate_solution = this->solveIkAndImproveTourAtPosition(current_solution.viewpoint_ik.position + object_step * move_direction, this->getChosenPoses(current_solution.viewpoint_ik), {}, current_solution.order);
 	int num_lost = 0;
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
 		num_lost += current_solution.viewpoint_ik.reached[viewpoint_index] && !candidate_solution.viewpoint_ik.reached[viewpoint_index] ? 1 : 0;
-	const std::vector<room_margins::Margin> margins_after = this->getBlockingMarginsOfViewpoints(candidate_solution.viewpoint_ik, missed_viewpoints, near_floors);
+	const std::vector<room_margins::Margin> margins_after = this->getBlockingMarginsOfViewpoints(candidate_solution.viewpoint_ik, missed_viewpoints, blocking_distance_multiple);
 	const double tightest_before = room_margins::Tightest(margins_before);
 	const double tightest_after = margins_after.empty() ? std::numeric_limits<double>::infinity() : room_margins::Tightest(margins_after);
 	// Kept if it loses at most allowed_reach_loss of the reached viewpoints and reaches more or frees the misses.
@@ -356,8 +357,8 @@ bool Optimizer::moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_
 // they stopped. Kept if no viewpoint is lost and there are fewer reconfigurations, or as many with their blockers freed.
 bool Optimizer::moveObjectToUnblockReconfigurations(TourSolutionAtObjectPosition& current_solution, double& object_step, int iteration)
 {
-	const double near_floors = 6.0;  // as for the misses
-	const std::vector<room_margins::Margin> margins_before = this->getBlockingMarginsOfReconfigurations(current_solution, near_floors);
+	const double blocking_distance_multiple = 6.0;  // as for the misses
+	const std::vector<room_margins::Margin> margins_before = this->getBlockingMarginsOfReconfigurations(current_solution, blocking_distance_multiple);
 	for (int attempt = 0; attempt < this->step_sizes.max_line_search_tries && object_step >= this->step_sizes.min_step; ++attempt)
 	{
 		bool keeps_reached_clear = false;
@@ -365,7 +366,7 @@ bool Optimizer::moveObjectToUnblockReconfigurations(TourSolutionAtObjectPosition
 		if (move_direction.isZero())
 			break;
 		const TourSolutionAtObjectPosition candidate_solution = this->solveIkAndImproveTourAtPosition(current_solution.viewpoint_ik.position + object_step * move_direction, this->getChosenPoses(current_solution.viewpoint_ik), {}, current_solution.order);
-		const std::vector<room_margins::Margin> margins_after = candidate_solution.num_reconfigurations > 0 ? this->getBlockingMarginsOfReconfigurations(candidate_solution, near_floors) : std::vector<room_margins::Margin>();
+		const std::vector<room_margins::Margin> margins_after = candidate_solution.num_reconfigurations > 0 ? this->getBlockingMarginsOfReconfigurations(candidate_solution, blocking_distance_multiple) : std::vector<room_margins::Margin>();
 		const double tightest_before = room_margins::Tightest(margins_before);
 		const double tightest_after = margins_after.empty() ? std::numeric_limits<double>::infinity() : room_margins::Tightest(margins_after);
 		const bool keeps_all_reached = candidate_solution.viewpoint_ik.num_reached == current_solution.viewpoint_ik.num_reached;
@@ -395,19 +396,19 @@ Eigen::Vector3d Optimizer::getRoomMoveDirection(const ViewpointIkAtPosition& vie
 	const Eigen::Vector3d room_direction = room_margins::MostRoomDirection(margins, object_step);
 	if (room_direction.isZero())
 		return Eigen::Vector3d::Zero();
-	const double reached_near_floors = 2.0;
+	const double reached_blocking_distance_multiple = 2.0;
 	std::vector<size_t> reached_viewpoints;
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
 		if (viewpoint_ik.reached[viewpoint_index])
 			reached_viewpoints.push_back(viewpoint_index);
-	const Eigen::Vector3d kept_clear_direction = this->dropPartsTighteningMargins(room_direction, this->getBlockingMarginsOfViewpoints(viewpoint_ik, reached_viewpoints, reached_near_floors));
+	const Eigen::Vector3d kept_clear_direction = this->dropPartsTighteningMargins(room_direction, this->getBlockingMarginsOfViewpoints(viewpoint_ik, reached_viewpoints, reached_blocking_distance_multiple));
 	keeps_reached_clear = kept_clear_direction.norm() >= 0.3;
 	return keeps_reached_clear ? Eigen::Vector3d(kept_clear_direction.normalized()) : room_direction;
 }
 
 // Margins at the poses where the tour's straight camera paths stopped (a pose on the path moves with the object like a
 // viewpoint's pose), labelled with the edge's target viewpoint.
-std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfReconfigurations(const TourSolutionAtObjectPosition& solution, double near_floors)
+std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfReconfigurations(const TourSolutionAtObjectPosition& solution, double blocking_distance_multiple)
 {
 	std::vector<Joints> end_poses;
 	const std::vector<size_t> reconfiguration_edges = this->getReconfigurationEdges(solution.viewpoint_ik, solution.order, &end_poses);
@@ -416,7 +417,7 @@ std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfReconfiguration
 	{
 		if (end_poses[tour_position].empty())
 			continue;
-		const std::vector<room_margins::Margin> edge_margins = this->getBlockingMarginsOfPose(static_cast<size_t>(solution.order[tour_position]), end_poses[tour_position], near_floors);
+		const std::vector<room_margins::Margin> edge_margins = this->getBlockingMarginsOfPose(static_cast<size_t>(solution.order[tour_position]), end_poses[tour_position], blocking_distance_multiple);
 		margins.insert(margins.end(), edge_margins.begin(), edge_margins.end());
 	}
 	return margins;
@@ -599,24 +600,24 @@ Eigen::MatrixXd Optimizer::getSelfMotionProjector(const Eigen::MatrixXd& jacobia
 	return null_basis * null_basis.transpose();
 }
 
-std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, double near_floors)
+std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, double blocking_distance_multiple)
 {
 	scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(viewpoint_ik.position, this->object_rotation));
 	std::vector<room_margins::Margin> margins;
 	for (size_t viewpoint_index : viewpoint_indices)
 	{
-		const std::vector<room_margins::Margin> viewpoint_margins = this->getBlockingMarginsOfPose(viewpoint_index, viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q, near_floors);
+		const std::vector<room_margins::Margin> viewpoint_margins = this->getBlockingMarginsOfPose(viewpoint_index, viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q, blocking_distance_multiple);
 		margins.insert(margins.end(), viewpoint_margins.begin(), viewpoint_margins.end());
 	}
 	return margins;
 }
 
-std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfPose(size_t viewpoint_index, const Joints& joint_values, double near_floors)
+std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfPose(size_t viewpoint_index, const Joints& joint_values, double blocking_distance_multiple)
 {
-	const double joint_floor = 0.05;  // rad
-	const double stretch_floor = 0.02;
-	const double collision_floor = 0.01;  // m
-	const double window = this->ik_settings.closest_options.margin + near_floors * collision_floor;  // m, collision pairs looked at
+	const double joint_safe_distance = 0.05;  // rad
+	const double stretch_safe_distance = 0.02;
+	const double collision_safe_distance = 0.01;  // m
+	const double window = this->ik_settings.closest_options.margin + blocking_distance_multiple * collision_safe_distance;  // m, collision pairs looked at
 	const int num_joints = static_cast<int>(joint_values.size());
 	const Eigen::MatrixXd joint_rate_per_object_move = scene_geometry::DampedPinv(manipulability::ToolJacobian(*this->state, this->group, this->tool, joint_values), this->ik_settings.jacobian_damping).leftCols<3>();
 	const std::vector<const moveit::core::JointModel*>& joints = this->group->getActiveJointModels();
@@ -630,13 +631,13 @@ std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfPose(size_t vie
 		const std::string joint_name = joints[static_cast<size_t>(joint_index)]->getName();
 		const double room_to_lower_limit = joint_values[static_cast<size_t>(joint_index)] - bounds.min_position_;
 		const double room_to_upper_limit = bounds.max_position_ - joint_values[static_cast<size_t>(joint_index)];
-		if (room_to_lower_limit < near_floors * joint_floor)
-			margins.push_back({static_cast<int>(viewpoint_index), joint_name + " low limit", room_to_lower_limit, joint_floor, joint_rate_per_object_move.transpose() * joint_direction, joint_direction});
-		if (room_to_upper_limit < near_floors * joint_floor)
-			margins.push_back({static_cast<int>(viewpoint_index), joint_name + " high limit", room_to_upper_limit, joint_floor, joint_rate_per_object_move.transpose() * -joint_direction, -joint_direction});
+		if (room_to_lower_limit < blocking_distance_multiple * joint_safe_distance)
+			margins.push_back({static_cast<int>(viewpoint_index), joint_name + " low limit", room_to_lower_limit, joint_safe_distance, joint_rate_per_object_move.transpose() * joint_direction, joint_direction});
+		if (room_to_upper_limit < blocking_distance_multiple * joint_safe_distance)
+			margins.push_back({static_cast<int>(viewpoint_index), joint_name + " high limit", room_to_upper_limit, joint_safe_distance, joint_rate_per_object_move.transpose() * -joint_direction, -joint_direction});
 	}
 	const double stretch = this->getSmallestJacobianSingularValue(joint_values);
-	if (stretch < near_floors * stretch_floor)
+	if (stretch < blocking_distance_multiple * stretch_safe_distance)
 	{
 		const double delta = 1e-5;  // rad
 		Eigen::VectorXd stretch_slope(num_joints);
@@ -646,7 +647,7 @@ std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfPose(size_t vie
 			shifted[static_cast<size_t>(joint_index)] += delta;
 			stretch_slope(joint_index) = (this->getSmallestJacobianSingularValue(shifted) - stretch) / delta;
 		}
-		margins.push_back({static_cast<int>(viewpoint_index), "stretch", stretch, stretch_floor, joint_rate_per_object_move.transpose() * stretch_slope, stretch_slope});
+		margins.push_back({static_cast<int>(viewpoint_index), "stretch", stretch, stretch_safe_distance, joint_rate_per_object_move.transpose() * stretch_slope, stretch_slope});
 	}
 	this->state->setJointGroupPositions(this->group, joint_values);
 	this->state->update();
@@ -654,7 +655,7 @@ std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfPose(size_t vie
 	for (size_t pair_index = 0; pair_index < close_pairs.dists.size(); ++pair_index)
 	{
 		const Eigen::VectorXd joint_slope = close_pairs.gradients[pair_index].transpose();
-		margins.push_back({static_cast<int>(viewpoint_index), "collision " + close_pairs.names[pair_index], close_pairs.dists[pair_index], collision_floor, joint_rate_per_object_move.transpose() * joint_slope + close_pairs.object_slopes[pair_index], joint_slope});
+		margins.push_back({static_cast<int>(viewpoint_index), "collision " + close_pairs.names[pair_index], close_pairs.dists[pair_index], collision_safe_distance, joint_rate_per_object_move.transpose() * joint_slope + close_pairs.object_slopes[pair_index], joint_slope});
 	}
 	return margins;
 }
