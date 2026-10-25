@@ -134,7 +134,7 @@ public:
 		auto GetElapsedSeconds = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count(); };
 		object_gtsp_co_optimize::Optimizer optimizer(this->shared_from_this(), model, scene, group_name, viewpoints, object_rotation, home_pose, descent_limits, this->readMethodSwitches(), this->readCostWeights(), this->readStepSizes(), this->readIkSettings(), tour_settings, progress_pub, mesh_path, mesh_scale);
 		// One descent from the given start, no restarts.
-		const object_gtsp_co_optimize::ObjectPositionEvaluation best = optimizer.runDescent(start);
+		const object_gtsp_co_optimize::TourSolutionAtObjectPosition best = optimizer.runDescent(start);
 		const double search_seconds = GetElapsedSeconds();
 		const bool all_reached = best.viewpoint_ik.num_reached == num_viewpoint;
 
