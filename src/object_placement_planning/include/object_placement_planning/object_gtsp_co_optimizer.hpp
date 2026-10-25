@@ -89,7 +89,6 @@ struct MethodSwitches
 {
 	bool use_room = true;  // room-then-reach: moves that free what blocks the misses
 	bool use_reconfiguration_room = true;  // once all are reached: moves that free what stops the reconfiguration edges' camera paths
-	bool use_neighbor_ik = true;  // reorders also offer IK from each pose's tour neighbours
 	bool use_slide = true;  // poses slide along their self-motion
 	bool tour_object_move = true;  // false = the object moves only for reach
 	bool freeze_object_when_reached = false;  // true = the object stays put once every viewpoint is reached

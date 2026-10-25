@@ -78,7 +78,6 @@
     co_allowed_reach_loss: 0.10           # share of the reached viewpoints a room-then-reach move may lose
 
     # Reconfigurations
-    co_neighbor_ik: true                  # reorders also try IK from each pose's tour neighbours
     co_reconfiguration_cost: 2.0          # cost per reconfiguration
 
     # Joints kept off their limits

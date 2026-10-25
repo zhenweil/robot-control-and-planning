@@ -266,7 +266,6 @@ private:
 		object_gtsp_co_optimize::MethodSwitches method_switches;
 		method_switches.use_room = this->getParameter<bool>("co_room", true);
 		method_switches.use_reconfiguration_room = this->getParameter<bool>("co_reconfiguration_room", true);
-		method_switches.use_neighbor_ik = this->getParameter<bool>("co_neighbor_ik", true);
 		method_switches.use_slide = this->getParameter<bool>("co_slide", true);
 		method_switches.tour_object_move = this->getParameter<bool>("co_tour_object_move", true);
 		method_switches.freeze_object_when_reached = this->getParameter<bool>("co_freeze_object_when_reached", false);

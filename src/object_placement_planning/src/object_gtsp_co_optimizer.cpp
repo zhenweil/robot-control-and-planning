@@ -917,26 +917,29 @@ std::vector<Joints> Optimizer::getChosenPoses(const ViewpointIkAtPosition& viewp
 	return poses;
 }
 
+// Sample multiple IKs for each viewpoint once, then solve GTSP multiple times
 std::vector<int> Optimizer::reorderTourWithGtsp(ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order)
 {
-	std::vector<std::vector<Joints>> candidates(this->viewpoints.size());
+	std::vector<std::vector<Joints>> ik_candidates(this->viewpoints.size());
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
 	{
-		candidates[viewpoint_index].push_back(viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q);
+		// Copy the already solved first round IK into ik_candidates.
+		ik_candidates[viewpoint_index].push_back(viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q);
 		// A missed viewpoint's other closest poses (near its best gap, with room): GTSP picks by tour.
-		if (!viewpoint_ik.reached[viewpoint_index] && viewpoint_index < viewpoint_ik.closest_ik_candidates.size())
-			for (ClosestIkCandidate& candidate : viewpoint_ik.closest_ik_candidates[viewpoint_index])
+		if (!viewpoint_ik.reached[viewpoint_index]) // For unreached viewpoints.
+			for (ClosestIkCandidate& closest_ik_candidate : viewpoint_ik.closest_ik_candidates[viewpoint_index])
 			{
-				// Same turn as the current pose (see unwrapFullTurnJointsAlongTour), so the GTSP choice can be matched back to its gap below.
-				this->unwrapFullTurnJointsToward(candidate.q, viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q);
-				if (candidate.q != viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q)
-					candidates[viewpoint_index].push_back(candidate.q);
+				this->unwrapFullTurnJointsToward(closest_ik_candidate.q, viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q); // Remove the fake full circle turn. e.g. Change from 370° to 10°.
+				if (closest_ik_candidate.q != viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q) // Make sure an IK solution is not added twice.
+					ik_candidates[viewpoint_index].push_back(closest_ik_candidate.q); 
 			}
 	}
-	if (this->method_switches.use_neighbor_ik && order.size() == this->viewpoints.size())
+	if (order.size() == this->viewpoints.size()) // Make sure we have an initial order to start with.
 	{
-		scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(viewpoint_ik.position, this->object_rotation));
+		scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(viewpoint_ik.position, this->object_rotation)); // Put object at the current evaluation position.
 		std::vector<std::thread> threads;
+
+		// Find extra IKs for each viewpoint. 
 		for (unsigned int thread_index = 0; thread_index < this->num_threads; ++thread_index)
 			threads.emplace_back([&, thread_index]()
 			{
@@ -944,30 +947,40 @@ std::vector<int> Optimizer::reorderTourWithGtsp(ViewpointIkAtPosition& viewpoint
 				for (size_t tour_position = thread_index; tour_position < order.size(); tour_position += this->num_threads)
 				{
 					const size_t viewpoint_index = static_cast<size_t>(order[tour_position]);
-					if (!viewpoint_ik.reached[viewpoint_index])
+					if (!viewpoint_ik.reached[viewpoint_index]) // Skip missed viewpoints. Will be solved afterwards.
 						continue;
 					const Eigen::Isometry3d target = scene_geometry::Translation(viewpoint_ik.position) * this->viewpoints[viewpoint_index];
-					std::vector<const Joints*> neighbor_poses = {tour_position == 0 ? &this->home_pose : &viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position - 1])].q};
+
+					// Add previous and next viewpoint IK as a start point for exact IK.
+					std::vector<const Joints*> neighbor_poses;
+					if (tour_position == 0)
+						neighbor_poses.push_back(&this->home_pose);
+					else
+						neighbor_poses.push_back(&viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position - 1])].q);
 					if (tour_position + 1 < order.size())
 						neighbor_poses.push_back(&viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position + 1])].q);
+					
+					// Now start exact IK solve.
 					for (const Joints* neighbor_pose : neighbor_poses)
 					{
 						const closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, *neighbor_pose, this->ik_settings.exact_options);
 						if (result.exact)
-							candidates[viewpoint_index].push_back(result.q);
+							ik_candidates[viewpoint_index].push_back(result.q);
 					}
 				}
 			});
 		for (std::thread& thread : threads)
 			thread.join();
 	}
-	// Each reached viewpoint's IK from the fixed reference postures too, so GTSP can switch it to a posture family no tour
-	// pose uses yet (the poses above all come from the tour's own postures).
+
+	// For each viewpoint, solve more IKs from reference postures.
 	if (!this->reference_postures.empty())
 	{
 		scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(viewpoint_ik.position, this->object_rotation));
-		const double same_pose_distance = 0.1;	// rad: closer than this to a candidate already there adds nothing
+		const double same_pose_distance = 0.1;	// rad: closer than this to a candidate already there adds nothing.
 		std::vector<std::thread> threads;
+
+		// Solve exact IK using reference postures as start pose, unwrap, and not add them if they are too similar to other IKs.
 		for (unsigned int thread_index = 0; thread_index < this->num_threads; ++thread_index)
 			threads.emplace_back([&, thread_index]()
 			{
@@ -983,58 +996,69 @@ std::vector<int> Optimizer::reorderTourWithGtsp(ViewpointIkAtPosition& viewpoint
 						if (!result.exact)
 							continue;
 						this->unwrapFullTurnJointsToward(result.q, viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q);
-						const bool is_new = std::none_of(candidates[viewpoint_index].begin(), candidates[viewpoint_index].end(), [&](const Joints& candidate) { return joint_travel::JointDistance(candidate, result.q, this->counted_joints) < same_pose_distance; });
+						const bool is_new = std::none_of(ik_candidates[viewpoint_index].begin(), ik_candidates[viewpoint_index].end(), [&](const Joints& candidate) { return joint_travel::JointDistance(candidate, result.q, this->counted_joints) < same_pose_distance; });
 						if (is_new)
-							candidates[viewpoint_index].push_back(result.q);
+							ik_candidates[viewpoint_index].push_back(result.q);
 					}
 				}
 			});
 		for (std::thread& thread : threads)
 			thread.join();
 	}
-	// Candidates in the same turn as the viewpoint's current pose, so GTSP doesn't see fake full-turn swings.
+
+	// Additional unwrap to make sure robot doesn't do fake full turn.
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
-		for (Joints& candidate : candidates[viewpoint_index])
+		for (Joints& candidate : ik_candidates[viewpoint_index])
 			this->unwrapFullTurnJointsToward(candidate, viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q);
-	gtsp::Solver solver(candidates, this->home_pose, this->tour_settings.edge_weights, this->tour_settings.two_opt_rounds);
+
+	// Solve GTSP.
+	gtsp::Solver solver(ik_candidates, this->home_pose, this->tour_settings.edge_weights, this->tour_settings.two_opt_rounds);
 	solver.SetTravelJoints(this->counted_joints);
 	gtsp::Tour tour = solver.Solve(order);
-	// GTSP sees straight-line lengths only: charge the chosen edges whose straight move collides (their detour) or that the
-	// arm can't follow on the straight camera path (a reconfiguration) and solve again, so the order can route around them
-	// (checking every pair up front would be too slow).
+
+	// Try to fix reconfiguration between viewpoints.
 	for (int round = 0; round < this->tour_settings.gtsp_blocked_rounds; ++round)
 	{
 		ViewpointIkAtPosition tour_viewpoint_ik = viewpoint_ik;
+		// Copy solved GTSP.
 		for (size_t tour_position = 0; tour_position < tour.order.size(); ++tour_position)
 			tour_viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(tour.order[tour_position])].q = tour.poses[tour_position];
-		std::vector<std::pair<size_t, double>> charged_edges = this->cost_weights.blocked_edge_charge > 0.0 ? this->getBlockedEdgeDetourCharges(tour_viewpoint_ik, tour.order) : std::vector<std::pair<size_t, double>>();
-		for (size_t tour_position : this->getReconfigurationEdges(tour_viewpoint_ik, tour.order))
+
+		std::vector<std::pair<size_t, double>> charged_edges;
+		if (this->cost_weights.blocked_edge_charge > 0.0)
+			charged_edges = this->getBlockedEdgeDetourCharges(tour_viewpoint_ik, tour.order); // Check if anything blocking the straight move from viewpoint A to B.
+
+		for (size_t tour_position : this->getReconfigurationEdges(tour_viewpoint_ik, tour.order)) // Check if any reconfiguration is needed.
 			charged_edges.push_back({tour_position, this->cost_weights.reconfiguration_cost});
+
 		if (charged_edges.empty())
 			break;
+
 		for (const std::pair<size_t, double>& edge : charged_edges)
 		{
 			const size_t tour_position = edge.first;
 			const size_t to_viewpoint = static_cast<size_t>(tour.order[tour_position]);
-			const std::pair<int, int> to_key = {static_cast<int>(to_viewpoint), this->findCandidateIndex(candidates[to_viewpoint], tour.poses[tour_position])};
-			const std::pair<int, int> from_key = tour_position == 0 ? std::make_pair(-1, -1) : std::make_pair(tour.order[tour_position - 1], this->findCandidateIndex(candidates[static_cast<size_t>(tour.order[tour_position - 1])], tour.poses[tour_position - 1]));
-			solver.AddEdgeCost(from_key, to_key, edge.second);
+			const std::pair<int, int> to_key = {static_cast<int>(to_viewpoint), this->findCandidateIndex(ik_candidates[to_viewpoint], tour.poses[tour_position])};
+			const std::pair<int, int> from_key = tour_position == 0 ? std::make_pair(-1, -1) : std::make_pair(tour.order[tour_position - 1], this->findCandidateIndex(ik_candidates[static_cast<size_t>(tour.order[tour_position - 1])], tour.poses[tour_position - 1]));
+			solver.AddEdgeCost(from_key, to_key, edge.second); // Add extra cost to edges if they are either blocked or require reconfiguration.
 		}
-		tour = solver.Solve(tour.order);
+		tour = solver.Solve(tour.order); // Solve GTSP again with the new edge cost.
 	}
+
+	// Copy refined GTSP results to output.
 	for (size_t tour_position = 0; tour_position < tour.order.size(); ++tour_position)
 	{
 		const size_t viewpoint_index = static_cast<size_t>(tour.order[tour_position]);
 		viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q = tour.poses[tour_position];
-		if (viewpoint_ik.reached[viewpoint_index] || viewpoint_index >= viewpoint_ik.closest_ik_candidates.size())
+		if (viewpoint_ik.reached[viewpoint_index])
 			continue;
-		// A missed viewpoint's chosen closest pose brings its own gap.
-		for (const ClosestIkCandidate& candidate : viewpoint_ik.closest_ik_candidates[viewpoint_index])
+
+		for (const ClosestIkCandidate& closest_ik_candidate : viewpoint_ik.closest_ik_candidates[viewpoint_index])
 		{
-			if (candidate.q != tour.poses[tour_position])
+			if (closest_ik_candidate.q != tour.poses[tour_position])
 				continue;
-			viewpoint_ik.gap_sum += candidate.gap - viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].gap;
-			viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index] = candidate;
+			viewpoint_ik.gap_sum += closest_ik_candidate.gap - viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].gap;
+			viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index] = closest_ik_candidate;
 		}
 	}
 	return tour.order;
