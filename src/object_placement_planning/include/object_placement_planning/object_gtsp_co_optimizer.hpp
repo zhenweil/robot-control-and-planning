@@ -147,14 +147,6 @@ struct TourSettings
 	int num_reference_postures = 4;  // fixed random arm postures; each reached viewpoint's IK from them is a GTSP candidate (0 = off)
 };
 
-// Downhill move of one step: the object's direction and each pose's joint slide along its self-motion.
-struct DescentDirection
-{
-	Eigen::Vector3d object_direction = Eigen::Vector3d::Zero();  // unit, or zero
-	std::vector<Eigen::VectorXd> joint_slides;  // per viewpoint, largest norm 1 over all poses; empty vector = no slide
-	bool has_slide = false;
-};
-
 class Optimizer
 {
 public:
@@ -190,12 +182,13 @@ private:
 
 	// Step directions
 	Eigen::Vector3d getDirectionTowardMissedViewpoints(const ViewpointIkAtPosition& viewpoint_ik);
-	DescentDirection getTourDirection(const TourSolutionAtObjectPosition& solution);
+	Eigen::Vector3d getDirectionToLowerTourCost(const TourSolutionAtObjectPosition& solution);
+	std::vector<Eigen::VectorXd> getSelfMotionSlidesToLowerTourCost(const TourSolutionAtObjectPosition& solution);
 	Eigen::MatrixXd getSelfMotionProjector(const Eigen::MatrixXd& jacobian) const;
 	Eigen::MatrixXd getToolJacobian(moveit::core::RobotState& state, const Joints& joint_values) const;
 	Eigen::Vector3d combineMovesWithoutConflict(const std::vector<Eigen::Vector3d>& moves) const;
-	std::vector<Eigen::VectorXd> getTourCostSlopePerPose(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
-	std::vector<Joints> getPosesAfterJointSlides(const ViewpointIkAtPosition& viewpoint_ik, const DescentDirection& direction, double slide_step) const;
+	std::vector<Eigen::VectorXd> getDTourLengthDJointsPerViewpoint(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
+	std::vector<Joints> getPosesAfterJointSlides(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<Eigen::VectorXd>& joint_slides, double slide_step) const;
 	Eigen::Vector3d dropPartsTighteningMargins(const Eigen::Vector3d& move, const std::vector<room_margins::Margin>& margins) const;
 	Eigen::Vector3d getRoomMoveDirection(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<room_margins::Margin>& margins, double object_step, bool& keeps_reached_clear);
 
