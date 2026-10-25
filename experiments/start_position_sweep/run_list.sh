@@ -24,8 +24,10 @@ mkdir -p "$WORK"
 
 worker() {
   local W=$1
+  set +u
   source /opt/ros/humble/setup.bash
   source "$WS/install/setup.bash"
+  set -u
   export ROS_DOMAIN_ID=$((80 + W))
   export ROS_LOG_DIR=$WORK/logs/w$W
   mkdir -p "$ROS_LOG_DIR"

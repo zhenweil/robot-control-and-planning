@@ -298,19 +298,14 @@ bool Optimizer::moveObjectToLowerCost(ObjectPositionEvaluation& current_evaluati
 bool Optimizer::moveObjectToUnblockMisses(ObjectPositionEvaluation& current_evaluation, double object_step, double miss_gap_penalty, int iteration)
 {
 	const double near_floors = 6.0;
-	std::vector<size_t> blocked_viewpoints;
+	// All misses: this runs after a reach step toward them failed; a miss with nothing limiting its pose adds no margin.
+	std::vector<size_t> missed_viewpoints;
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
-	{
-		if (current_evaluation.viewpoint_ik.reached[viewpoint_index])
-			continue;
-		const double gap = current_evaluation.viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].gap;
-		const double blocked_share = gap < 1e-3 ? 1.0 : 1.0 - current_evaluation.viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].position_error.norm() / gap;
-		if (blocked_share > 0.3)
-			blocked_viewpoints.push_back(viewpoint_index);
-	}
-	if (blocked_viewpoints.empty())
+		if (!current_evaluation.viewpoint_ik.reached[viewpoint_index])
+			missed_viewpoints.push_back(viewpoint_index);
+	if (missed_viewpoints.empty())
 		return false;
-	const std::vector<room_margins::Margin> margins_before = this->getBlockingMarginsOfViewpoints(current_evaluation.viewpoint_ik, blocked_viewpoints, near_floors);
+	const std::vector<room_margins::Margin> margins_before = this->getBlockingMarginsOfViewpoints(current_evaluation.viewpoint_ik, missed_viewpoints, near_floors);
 	if (margins_before.empty())
 		return false;
 	const Eigen::Vector3d room_direction = room_margins::MostRoomDirection(margins_before, object_step);
@@ -330,13 +325,13 @@ bool Optimizer::moveObjectToUnblockMisses(ObjectPositionEvaluation& current_eval
 	int num_lost = 0;
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
 		num_lost += current_evaluation.viewpoint_ik.reached[viewpoint_index] && !candidate_evaluation.viewpoint_ik.reached[viewpoint_index] ? 1 : 0;
-	const std::vector<room_margins::Margin> margins_after = this->getBlockingMarginsOfViewpoints(candidate_evaluation.viewpoint_ik, blocked_viewpoints, near_floors);
+	const std::vector<room_margins::Margin> margins_after = this->getBlockingMarginsOfViewpoints(candidate_evaluation.viewpoint_ik, missed_viewpoints, near_floors);
 	const double tightest_before = room_margins::Tightest(margins_before);
 	const double tightest_after = margins_after.empty() ? std::numeric_limits<double>::infinity() : room_margins::Tightest(margins_after);
 	// Kept if it loses at most allowed_reach_loss of the reached viewpoints and reaches more or frees the misses.
 	const bool loss_allowed = static_cast<double>(num_lost) <= this->cost_weights.allowed_reach_loss * static_cast<double>(current_evaluation.viewpoint_ik.num_reached);
 	const bool kept = loss_allowed && (candidate_evaluation.viewpoint_ik.num_reached > current_evaluation.viewpoint_ik.num_reached || tightest_after > tightest_before + 1e-3);
-	RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %d)  blocked misses %zu  tightest margin %.2f -> %.2f floors  reached kept clear: %s%s", iteration, object_step, candidate_evaluation.viewpoint_ik.position.x(), candidate_evaluation.viewpoint_ik.position.y(), candidate_evaluation.viewpoint_ik.position.z(), candidate_evaluation.viewpoint_ik.num_reached, num_lost, blocked_viewpoints.size(), tightest_before, tightest_after, keeps_reached_clear ? "yes" : "no", kept ? "  <-- kept" : "");
+	RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %d)  misses %zu  tightest margin %.2f -> %.2f floors  reached kept clear: %s%s", iteration, object_step, candidate_evaluation.viewpoint_ik.position.x(), candidate_evaluation.viewpoint_ik.position.y(), candidate_evaluation.viewpoint_ik.position.z(), candidate_evaluation.viewpoint_ik.num_reached, num_lost, missed_viewpoints.size(), tightest_before, tightest_after, keeps_reached_clear ? "yes" : "no", kept ? "  <-- kept" : "");
 	if (!kept)
 		return false;
 	current_evaluation = candidate_evaluation;
