@@ -154,6 +154,7 @@ void Optimizer::improveOrderAndPosturesWithObjectFixed(ObjectPositionEvaluation&
 	// Timed for the log: GTSP (with its straight-path and blocked-edge rounds) and the cost (straight paths along the tour, blocked-edge checks).
 	auto get_seconds_since = [](std::chrono::steady_clock::time_point since) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count(); };
 	ObjectPositionEvaluation reordered_evaluation = evaluation;
+	this->neighbor_ik_seconds = 0.0;
 	auto since = std::chrono::steady_clock::now();
 	this->updateWeightedTotalCost(evaluation, miss_gap_penalty);
 	double cost_seconds = get_seconds_since(since);
@@ -163,7 +164,7 @@ void Optimizer::improveOrderAndPosturesWithObjectFixed(ObjectPositionEvaluation&
 	since = std::chrono::steady_clock::now();
 	this->updateWeightedTotalCost(reordered_evaluation, miss_gap_penalty);
 	cost_seconds += get_seconds_since(since);
-	RCLCPP_INFO(this->node->get_logger(), "  tour work: GTSP %.2f s, cost with straight-path and blocked-edge checks %.2f s", gtsp_seconds, cost_seconds);
+	RCLCPP_INFO(this->node->get_logger(), "  tour work: GTSP %.2f s, cost with straight-path and blocked-edge checks %.2f s (of it, misses from neighbour poses %.2f s)", gtsp_seconds, cost_seconds, this->neighbor_ik_seconds);
 	// Reach first: more viewpoints reached wins; at equal reach the lower weighted total cost.
 	const bool reordered_reaches_more = reordered_evaluation.viewpoint_ik.num_reached > evaluation.viewpoint_ik.num_reached;
 	const bool reordered_cheaper = reordered_evaluation.viewpoint_ik.num_reached == evaluation.viewpoint_ik.num_reached && reordered_evaluation.weighted_total_cost < evaluation.weighted_total_cost;
@@ -1159,7 +1160,13 @@ void Optimizer::bringMissesCloserFromNeighbors(ViewpointIkAtPosition& viewpoint_
 			miss_positions.push_back(tour_position);
 	if (miss_positions.empty())
 		return;
+	const auto since = std::chrono::steady_clock::now();
 	scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(viewpoint_ik.position, this->object_rotation));
+	if (!(this->neighbor_ik_cache_position == viewpoint_ik.position))
+	{
+		this->neighbor_ik_cache.clear();
+		this->neighbor_ik_cache_position = viewpoint_ik.position;
+	}
 	std::vector<ClosestIkCandidate> closer_poses(miss_positions.size());
 	std::vector<char> found(miss_positions.size(), 0);  // one byte per miss: written from parallel threads
 	const unsigned int num_workers = std::min(this->num_threads, static_cast<unsigned int>(miss_positions.size()));
@@ -1179,26 +1186,45 @@ void Optimizer::bringMissesCloserFromNeighbors(ViewpointIkAtPosition& viewpoint_
 				double best_gap = viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].gap;
 				for (const Joints& neighbor_pose : neighbor_poses)
 				{
-					closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, neighbor_pose, this->ik_settings.exact_options);
-					if (!result.exact)
-						result = this->solveSmallestGapIk(thread_state, target, {neighbor_pose});
-					if (!result.found)
-						continue;
-					ClosestIkCandidate candidate;
-					candidate.q = result.q;
-					if (!result.exact)
+					// The solve depends only on (viewpoint, start pose) at this object position, so a repeat is looked up.
+					const std::pair<size_t, Joints> cache_key(viewpoint_index, neighbor_pose);
+					NeighborIkResult neighbor_result;
+					bool cached = false;
 					{
-						candidate.clearance_shortfall = this->getClearanceShortfall(thread_state, result.q);
-						candidate.gap = scene_geometry::PoseGap(result.pose_error, this->ik_settings.closest_options.rot_scale) + candidate.clearance_shortfall;
-						candidate.position_error = result.pose_error.head<3>();
-						candidate.angle_error = result.pose_error.tail<3>().norm();
+						std::lock_guard<std::mutex> lock(this->neighbor_ik_cache_mutex);
+						const auto entry = this->neighbor_ik_cache.find(cache_key);
+						if (entry != this->neighbor_ik_cache.end())
+						{
+							neighbor_result = entry->second;
+							cached = true;
+						}
 					}
-					if (candidate.gap >= best_gap)
+					if (!cached)
+					{
+						closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, neighbor_pose, this->ik_settings.exact_options);
+						if (!result.exact)
+							result = this->solveSmallestGapIk(thread_state, target, {neighbor_pose});
+						neighbor_result.found = result.found;
+						neighbor_result.exact = result.exact;
+						neighbor_result.candidate.q = result.q;
+						if (result.found && !result.exact)
+						{
+							neighbor_result.candidate.clearance_shortfall = this->getClearanceShortfall(thread_state, result.q);
+							neighbor_result.candidate.gap = scene_geometry::PoseGap(result.pose_error, this->ik_settings.closest_options.rot_scale) + neighbor_result.candidate.clearance_shortfall;
+							neighbor_result.candidate.position_error = result.pose_error.head<3>();
+							neighbor_result.candidate.angle_error = result.pose_error.tail<3>().norm();
+						}
+						std::lock_guard<std::mutex> lock(this->neighbor_ik_cache_mutex);
+						this->neighbor_ik_cache[cache_key] = neighbor_result;
+					}
+					if (!neighbor_result.found)
 						continue;
-					best_gap = candidate.gap;
-					closer_poses[miss_index] = candidate;
+					if (neighbor_result.candidate.gap >= best_gap)
+						continue;
+					best_gap = neighbor_result.candidate.gap;
+					closer_poses[miss_index] = neighbor_result.candidate;
 					found[miss_index] = 1;
-					if (result.exact)
+					if (neighbor_result.exact)
 						break;
 				}
 			}
@@ -1218,6 +1244,7 @@ void Optimizer::bringMissesCloserFromNeighbors(ViewpointIkAtPosition& viewpoint_
 			viewpoint_ik.num_reached += 1;
 		}
 	}
+	this->neighbor_ik_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count();
 }
 
 // Tour positions whose edge (from the previous pose, or home) the arm can't follow on the straight camera path, each edge

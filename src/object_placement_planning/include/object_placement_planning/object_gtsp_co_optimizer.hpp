@@ -53,6 +53,14 @@ struct ViewpointIkAtPosition
 	std::vector<std::vector<ClosestIkCandidate>> closest_ik_candidates;  // per missed viewpoint: closest poses GTSP may choose from
 };
 
+// A missed viewpoint's IK from one neighbour pose (exact, else closest): found, exact, and the pose with its gap parts.
+struct NeighborIkResult
+{
+	bool found = false;
+	bool exact = false;
+	ClosestIkCandidate candidate;
+};
+
 // One evaluated spot: poses and tour order.
 struct ObjectPositionEvaluation
 {
@@ -253,6 +261,11 @@ private:
 	std::map<std::pair<Joints, Joints>, std::pair<bool, Joints>> straight_path_cache;
 	Eigen::Vector3d straight_path_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
 	std::mutex straight_path_cache_mutex;
+	// Missed viewpoints' IK from neighbour poses at one object position, keyed by (viewpoint, start pose); cleared when the object moves.
+	std::map<std::pair<size_t, Joints>, NeighborIkResult> neighbor_ik_cache;
+	Eigen::Vector3d neighbor_ik_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+	std::mutex neighbor_ik_cache_mutex;
+	double neighbor_ik_seconds = 0.0;  // wall time of bringMissesCloserFromNeighbors, for the log (reset per evaluation)
 
 	// Visualization
 	std::string mesh_path;  // object mesh for the progress markers
