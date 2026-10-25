@@ -92,6 +92,7 @@ struct CostWeights
 	double initial_penalty = 100.0;  // cost per m of missed gap
 	double penalty_growth = 10.0;
 	double max_penalty = 1e5;
+	double allowed_reach_loss = 0.15;  // share of the reached viewpoints a room-then-reach try may lose if the gap sum drops
 	double reconfiguration_cost = 2.0;  // cost per reconfiguration
 	double joint_room_band = 0.2;  // rad beyond the hard limit a joint should keep
 	double joint_room_weight = 50.0;  // cost per rad^2 of room shortfall
@@ -185,7 +186,8 @@ private:
 	Eigen::Vector3d combineMovesWithoutConflict(const std::vector<Eigen::Vector3d>& moves) const;
 	std::vector<Eigen::VectorXd> getTourCostSlopePerPose(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
 	std::vector<Joints> getPosesAfterJointSlides(const ViewpointIkAtPosition& viewpoint_ik, const DescentDirection& direction, double slide_step) const;
-	Eigen::Vector3d getRoomThenReachDirection(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& lost_viewpoints, const Eigen::Vector3d& aim, double object_step);
+	Eigen::Vector3d getRoomThenReachDirection(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& lost_viewpoints, const Eigen::Vector3d& aim, const Eigen::Vector3d& bounce_axis, double object_step);
+	Eigen::Vector3d getBounceAxis() const;
 
 	// Joint room and blocking margins
 	double getSmallestJacobianSingularValue(const Joints& joint_values);

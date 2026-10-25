@@ -213,7 +213,10 @@ bool Optimizer::moveObjectToReachMore(ObjectPositionEvaluation& current_evaluati
 		for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
 			if (current_evaluation.viewpoint_ik.reached[viewpoint_index] && !candidate_evaluation.viewpoint_ik.reached[viewpoint_index])
 				lost_viewpoints.push_back(viewpoint_index);
-		const bool kept = candidate_evaluation.viewpoint_ik.num_reached > current_evaluation.viewpoint_ik.num_reached || (candidate_evaluation.viewpoint_ik.num_reached == current_evaluation.viewpoint_ik.num_reached && candidate_evaluation.viewpoint_ik.gap_sum < current_evaluation.viewpoint_ik.gap_sum);
+		// A room-then-reach try losing up to allowed_reach_loss of the reached viewpoints is judged by the gap sum alone (the lost
+		// ones count in it); a plain reach try, or one losing more, must reach more or as many with a smaller gap sum.
+		const bool loss_allowed = is_room_then_reach && static_cast<double>(lost_viewpoints.size()) <= this->cost_weights.allowed_reach_loss * static_cast<double>(current_evaluation.viewpoint_ik.num_reached);
+		const bool kept = candidate_evaluation.viewpoint_ik.num_reached > current_evaluation.viewpoint_ik.num_reached || ((candidate_evaluation.viewpoint_ik.num_reached == current_evaluation.viewpoint_ik.num_reached || loss_allowed) && candidate_evaluation.viewpoint_ik.gap_sum < current_evaluation.viewpoint_ik.gap_sum);
 		RCLCPP_INFO(this->node->get_logger(), "iteration %d %s: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %zu)  gap sum %.4f m vs %.4f%s", iteration, is_room_then_reach ? "room-then-reach" : "reach", object_step, candidate_evaluation.viewpoint_ik.position.x(), candidate_evaluation.viewpoint_ik.position.y(), candidate_evaluation.viewpoint_ik.position.z(), candidate_evaluation.viewpoint_ik.num_reached, lost_viewpoints.size(), candidate_evaluation.viewpoint_ik.gap_sum, current_evaluation.viewpoint_ik.gap_sum, kept ? "  <-- kept" : "");
 		if (kept)
 		{
@@ -231,7 +234,10 @@ bool Optimizer::moveObjectToReachMore(ObjectPositionEvaluation& current_evaluati
 		}
 		if (!lost_viewpoints.empty() && this->method_switches.use_room)
 		{
-			const Eigen::Vector3d room_direction = this->getRoomThenReachDirection(current_evaluation.viewpoint_ik, lost_viewpoints, aim, object_step);
+			const Eigen::Vector3d bounce_axis = this->getBounceAxis();
+			if (bounce_axis.norm() > 0.5 && !is_room_then_reach)
+				RCLCPP_INFO(this->node->get_logger(), "iteration %d: the object went back and forth along (%.2f, %.2f, %.2f); room-then-reach tries across it", iteration, bounce_axis.x(), bounce_axis.y(), bounce_axis.z());
+			const Eigen::Vector3d room_direction = this->getRoomThenReachDirection(current_evaluation.viewpoint_ik, lost_viewpoints, aim, bounce_axis, object_step);
 			if (room_direction.norm() > 0.5 && (room_direction - direction).norm() > 1e-3)
 			{
 				direction = room_direction;
@@ -395,13 +401,44 @@ DescentDirection Optimizer::getTourDirection(const ObjectPositionEvaluation& eva
 	return direction;
 }
 
-Eigen::Vector3d Optimizer::getRoomThenReachDirection(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& lost_viewpoints, const Eigen::Vector3d& aim, double object_step)
+// The line the object went back and forth on: it came back near a spot it left a few kept moves ago; the axis points from
+// here to the farthest spot since. Zero if there was no such return.
+Eigen::Vector3d Optimizer::getBounceAxis() const
+{
+	const double return_distance = 0.01;  // m: this near an earlier spot counts as back
+	const size_t skipped_moves = 2;  // the last moves before now don't count as earlier spots
+	const size_t looked_back_moves = 10;
+	const std::vector<Eigen::Vector3d>& trail = this->object_trail;
+	if (trail.size() < skipped_moves + 2)
+		return Eigen::Vector3d::Zero();
+	const Eigen::Vector3d& now = trail.back();
+	const size_t oldest = trail.size() > looked_back_moves + 1 ? trail.size() - 1 - looked_back_moves : 0;
+	for (size_t earlier = trail.size() - 1 - skipped_moves; earlier + 1 > oldest; --earlier)
+	{
+		if ((trail[earlier] - now).norm() < return_distance)
+		{
+			Eigen::Vector3d farthest = now;
+			for (size_t since = earlier + 1; since + 1 < trail.size(); ++since)
+				if ((trail[since] - now).norm() > (farthest - now).norm())
+					farthest = trail[since];
+			if ((farthest - now).norm() > return_distance)
+				return (farthest - now).normalized();
+		}
+		if (earlier == 0)
+			break;
+	}
+	return Eigen::Vector3d::Zero();
+}
+
+Eigen::Vector3d Optimizer::getRoomThenReachDirection(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& lost_viewpoints, const Eigen::Vector3d& aim, const Eigen::Vector3d& bounce_axis, double object_step)
 {
 	const double lost_margin_floors = 6.0;  // margins up to this many floors count as at risk
 	const std::vector<room_margins::Margin> margins = this->getBlockingMarginsOfViewpoints(viewpoint_ik, lost_viewpoints, lost_margin_floors);
 	if (margins.empty())
 		return Eigen::Vector3d::Zero();
-	Eigen::Vector3d direction = aim;
+	// After a back and forth, the part along that line is dropped first, so the move goes across it.
+	auto drop_bounce_part = [&](const Eigen::Vector3d& move) { return Eigen::Vector3d(move - move.dot(bounce_axis) * bounce_axis); };
+	Eigen::Vector3d direction = drop_bounce_part(aim);
 	for (int round = 0; round < 20; ++round)
 	{
 		bool changed = false;
@@ -416,9 +453,11 @@ Eigen::Vector3d Optimizer::getRoomThenReachDirection(const ViewpointIkAtPosition
 		if (!changed)
 			break;
 	}
-	if (direction.norm() < 0.3 * aim.norm())
-		return room_margins::MostRoomDirection(margins, object_step);
-	return direction.normalized();
+	if (direction.norm() >= 0.3 * aim.norm())
+		return direction.normalized();
+	const Eigen::Vector3d most_room = room_margins::MostRoomDirection(margins, object_step);
+	const Eigen::Vector3d most_room_across = drop_bounce_part(most_room);
+	return most_room_across.norm() > 0.3 ? Eigen::Vector3d(most_room_across.normalized()) : most_room;
 }
 
 Eigen::Vector3d Optimizer::combineMovesWithoutConflict(const std::vector<Eigen::Vector3d>& moves) const

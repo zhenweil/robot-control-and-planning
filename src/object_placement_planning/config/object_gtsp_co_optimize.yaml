@@ -5,8 +5,8 @@
   ros__parameters:
     # Start position and search box
     initial_x: 0.242                      # below the home tool0, halfway between the table and the tool
-    initial_y: -0.05
-    initial_z: 0.307
+    initial_y: 0.05
+    initial_z: 0.107
     x_min: 0.2
     x_max: 0.6
     y_min: -0.6
@@ -74,6 +74,7 @@
     co_penalty_growth: 10.0               # when settled with misses, the penalty grows this much
     co_max_penalty: 100000.0
     co_room: true                         # room tries for blocked misses, and room-then-reach for viewpoints a reach step loses
+    co_allowed_reach_loss: 0.15           # share of the reached viewpoints a room-then-reach try may lose if the gap sum drops
 
     # Reconfigurations
     co_neighbor_ik: true                  # reorders also try IK from each pose's tour neighbours
