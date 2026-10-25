@@ -186,7 +186,7 @@ private:
 	bool moveObjectToLowerCost(ObjectPositionEvaluation& current_evaluation, double& object_step, double miss_gap_penalty, int iteration);
 	bool moveObjectToUnblockMisses(ObjectPositionEvaluation& current_evaluation, double object_step, double miss_gap_penalty, int iteration);
 	bool moveObjectToFreeReconfigurations(ObjectPositionEvaluation& current_evaluation, double& object_step, double miss_gap_penalty, int iteration);
-	ObjectPositionEvaluation solveAndImproveAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds, const std::vector<int>& order, double miss_gap_penalty);
+	ObjectPositionEvaluation solveAndImproveAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses, const std::vector<int>& order, double miss_gap_penalty);
 
 	// Step directions
 	Eigen::Vector3d getReachDirection(const ViewpointIkAtPosition& viewpoint_ik);
@@ -213,7 +213,7 @@ private:
 	std::vector<ClosestIkCandidate> keepCandidatesNearBestGap(moveit::core::RobotState& state, const std::vector<closest_ik::Result>& closest_results);
 	closest_ik::Result solveSmallestGapIk(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts);
 	closest_ik::Result pushArmToExactClearance(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const closest_ik::Result& closest_result);
-	ViewpointIkAtPosition solveViewpointIkAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds = {});
+	ViewpointIkAtPosition solveViewpointIkAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses = {});
 	std::vector<closest_ik::Result> solveClosestIkFromStarts(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts);
 
 	// Tour order and reconfigurations

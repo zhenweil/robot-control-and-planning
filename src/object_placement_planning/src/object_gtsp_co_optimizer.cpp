@@ -140,10 +140,10 @@ Eigen::Vector3d Optimizer::clampToSearchBox(const Eigen::Vector3d& position) con
 	return position.cwiseMax(this->descent_limits.search_box_lower_bound).cwiseMin(this->descent_limits.search_box_upper_bound);
 }
 
-ObjectPositionEvaluation Optimizer::solveAndImproveAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds, const std::vector<int>& order, double miss_gap_penalty)
+ObjectPositionEvaluation Optimizer::solveAndImproveAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses, const std::vector<int>& order, double miss_gap_penalty)
 {
 	ObjectPositionEvaluation evaluation;
-	evaluation.viewpoint_ik = this->solveViewpointIkAtPosition(this->clampToSearchBox(position), seeds, fallback_seeds);
+	evaluation.viewpoint_ik = this->solveViewpointIkAtPosition(this->clampToSearchBox(position), start_poses, fallback_start_poses);
 	evaluation.order = order;
 	this->improveOrderAndPosturesWithObjectFixed(evaluation, miss_gap_penalty);
 	return evaluation;
@@ -660,7 +660,8 @@ double Optimizer::getJointRoomShortfall(const Joints& joint_values, Eigen::Vecto
 	return shortfall;
 }
 
-ViewpointIkAtPosition Optimizer::solveViewpointIkAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& seeds, const std::vector<Joints>& fallback_seeds)
+// Given start IK solutions, find exact IK for each viewpoint. If no exact IK, find closest IK.
+ViewpointIkAtPosition Optimizer::solveViewpointIkAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses)
 {
 	scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(position, this->object_rotation));
 	const auto solve_start = std::chrono::steady_clock::now();
@@ -668,10 +669,14 @@ ViewpointIkAtPosition Optimizer::solveViewpointIkAtPosition(const Eigen::Vector3
 	ViewpointIkAtPosition viewpoint_ik;
 	viewpoint_ik.position = position;
 	viewpoint_ik.chosen_ik_per_viewpoint.assign(this->viewpoints.size(), ClosestIkCandidate());
+
+	// Copy start IKs to viewpoint_IK. For the first iteration, start_poses is home pose.
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
-		viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q = seeds[viewpoint_index];
+		viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q = start_poses[viewpoint_index];
+
 	viewpoint_ik.reached.assign(this->viewpoints.size(), false);
 	viewpoint_ik.closest_ik_candidates.assign(this->viewpoints.size(), {});
+	
 	std::vector<std::thread> threads;
 	for (unsigned int thread_index = 0; thread_index < this->num_threads; ++thread_index)
 		threads.emplace_back([&, thread_index]()
@@ -679,12 +684,17 @@ ViewpointIkAtPosition Optimizer::solveViewpointIkAtPosition(const Eigen::Vector3
 			moveit::core::RobotState thread_state(*this->state);
 			for (size_t viewpoint_index = thread_index; viewpoint_index < this->viewpoints.size(); viewpoint_index += this->num_threads)
 			{
-				// Random starts seeded by viewpoint and spot (0.1 mm grid): the same spot always gives the same poses.
-				random_numbers::RandomNumberGenerator viewpoint_rng(this->getRandomIkSeed(position, viewpoint_index));
 				const Eigen::Isometry3d target = scene_geometry::Translation(position) * this->viewpoints[viewpoint_index];
-				closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, seeds[viewpoint_index], this->ik_settings.exact_options);
-				if (!result.exact && viewpoint_index < fallback_seeds.size())
-					result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, fallback_seeds[viewpoint_index], this->ik_settings.exact_options);
+				// Solve exact IK for each viewpoint from the start pose.
+				closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, start_poses[viewpoint_index], this->ik_settings.exact_options);
+
+				// If no solution, try exact IK using fallback start pose.
+				if (!result.exact && viewpoint_index < fallback_start_poses.size())
+					result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, fallback_start_poses[viewpoint_index], this->ik_settings.exact_options);
+
+				// Still not exact: random starts (Not truely random though. Depends on viewpoint index, object position, and random seed).
+				// TODO: use the same reference posture to start. 
+				random_numbers::RandomNumberGenerator viewpoint_rng(this->getRandomIkSeed(position, viewpoint_index));
 				std::vector<Joints> random_starts;
 				for (int attempt = 0; attempt < this->ik_settings.ik_attempts && !result.exact; ++attempt)
 				{
@@ -696,18 +706,20 @@ ViewpointIkAtPosition Optimizer::solveViewpointIkAtPosition(const Eigen::Vector3
 				}
 				if (!result.exact)
 				{
-					// Closest poses from its own pose and a few of the random starts (other postures). Those near the best gap
-					// and with room are kept for GTSP to choose by tour; the one from its own pose is the default.
-					std::vector<Joints> closest_starts = {seeds[viewpoint_index]};
+					// If still no exact IK, find closest IK.
+					std::vector<Joints> closest_starts = {start_poses[viewpoint_index]};
 					for (size_t random_start_index = 0; random_start_index < random_starts.size() && static_cast<int>(closest_starts.size()) <= this->ik_settings.closest_ik_extra_starts; ++random_start_index)
-						closest_starts.push_back(random_starts[random_start_index]);
+						closest_starts.push_back(random_starts[random_start_index]); // Start from start poses + 3 random IK
 					const std::vector<closest_ik::Result> closest_results = this->solveClosestIkFromStarts(thread_state, target, closest_starts);
 					result = closest_ik::Result();
 					for (const closest_ik::Result& candidate : closest_results)
 						if (candidate.exact)
 							result = candidate;
+					
+					// Keep the good closest IK + backups within 5mm within the good closest IK.
 					if (!result.exact && !closest_results.empty())
 					{
+						// TODO: test if 5mm gap and extra closest IK is needed.
 						viewpoint_ik.closest_ik_candidates[viewpoint_index] = this->keepCandidatesNearBestGap(thread_state, closest_results);
 						result = closest_ik::Result();
 						result.found = true;
