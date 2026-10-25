@@ -87,8 +87,7 @@ struct DescentLimits
 // Parts of the method that can be turned off (ablations).
 struct MethodSwitches
 {
-	bool use_room = true;  // room-then-reach: moves that free what blocks the misses
-	bool use_reconfiguration_room = true;  // once all are reached: moves that free what stops the reconfiguration edges' camera paths
+	bool use_room = true;  // room-then-reach: moves that free what blocks the misses, then (once all are reached) the reconfiguration edges, treated as misses
 	bool use_slide = true;  // poses slide along their self-motion
 	bool tour_object_move = true;  // false = the object moves only for reach
 	bool freeze_object_when_reached = false;  // true = the object stays put once every viewpoint is reached
@@ -182,14 +181,15 @@ private:
 	void refinePosesAndComputeCost(TourSolutionAtObjectPosition& solution);
 	void improveOrderAndPosturesWithObjectFixed(TourSolutionAtObjectPosition& solution_to_complete);
 	bool improveArmPosesWithObjectFixed(TourSolutionAtObjectPosition& current_solution, int iteration);
-	bool moveObjectToReachMore(TourSolutionAtObjectPosition& current_solution, double& object_step, int iteration);
+	bool moveObjectToReachMore(TourSolutionAtObjectPosition& current_solution, double& reach_step, double& reconfiguration_step, int iteration);
+	bool moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& current_solution, double& object_step, int iteration);
 	bool moveObjectToLowerCost(TourSolutionAtObjectPosition& current_solution, double& object_step, int iteration);
 	bool moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_solution, double object_step, int iteration);
-	bool moveObjectToFreeReconfigurations(TourSolutionAtObjectPosition& current_solution, double& object_step, int iteration);
-	TourSolutionAtObjectPosition solveAndImproveAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses, const std::vector<int>& order);
+	bool moveObjectToUnblockReconfigurations(TourSolutionAtObjectPosition& current_solution, double& object_step, int iteration);
+	TourSolutionAtObjectPosition solveIkAndImproveTourAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses, const std::vector<int>& order);
 
 	// Step directions
-	Eigen::Vector3d getReachDirection(const ViewpointIkAtPosition& viewpoint_ik);
+	Eigen::Vector3d getDirectionTowardMissedViewpoints(const ViewpointIkAtPosition& viewpoint_ik);
 	DescentDirection getTourDirection(const TourSolutionAtObjectPosition& solution);
 	Eigen::MatrixXd getSelfMotionProjector(const Eigen::MatrixXd& jacobian) const;
 	Eigen::MatrixXd getToolJacobian(moveit::core::RobotState& state, const Joints& joint_values) const;

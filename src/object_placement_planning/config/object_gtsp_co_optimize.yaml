@@ -73,8 +73,7 @@
     co_initial_penalty: 100.0             # cost per m of missed gap
     co_penalty_growth: 10.0               # when settled with misses, the penalty grows this much
     co_max_penalty: 100000.0
-    co_room: true                         # room-then-reach: moves that free what blocks the misses, steered off what blocks the reached ones
-    co_reconfiguration_room: true         # once all are reached: moves that free what stops the reconfiguration edges' camera paths; tour moves may not add reconfigurations
+    co_room: true                         # room-then-reach: moves that free what blocks the misses (then, once all are reached, the reconfiguration edges as misses), steered off what blocks the reached ones
     co_allowed_reach_loss: 0.10           # share of the reached viewpoints a room-then-reach move may lose
 
     # Reconfigurations
