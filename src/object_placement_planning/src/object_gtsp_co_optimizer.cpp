@@ -231,6 +231,7 @@ bool Optimizer::moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& c
 	bool tried_room_then_reach = false;
 	for (int attempt = 0; attempt < this->step_sizes.max_line_search_tries && object_step >= this->step_sizes.min_step; ++attempt)
 	{
+		// Simple pull using closest IK to close gap.
 		const TourSolutionAtObjectPosition candidate_solution = this->solveIkAndImproveTourAtPosition(current_solution.viewpoint_ik.position + object_step * direction, this->getChosenPoses(current_solution.viewpoint_ik), {}, current_solution.order);
 		std::vector<size_t> lost_viewpoints;
 		for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
@@ -239,7 +240,7 @@ bool Optimizer::moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& c
 		
 		// Accept move if it reaches more viewpoints, or closer the miss gap without losing any viewpoints.
 		const bool move_accepted = candidate_solution.viewpoint_ik.num_reached > current_solution.viewpoint_ik.num_reached || (candidate_solution.viewpoint_ik.num_reached == current_solution.viewpoint_ik.num_reached && candidate_solution.viewpoint_ik.gap_sum < current_solution.viewpoint_ik.gap_sum);
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %zu)  gap sum %.4f m vs %.4f%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, lost_viewpoints.size(), candidate_solution.viewpoint_ik.gap_sum, current_solution.viewpoint_ik.gap_sum, move_accepted ? "  <-- kept" : "");
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu (lost %zu)  gap sum %.4f m vs %.4f%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, this->viewpoints.size(), lost_viewpoints.size(), candidate_solution.viewpoint_ik.gap_sum, current_solution.viewpoint_ik.gap_sum, move_accepted ? "  <-- kept" : "");
 		if (move_accepted)
 		{
 			current_solution = candidate_solution;
@@ -280,7 +281,7 @@ bool Optimizer::improveArmPosesWithObjectFixed(TourSolutionAtObjectPosition& cur
 	{
 		const TourSolutionAtObjectPosition candidate_solution = this->solveIkAndImproveTourAtPosition(current_solution.viewpoint_ik.position, this->getPosesAfterJointSlides(current_solution.viewpoint_ik, joint_slides, slide_step), this->getChosenPoses(current_solution.viewpoint_ik), current_solution.order);
 		const bool move_accepted = candidate_solution.weighted_total_cost < current_solution.weighted_total_cost - this->step_sizes.min_slide_gain;
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d poses: slide %.3f rad  reached %d  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f vs %.2f%s", iteration, slide_step, candidate_solution.viewpoint_ik.num_reached, candidate_solution.num_reconfigurations, candidate_solution.num_blocked_edges, candidate_solution.joint_travel_cost, candidate_solution.smallest_margin, candidate_solution.weighted_total_cost, current_solution.weighted_total_cost, move_accepted ? "  <-- kept" : "");
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d poses: slide %.3f rad  reached %d/%zu  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f vs %.2f%s", iteration, slide_step, candidate_solution.viewpoint_ik.num_reached, this->viewpoints.size(), candidate_solution.num_reconfigurations, candidate_solution.num_blocked_edges, candidate_solution.joint_travel_cost, candidate_solution.smallest_margin, candidate_solution.weighted_total_cost, current_solution.weighted_total_cost, move_accepted ? "  <-- kept" : "");
 		if (move_accepted)
 		{
 			current_solution = candidate_solution;
@@ -302,7 +303,7 @@ bool Optimizer::moveObjectToLowerCost(TourSolutionAtObjectPosition& current_solu
 		// Once all are reached, a tour move may not add reconfigurations (it would undo the reconfiguration room moves).
 		const bool adds_reconfiguration = this->method_switches.use_room && current_solution.viewpoint_ik.num_reached == static_cast<int>(this->viewpoints.size()) && candidate_solution.num_reconfigurations > current_solution.num_reconfigurations;
 		const bool move_accepted = candidate_solution.weighted_total_cost < current_solution.weighted_total_cost - 1e-9 && !adds_reconfiguration;
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d tour: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d  gap sum %.4f m  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f vs %.2f%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, candidate_solution.viewpoint_ik.gap_sum, candidate_solution.num_reconfigurations, candidate_solution.num_blocked_edges, candidate_solution.joint_travel_cost, candidate_solution.smallest_margin, candidate_solution.weighted_total_cost, current_solution.weighted_total_cost, move_accepted ? "  <-- kept" : "");
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d tour: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu  gap sum %.4f m  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f vs %.2f%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, this->viewpoints.size(), candidate_solution.viewpoint_ik.gap_sum, candidate_solution.num_reconfigurations, candidate_solution.num_blocked_edges, candidate_solution.joint_travel_cost, candidate_solution.smallest_margin, candidate_solution.weighted_total_cost, current_solution.weighted_total_cost, move_accepted ? "  <-- kept" : "");
 		if (move_accepted)
 		{
 			current_solution = candidate_solution;
@@ -344,7 +345,7 @@ bool Optimizer::moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_
 	// Kept if it loses at most allowed_reach_loss of the reached viewpoints and reaches more or frees the misses.
 	const bool loss_allowed = static_cast<double>(num_lost) <= this->cost_weights.allowed_reach_loss * static_cast<double>(current_solution.viewpoint_ik.num_reached);
 	const bool move_accepted = loss_allowed && (candidate_solution.viewpoint_ik.num_reached > current_solution.viewpoint_ik.num_reached || tightest_after > tightest_before + 1e-3);
-	RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d (lost %d)  misses %zu  tightest margin %.2f -> %.2f floors  reached kept clear: %s%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, num_lost, missed_viewpoints.size(), tightest_before, tightest_after, keeps_reached_clear ? "yes" : "no", move_accepted ? "  <-- kept" : "");
+	RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu (lost %d)  misses %zu  tightest margin %.2f -> %.2f floors  reached kept clear: %s%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, this->viewpoints.size(), num_lost, missed_viewpoints.size(), tightest_before, tightest_after, keeps_reached_clear ? "yes" : "no", move_accepted ? "  <-- kept" : "");
 	if (!move_accepted)
 		return false;
 	current_solution = candidate_solution;
@@ -371,7 +372,7 @@ bool Optimizer::moveObjectToUnblockReconfigurations(TourSolutionAtObjectPosition
 		const double tightest_after = margins_after.empty() ? std::numeric_limits<double>::infinity() : room_margins::Tightest(margins_after);
 		const bool keeps_all_reached = candidate_solution.viewpoint_ik.num_reached == current_solution.viewpoint_ik.num_reached;
 		const bool move_accepted = keeps_all_reached && (candidate_solution.num_reconfigurations < current_solution.num_reconfigurations || (candidate_solution.num_reconfigurations == current_solution.num_reconfigurations && tightest_after > tightest_before + 1e-3));
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d reconfiguration room: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d  reconfigurations %d vs %d  tightest margin %.2f -> %.2f floors  tour length %.2f  reached kept clear: %s%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, candidate_solution.num_reconfigurations, current_solution.num_reconfigurations, tightest_before, tightest_after, candidate_solution.joint_travel_cost, keeps_reached_clear ? "yes" : "no", move_accepted ? "  <-- kept" : "");
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d reconfiguration room: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu  reconfigurations %d vs %d  tightest margin %.2f -> %.2f floors  tour length %.2f  reached kept clear: %s%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, this->viewpoints.size(), candidate_solution.num_reconfigurations, current_solution.num_reconfigurations, tightest_before, tightest_after, candidate_solution.joint_travel_cost, keeps_reached_clear ? "yes" : "no", move_accepted ? "  <-- kept" : "");
 		if (move_accepted)
 		{
 			current_solution = candidate_solution;

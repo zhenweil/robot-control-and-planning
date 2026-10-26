@@ -133,6 +133,11 @@ public:
 		const double planning_time = this->GetParameter<double>("real_cost_planning_time", 0.5);
 		const int planning_attempts = static_cast<int>(this->GetParameter<int64_t>("real_cost_attempts", 3));
 		const double unreachable_penalty = this->GetParameter<double>("unreachable_penalty", 50.0);
+		// An all-reached spot also needs a plannable tour (GTSP over its exact poses, every edge planned; a failed edge is
+		// replanned with the execution budget before it counts); otherwise SGD restarts.
+		const bool require_plannable_tour = this->GetParameter<bool>("sgd_require_plannable_tour", true);
+		const double execution_planning_time = this->GetParameter<double>("execution_planning_time", 5.0);
+		const int execution_planning_attempts = static_cast<int>(this->GetParameter<int64_t>("execution_planning_attempts", 5));
 		joint_travel::EdgeWeights edge_weights;
 		edge_weights.joint_distance = this->GetParameter<double>("joint_distance_weight", 1.0);
 		edge_weights.max_turn = this->GetParameter<double>("max_joint_deviation_weight", 1.0);
@@ -219,6 +224,28 @@ public:
 			}
 			return Eigen::Vector3d(sample.cwiseMax(lo).cwiseMin(hi));
 		};
+		// Tour edges at `position` that fail to plan: GTSP over the step's exact poses, each edge planned (straight move if free,
+		// else OMPL), a failed one replanned with the execution budget.
+		auto CountFailedTourEdges = [&](const StepResult& step, const Eigen::Vector3d& position)
+		{
+			std::vector<std::vector<Joints>> step_exact_poses(viewpoints.size());
+			for (size_t v = 0; v < viewpoints.size(); ++v)
+				step_exact_poses[v].push_back(step.closest[v].q);
+			gtsp::Solver step_solver(step_exact_poses, home, edge_weights, two_opt_rounds);
+			step_solver.SetTravelJoints(travel_joints);
+			const gtsp::Tour tour = step_solver.Solve();
+			scene_geometry::MoveObject(scene, scene_geometry::MakeIsometry(position, rotation));
+			const std::vector<double> edges = PlanTourEdgeLengths(this->shared_from_this(), model, scene, tour.poses, home, group_name, planning_time, planning_attempts, /*count_last_joint=*/false);
+			int num_failed = 0;
+			for (size_t k = 0; k < tour.poses.size(); ++k)
+			{
+				if (k < edges.size() && edges[k] >= 0.0)
+					continue;
+				const std::vector<double> retry = PlanTourEdgeLengths(this->shared_from_this(), model, scene, {tour.poses[k]}, k == 0 ? home : tour.poses[k - 1], group_name, execution_planning_time, execution_planning_attempts, /*count_last_joint=*/false);
+				num_failed += (retry.empty() || retry[0] < 0.0) ? 1 : 0;
+			}
+			return num_failed;
+		};
 		const auto start_time = std::chrono::steady_clock::now();
 		auto GetElapsedSeconds = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count(); };
 
@@ -228,6 +255,10 @@ public:
 		Eigen::Vector3d last_position = best_position;	// where the last descent ended
 		int restart = 0, total_steps = 0;
 		bool all_reached = false;
+		// The first all-reached spot whose tour fails to plan: used if the budget ends before a plannable one is found.
+		bool has_unplannable_fallback = false;
+		StepResult unplannable_fallback_step;
+		Eigen::Vector3d unplannable_fallback_position = Eigen::Vector3d::Zero();
 		while (!all_reached && rclcpp::ok() && GetElapsedSeconds() < time_budget)
 		{
 			// The first descent starts at the given start (as object_placement), later ones at a random offset from the best position
@@ -247,7 +278,21 @@ public:
 				}
 				if (step.num_exact == num_viewpoint)
 				{
-					all_reached = true;
+					const int num_failed_edges = require_plannable_tour ? CountFailedTourEdges(step, position) : 0;
+					if (num_failed_edges == 0)
+					{
+						all_reached = true;
+						best_step = step;
+						best_position = position;
+						break;
+					}
+					RCLCPP_INFO(this->get_logger(), "restart %d step %d: all reached but %d tour edges fail to plan; restarting", restart + 1, step_index, num_failed_edges);
+					if (!has_unplannable_fallback)
+					{
+						has_unplannable_fallback = true;
+						unplannable_fallback_step = step;
+						unplannable_fallback_position = position;
+					}
 					break;
 				}
 				// The goal moves with the object, so d|goal - tool|/d(position) = (goal - tool) / |goal - tool|; averaged as in the paper.
@@ -272,6 +317,13 @@ public:
 			}
 			last_position = position;
 			++restart;
+		}
+		if (!all_reached && has_unplannable_fallback)
+		{
+			RCLCPP_WARN(this->get_logger(), "No all-reached spot with a plannable tour within the budget; using the first all-reached one at abs (%.4f, %.4f, %.4f)", unplannable_fallback_position.x(), unplannable_fallback_position.y(), unplannable_fallback_position.z());
+			all_reached = true;
+			best_step = unplannable_fallback_step;
+			best_position = unplannable_fallback_position;
 		}
 		const double search_seconds = GetElapsedSeconds();
 

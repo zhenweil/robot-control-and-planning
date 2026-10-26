@@ -39,6 +39,7 @@ find_package(VTK 9.1 REQUIRED COMPONENTS
 # Shared code, compiled once into one library that every node links (each node used to compile its own copy).
 add_library(object_placement_core STATIC
 	src/bstar_placement.cpp
+	src/cmaes.cpp
 	src/closest_ik.cpp
 	src/gtsp.cpp
 	src/hierarchical_tour.cpp
@@ -95,10 +96,13 @@ add_executable(sgd_placement src/nodes/sgd_placement_node.cpp)
 # Object placement co-optimizing reach, reconfigurations, tour length and joint room in one descent.
 add_executable(object_gtsp_co_optimize src/nodes/object_gtsp_co_optimize_node.cpp)
 
+# CMA-ES placement baseline: black-box search over the object position with object_gtsp_co_optimize's evaluation.
+add_executable(cmaes_placement src/nodes/cmaes_placement_node.cpp)
+
 # One-off check: is a missed viewpoint reachable at a given object position (heavy IK search).
 add_executable(ik_reachability_check src/nodes/ik_reachability_check.cpp)
 
-foreach(viewpoint_planner_target object_placement_core viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement object_gtsp_co_optimize ik_reachability_check viewpoint_generator)
+foreach(viewpoint_planner_target object_placement_core viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement object_gtsp_co_optimize cmaes_placement ik_reachability_check viewpoint_generator)
 	target_include_directories(${viewpoint_planner_target} PRIVATE
 		${CMAKE_CURRENT_SOURCE_DIR}/include
 		)
@@ -128,7 +132,7 @@ foreach(viewpoint_planner_target object_placement_core viewpoint_planner_nn2opt 
 endforeach()
 
 target_link_libraries(object_placement_core ompl::ompl osqp::osqp)
-foreach(node_target viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement object_gtsp_co_optimize ik_reachability_check viewpoint_generator)
+foreach(node_target viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement object_gtsp_co_optimize cmaes_placement ik_reachability_check viewpoint_generator)
 	target_link_libraries(${node_target} object_placement_core)
 endforeach()
 
@@ -140,7 +144,7 @@ install (DIRECTORY meshes config
 		DESTINATION share/${PROJECT_NAME}
 	)
 
-install(TARGETS viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement object_gtsp_co_optimize ik_reachability_check build_reachability_map viewpoint_generator
+install(TARGETS viewpoint_planner_nn2opt viewpoint_planner_hgtsp bstar_placement object_placement random_placement sgd_placement object_gtsp_co_optimize cmaes_placement ik_reachability_check build_reachability_map viewpoint_generator
 	DESTINATION lib/${PROJECT_NAME}
 	)
 

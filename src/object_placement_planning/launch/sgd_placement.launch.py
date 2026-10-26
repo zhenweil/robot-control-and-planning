@@ -20,6 +20,7 @@ def generate_launch_description():
         DeclareLaunchArgument("time_budget_sec", default_value="300.0", description="Stop after this many seconds."),
         DeclareLaunchArgument("output_dir", default_value="/tmp/sgd_placement_output"),
         DeclareLaunchArgument("tour_input_dir", default_value="/tmp/viewpoint_planner_output"),
+        DeclareLaunchArgument("mesh_path", default_value="/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl", description="Object mesh (binary STL, cm: mesh_scale 0.01)."),
         DeclareLaunchArgument("params_file", default_value="", description="Optional YAML loaded last (e.g. object_placement_run.yaml)."),
     ]
 
@@ -32,7 +33,7 @@ def generate_launch_description():
         extra = [os.path.expanduser(params_file)] if params_file else []
         seed = LaunchConfiguration("random_seed").perform(context)
         node_params = {
-            "mesh_path": "/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl",
+            "mesh_path": LaunchConfiguration("mesh_path").perform(context),
             "mesh_scale": 0.01,
             "tour_input_dir": LaunchConfiguration("tour_input_dir").perform(context),
             "output_dir": LaunchConfiguration("output_dir").perform(context),

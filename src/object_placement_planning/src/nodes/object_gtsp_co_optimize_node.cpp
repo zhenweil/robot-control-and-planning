@@ -144,7 +144,15 @@ public:
 		const std::vector<int>& counted_joints = optimizer.getCountedJoints();
 		const joint_travel::EdgeWeights& edge_weights = optimizer.getEdgeWeights();
 		scene_geometry::MoveObject(scene, scene_geometry::MakeIsometry(best.viewpoint_ik.position, object_rotation));
-		const std::vector<double> edge_lengths = PlanTourEdgeLengths(this->shared_from_this(), model, scene, tour_poses, home_pose, group_name, planning_time, planning_attempts, /*count_last_joint=*/false);
+		// An edge that fails with the planning budget is planned again with the execution budget before it counts as failed.
+		std::vector<double> edge_lengths = PlanTourEdgeLengths(this->shared_from_this(), model, scene, tour_poses, home_pose, group_name, planning_time, planning_attempts, /*count_last_joint=*/false);
+		for (size_t k = 0; k < tour_poses.size() && k < edge_lengths.size(); ++k)
+			if (edge_lengths[k] < 0.0)
+			{
+				const std::vector<double> retry = PlanTourEdgeLengths(this->shared_from_this(), model, scene, {tour_poses[k]}, k == 0 ? home_pose : tour_poses[k - 1], group_name, execution_planning_time, execution_planning_attempts, /*count_last_joint=*/false);
+				if (!retry.empty())
+					edge_lengths[k] = retry[0];
+			}
 		double planned_length = 0.0;
 		int num_failed_length_edges = 0;
 		for (size_t k = 0; k < tour_poses.size(); ++k)
@@ -153,7 +161,14 @@ public:
 			num_failed_length_edges += edge_ok ? 0 : 1;
 			planned_length += edge_ok ? edge_lengths[k] : joint_travel::JointDistance(k == 0 ? home_pose : tour_poses[k - 1], tour_poses[k], counted_joints) + unreachable_penalty;
 		}
-		const std::vector<double> edge_times = PlanTourEdgeTimes(this->shared_from_this(), model, scene, tour_poses, home_pose, group_name, planning_time, planning_attempts);
+		std::vector<double> edge_times = PlanTourEdgeTimes(this->shared_from_this(), model, scene, tour_poses, home_pose, group_name, planning_time, planning_attempts);
+		for (size_t k = 0; k < tour_poses.size() && k < edge_times.size(); ++k)
+			if (edge_times[k] < 0.0)
+			{
+				const std::vector<double> retry = PlanTourEdgeTimes(this->shared_from_this(), model, scene, {tour_poses[k]}, k == 0 ? home_pose : tour_poses[k - 1], group_name, execution_planning_time, execution_planning_attempts);
+				if (!retry.empty())
+					edge_times[k] = retry[0];
+			}
 		double planned_time = 0.0;
 		for (size_t k = 0; k < tour_poses.size(); ++k)
 		{
