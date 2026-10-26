@@ -438,7 +438,7 @@ private:
 		std::string mesh_path = this->params.mesh_path;
 		if (mesh_path.empty())
 			mesh_path =
-				ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs.stl";
+				ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs_repaired_cm_binary.stl";
 		this->resolved_mesh_path = mesh_path;
 
 		std::vector<Eigen::Isometry3d> tour_tcp_poses = LoadTourTcpPoses(this->params.tour_input_dir);

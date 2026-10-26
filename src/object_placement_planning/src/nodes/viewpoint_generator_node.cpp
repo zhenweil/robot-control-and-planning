@@ -22,7 +22,7 @@ public:
 		viewpoint_generation::Settings settings;
 		settings.mesh_path = this->GetParameter<std::string>("mesh_path", "");
 		if (settings.mesh_path.empty())
-			settings.mesh_path = ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs.stl";
+			settings.mesh_path = ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs_repaired_cm_binary.stl";
 		settings.mesh_scale = this->GetParameter<double>("mesh_scale", settings.mesh_scale);
 		settings.target_faces = static_cast<int>(this->GetParameter<int64_t>("target_faces", settings.target_faces));
 		settings.candidate_generation_method = this->GetParameter<std::string>("candidate_generation_method", settings.candidate_generation_method);

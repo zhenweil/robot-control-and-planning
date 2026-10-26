@@ -111,7 +111,7 @@ public:
 		const object_gtsp_co_optimize::DescentLimits descent_limits = this->readDescentLimits();
 		const object_gtsp_co_optimize::TourSettings tour_settings = this->readTourSettings();
 		if (mesh_path.empty())
-			mesh_path = ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs.stl";
+			mesh_path = ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs_repaired_cm_binary.stl";
 
 		const std::vector<Eigen::Isometry3d> viewpoints_nominal = LoadTourTcpPoses(tour_input_dir);	// abs, object at nominal
 		std::vector<Eigen::Isometry3d> viewpoints = viewpoints_nominal;  // relative to the object position

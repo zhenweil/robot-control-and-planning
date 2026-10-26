@@ -186,7 +186,7 @@ public:
 		const bool stop_when_all_reached = param<bool>("rp_stop_when_all_reached", false);  // true: GTSP restarts at the first position reaching all, then stop
 
 		if (mesh_path.empty())
-			mesh_path = ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs.stl";
+			mesh_path = ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs_repaired_cm_binary.stl";
 		const std::vector<Eigen::Isometry3d> tour = LoadTourTcpPoses(tour_input_dir);
 		const int n = static_cast<int>(tour.size());
 		RCLCPP_INFO(get_logger(), "Loaded %d tour poses; sampling in box (%.2f..%.2f, %.2f..%.2f, %.2f..%.2f) m, budget %.0f s",

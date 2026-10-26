@@ -93,7 +93,7 @@ public:
 		const int population_size = static_cast<int>(this->getParameter<int64_t>("cmaes_population_size", 0));  // 0 = the CMA-ES default
 		const int random_seed = static_cast<int>(this->getParameter<int64_t>("random_seed", 42));
 		if (mesh_path.empty())
-			mesh_path = ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs.stl";
+			mesh_path = ament_index_cpp::get_package_share_directory("object_placement_planning") + "/meshes/bunny_holding_eggs_repaired_cm_binary.stl";
 
 		std::vector<Eigen::Isometry3d> viewpoints = LoadTourTcpPoses(tour_input_dir);	// relative to the object position below
 		for (Eigen::Isometry3d& viewpoint : viewpoints)
