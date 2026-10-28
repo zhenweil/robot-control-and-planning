@@ -1,0 +1,25 @@
+# Viewpoint generation with no robot reachability check:
+#   ros2 run object_placement_planning viewpoint_generator --ros-args --params-file src/object_placement_planning/config/viewpoint_generator_armadillo.yaml
+# Then point object_placement's tour_input_dir at output_dir.
+/**:
+  ros__parameters:
+    mesh_path: /home/zhenweil/robot-control-and-planning/src/object_placement_planning/meshes/armadillo-centered-zup-cm-8cm_binary.stl  # Stanford Armadillo, centered, z up, cm, 8 cm tall, turned 90 deg about z
+    mesh_scale: 0.01
+    target_faces: 1000                       # simplified mesh for candidates and visibility
+    candidate_generation_method: potential_field   # or grid
+    n_surface_samples: 300
+    standoff_distances: [0.03]   # m
+    tilt_angles_deg: [0.0, 15.0, -15.0]      # grid only
+    min_clearance: 0.005                     # m
+    fov_deg: 45.0
+    max_distance: 30.0
+    angle_threshold_deg: 70.0
+    max_rays_per_view: 2000
+    target_area_visibility: 0.9              # greedy set cover stops at this fraction of the area
+    random_seed: 42
+    # Object pose for the TCP poses (abs, base frame); same as object_pose.yaml.
+    object_translation_world: [0.5, 0.0, 0.15]
+    object_rotation_rpy_deg: [0.0, 0.0, 0.0]
+    t_tcp_camera_xyz: [0.0, 0.0, 0.0]
+    t_tcp_camera_quat_xyzw: [0.0, 0.0, 0.0, 1.0]
+    output_dir: /tmp/viewpoints_armadillo
