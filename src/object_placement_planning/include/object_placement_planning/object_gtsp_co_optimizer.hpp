@@ -150,13 +150,13 @@ struct TourSettings
 class Optimizer
 {
 public:
-	// viewpoints: relative to the object position. progress_pub: live markers, or null for none; mesh_path and mesh_scale draw the object in them.
+	// viewpoints: relative to the object position. progress_pub: live markers, or null for none; mesh_path and mesh_scale draw the object in them; show_tour_lines draws the tool path between viewpoints.
 	Optimizer(
 		rclcpp::Node::SharedPtr node, moveit::core::RobotModelConstPtr model, planning_scene_monitor::PlanningSceneMonitorPtr scene,
 		const std::string& group_name, std::vector<Eigen::Isometry3d> viewpoints, const Eigen::Matrix3d& object_rotation, Joints home,
 		DescentLimits descent_limits, MethodSwitches method_switches, CostWeights cost_weights, StepSizes step_sizes, IkSettings ik_settings,
 		TourSettings tour_settings, rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub, std::string mesh_path,
-		double mesh_scale);
+		double mesh_scale, bool show_tour_lines = false);
 
 	// The one descent from `requested_start` (abs, clamped to the search box).
 	TourSolutionAtObjectPosition runDescent(const Eigen::Vector3d& requested_start);
@@ -264,6 +264,7 @@ private:
 	// Visualization
 	std::string mesh_path;  // object mesh for the progress markers
 	double mesh_scale = 0.01;
+	bool show_tour_lines = false;  // draw the tool path line between viewpoints in the progress markers
 	std::vector<Eigen::Vector3d> object_trail;	 // object positions this descent
 	std::set<std::pair<std::string, int>> progress_marker_keys;	 // markers in the last progress publish
 	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub;

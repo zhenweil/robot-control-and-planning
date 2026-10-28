@@ -179,7 +179,7 @@ void ApplyObjectPlacementToScene(
 	double y,
 	double z);
 
-// Object mesh + tour polyline/waypoints re-expressed in the recommended base's frame (same idea
+// Object mesh + waypoints (+ tour polyline if show_tour_line) re-expressed in the recommended base's frame (same idea
 // as BuildBstarPlacementMarkerArray). frame_id is "world".
 visualization_msgs::msg::MarkerArray BuildObjectPlacementMarkerArray(
 	const rclcpp::Time& stamp,
@@ -188,4 +188,5 @@ visualization_msgs::msg::MarkerArray BuildObjectPlacementMarkerArray(
 	const Eigen::Vector3d& object_translation_nominal,
 	const Eigen::Matrix3d& object_rotation_nominal,
 	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal,
-	const ObjectPlacementResult& result);
+	const ObjectPlacementResult& result,
+	bool show_tour_line = false);

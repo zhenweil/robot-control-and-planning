@@ -70,7 +70,7 @@ void ApplyObjectPlacementToScene(
 visualization_msgs::msg::MarkerArray BuildObjectPlacementMarkerArray(
 	const rclcpp::Time& stamp, const std::string& resolved_mesh_path, double mesh_scale,
 	const Eigen::Vector3d& object_translation_nominal, const Eigen::Matrix3d& object_rotation_nominal,
-	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const ObjectPlacementResult& result)
+	const std::vector<Eigen::Isometry3d>& tour_tcp_poses_nominal, const ObjectPlacementResult& result, bool show_tour_line)
 {
 	visualization_msgs::msg::MarkerArray markers;
 	int id = 0;
@@ -102,6 +102,7 @@ visualization_msgs::msg::MarkerArray BuildObjectPlacementMarkerArray(
 		markers.markers.push_back(sphere);
 		line.points.push_back(sphere.pose.position);
 	}
-	markers.markers.push_back(line);
+	if (show_tour_line)
+		markers.markers.push_back(line);
 	return markers;
 }

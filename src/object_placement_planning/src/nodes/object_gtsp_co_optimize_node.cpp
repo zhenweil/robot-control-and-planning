@@ -94,6 +94,7 @@ public:
 		const std::string group_name = this->getParameter<std::string>("group_name", "panda_arm");
 		std::string mesh_path = this->getParameter<std::string>("mesh_path", "");
 		const double mesh_scale = this->getParameter<double>("mesh_scale", 0.01);
+		const bool show_tour_lines = this->getParameter<bool>("show_tour_lines", false);
 		const std::string tour_input_dir = this->getParameter<std::string>("tour_input_dir", "/tmp/viewpoint_planner_output");
 		const std::string output_dir = this->getParameter<std::string>("output_dir", "/tmp/object_gtsp_co_optimize_output");
 		const Joints home_pose = this->getParameter<std::vector<double>>("initial_joints", std::vector<double>{0.0, -0.8745, 0.0, -2.356, 0.0, 1.571, 0.785});
@@ -132,7 +133,7 @@ public:
 
 		const auto start_time = std::chrono::steady_clock::now();
 		auto GetElapsedSeconds = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count(); };
-		object_gtsp_co_optimize::Optimizer optimizer(this->shared_from_this(), model, scene, group_name, viewpoints, object_rotation, home_pose, descent_limits, this->readMethodSwitches(), this->readCostWeights(), this->readStepSizes(), this->readIkSettings(), tour_settings, progress_pub, mesh_path, mesh_scale);
+		object_gtsp_co_optimize::Optimizer optimizer(this->shared_from_this(), model, scene, group_name, viewpoints, object_rotation, home_pose, descent_limits, this->readMethodSwitches(), this->readCostWeights(), this->readStepSizes(), this->readIkSettings(), tour_settings, progress_pub, mesh_path, mesh_scale, show_tour_lines);
 		// One descent from the given start, no restarts.
 		const object_gtsp_co_optimize::TourSolutionAtObjectPosition best = optimizer.runDescent(start);
 		const double search_seconds = GetElapsedSeconds();
@@ -219,7 +220,7 @@ public:
 		result.tour_order = best.order;
 		for (int viewpoint : best.order)
 			result.joint_solutions.push_back(best.viewpoint_ik.reached[static_cast<size_t>(viewpoint)] ? best.viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(viewpoint)].q : Joints());
-		visualization_msgs::msg::MarkerArray final_markers = BuildObjectPlacementMarkerArray(this->now(), mesh_path, mesh_scale, nominal, object_rotation, viewpoints_nominal, result);
+		visualization_msgs::msg::MarkerArray final_markers = BuildObjectPlacementMarkerArray(this->now(), mesh_path, mesh_scale, nominal, object_rotation, viewpoints_nominal, result, show_tour_lines);
 		final_markers.markers.push_back(GetMountingSurfaceMarker(model->getRootLinkName(), this->now()));
 		marker_pub->publish(final_markers);
 		optimizer.publishProgressMarkers(best.viewpoint_ik, best.order, Eigen::Vector3d::Zero());

@@ -24,6 +24,7 @@ def generate_launch_description():
         DeclareLaunchArgument("mesh_path", default_value="/home/zhenweil/mesh-processing/data/bunny_holding_eggs_repaired_cm_binary.stl", description="Object mesh (binary STL, cm: mesh_scale 0.01)."),
         DeclareLaunchArgument("params_file", default_value="", description="Optional YAML loaded last (e.g. object_placement_run.yaml)."),
         DeclareLaunchArgument("use_rviz", default_value="false", description="Launch RViz with the robot; the node then keeps its final markers up until Ctrl-C."),
+        DeclareLaunchArgument("show_tour_lines", default_value="false", description="Draw the line between viewpoints in RViz."),
         DeclareLaunchArgument("execute_on_robot", default_value="false", description="Drive the robot through the final tour; needs move_group running (robot_sim.launch.py, or panda_arm.launch.py). Leave use_rviz false then."),
     ]
     use_rviz = LaunchConfiguration("use_rviz")
@@ -45,6 +46,7 @@ def generate_launch_description():
             "random_seed": int(seed),
             "co_time_budget_sec": float(LaunchConfiguration("time_budget_sec").perform(context)),
             "keep_alive": use_rviz.perform(context).lower() == "true",
+            "show_tour_lines": LaunchConfiguration("show_tour_lines").perform(context).lower() == "true",
             "execute_on_robot": LaunchConfiguration("execute_on_robot").perform(context).lower() == "true",
         }
         nodes = [Node(

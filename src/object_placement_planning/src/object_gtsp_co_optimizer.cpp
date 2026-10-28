@@ -22,9 +22,9 @@ namespace object_gtsp_co_optimize
 Optimizer::Optimizer(
 	rclcpp::Node::SharedPtr node, moveit::core::RobotModelConstPtr model, planning_scene_monitor::PlanningSceneMonitorPtr scene,
 	const std::string& group_name, std::vector<Eigen::Isometry3d> viewpoints, const Eigen::Matrix3d& object_rotation, Joints home_pose,
-	DescentLimits descent_limits, MethodSwitches method_switches, CostWeights cost_weights, StepSizes step_sizes, IkSettings ik_settings, TourSettings tour_settings, rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub, std::string mesh_path, double mesh_scale)
+	DescentLimits descent_limits, MethodSwitches method_switches, CostWeights cost_weights, StepSizes step_sizes, IkSettings ik_settings, TourSettings tour_settings, rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr progress_pub, std::string mesh_path, double mesh_scale, bool show_tour_lines)
 	: node(std::move(node)), model(std::move(model)), scene(std::move(scene)), home_pose(std::move(home_pose)), step_sizes(step_sizes), ik_settings(std::move(ik_settings)),
-	  cost_weights(cost_weights), tour_settings(std::move(tour_settings)), descent_limits(std::move(descent_limits)), method_switches(method_switches), viewpoints(std::move(viewpoints)), object_rotation(object_rotation), mesh_path(std::move(mesh_path)), mesh_scale(mesh_scale), progress_pub(std::move(progress_pub))
+	  cost_weights(cost_weights), tour_settings(std::move(tour_settings)), descent_limits(std::move(descent_limits)), method_switches(method_switches), viewpoints(std::move(viewpoints)), object_rotation(object_rotation), mesh_path(std::move(mesh_path)), mesh_scale(mesh_scale), show_tour_lines(show_tour_lines), progress_pub(std::move(progress_pub))
 {
 	this->state = std::make_unique<moveit::core::RobotState>(this->model);
 	this->state->setToDefaultValues();
@@ -1556,7 +1556,7 @@ void Optimizer::publishProgressMarkers(const ViewpointIkAtPosition& viewpoint_ik
 		marker_state.update();
 		tool_path.points.push_back(scene_geometry::ToPoint(marker_state.getGlobalLinkTransform(this->tool).translation()));
 	}
-	if (tool_path.points.size() > 1)
+	if (this->show_tour_lines && tool_path.points.size() > 1)
 		markers.markers.push_back(tool_path);
 
 	visualization_msgs::msg::Marker miss_gap_lines = marker_utils::MakeMarker("object_placement_miss_gap", visualization_msgs::msg::Marker::LINE_LIST, stamp);
