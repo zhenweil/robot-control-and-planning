@@ -232,8 +232,9 @@ bool Optimizer::moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& c
 	if (reach_move.norm() < 1e-12)
 		return false;
 	const Eigen::Vector3d direction = reach_move.normalized();
-	// Step length from the position errors themselves, capped; halved on a rejected try.
-	double reach_length = std::min(reach_move.norm(), this->step_sizes.max_step);
+	// First try co_initial_step (2 cm) along the errors' direction; halved on a rejected try, down to 5 mm.
+	double reach_length = this->step_sizes.initial_step;
+	const double smallest_reach_length = 0.005;  // m
 	// Debug: where each missed viewpoint is and where its closest-pose camera got, to check the reach direction.
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
 	{
@@ -245,7 +246,7 @@ bool Optimizer::moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& c
 		RCLCPP_INFO(this->node->get_logger(), "iteration %d reach debug: missed viewpoint %zu at abs (%.4f, %.4f, %.4f), camera at abs (%.4f, %.4f, %.4f), error viewpoint - camera (%.4f, %.4f, %.4f) m", iteration, viewpoint_index, viewpoint_position.x(), viewpoint_position.y(), viewpoint_position.z(), camera_position.x(), camera_position.y(), camera_position.z(), position_error.x(), position_error.y(), position_error.z());
 	}
 	RCLCPP_INFO(this->node->get_logger(), "iteration %d reach debug: object at abs (%.4f, %.4f, %.4f), reach move (%.4f, %.4f, %.4f) m", iteration, current_solution.viewpoint_ik.position.x(), current_solution.viewpoint_ik.position.y(), current_solution.viewpoint_ik.position.z(), reach_move.x(), reach_move.y(), reach_move.z());
-	for (int attempt = 0; attempt < this->step_sizes.max_line_search_tries && reach_length >= this->step_sizes.min_step; ++attempt)
+	for (int attempt = 0; attempt < this->step_sizes.max_line_search_tries && reach_length >= smallest_reach_length - 1e-9; ++attempt)
 	{
 		// Simple pull using closest IK to close gap.
 		const TourSolutionAtObjectPosition candidate_solution = this->solveIkAndImproveTourAtPosition(current_solution.viewpoint_ik.position + reach_length * direction, this->getChosenPoses(current_solution.viewpoint_ik), {}, current_solution.order);
@@ -336,28 +337,32 @@ bool Optimizer::moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_
 	if (missed_viewpoints.empty())
 		return false;
 	const std::vector<room_margins::Margin> margins_before = this->getBlockingMarginsOfViewpoints(current_solution.viewpoint_ik, missed_viewpoints, blocking_distance_multiple);
-	bool keeps_reached_clear = false;
-	const Eigen::Vector3d move_direction = this->getRoomMoveDirection(current_solution.viewpoint_ik, margins_before, object_step, keeps_reached_clear);
-	if (move_direction.isZero())
-		return false;
-	
-	const TourSolutionAtObjectPosition candidate_solution = this->solveIkAndImproveTourAtPosition(current_solution.viewpoint_ik.position + object_step * move_direction, this->getChosenPoses(current_solution.viewpoint_ik), {}, current_solution.order);
-	int num_lost = 0;
-	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
-		num_lost += current_solution.viewpoint_ik.reached[viewpoint_index] && !candidate_solution.viewpoint_ik.reached[viewpoint_index] ? 1 : 0;
-	const std::vector<room_margins::Margin> margins_after = this->getBlockingMarginsOfViewpoints(candidate_solution.viewpoint_ik, missed_viewpoints, blocking_distance_multiple);
 	const double tightest_before = room_margins::Tightest(margins_before);
-	const double tightest_after = margins_after.empty() ? std::numeric_limits<double>::infinity() : room_margins::Tightest(margins_after);
-	// Kept if it loses at most allowed_reach_loss of the reached viewpoints and reaches more or frees the misses.
-	const bool loss_allowed = static_cast<double>(num_lost) <= this->cost_weights.allowed_reach_loss * static_cast<double>(current_solution.viewpoint_ik.num_reached);
-	const bool move_accepted = loss_allowed && (candidate_solution.viewpoint_ik.num_reached > current_solution.viewpoint_ik.num_reached || tightest_after > tightest_before + 1e-3);
-	RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu (lost %d)  misses %zu  tightest margin %.2f -> %.2f floors  reached kept clear: %s%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, this->viewpoints.size(), num_lost, missed_viewpoints.size(), tightest_before, tightest_after, keeps_reached_clear ? "yes" : "no", move_accepted ? "  <-- kept" : "");
-	if (!move_accepted)
-		return false;
-	current_solution = candidate_solution;
-	this->object_trail.push_back(current_solution.viewpoint_ik.position);
-	this->publishProgressMarkers(current_solution.viewpoint_ik, current_solution.order, move_direction);
-	return true;
+	const double smallest_step = 0.005;  // m: as the reach step, tries object_step, then halves down to this
+	for (int attempt = 0; attempt < this->step_sizes.max_line_search_tries && object_step >= smallest_step - 1e-9; ++attempt, object_step *= 0.5)
+	{
+		bool keeps_reached_clear = false;
+		const Eigen::Vector3d move_direction = this->getRoomMoveDirection(current_solution.viewpoint_ik, margins_before, object_step, keeps_reached_clear);
+		if (move_direction.isZero())
+			return false;
+		const TourSolutionAtObjectPosition candidate_solution = this->solveIkAndImproveTourAtPosition(current_solution.viewpoint_ik.position + object_step * move_direction, this->getChosenPoses(current_solution.viewpoint_ik), {}, current_solution.order);
+		int num_lost = 0;
+		for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
+			num_lost += current_solution.viewpoint_ik.reached[viewpoint_index] && !candidate_solution.viewpoint_ik.reached[viewpoint_index] ? 1 : 0;
+		const std::vector<room_margins::Margin> margins_after = this->getBlockingMarginsOfViewpoints(candidate_solution.viewpoint_ik, missed_viewpoints, blocking_distance_multiple);
+		const double tightest_after = margins_after.empty() ? std::numeric_limits<double>::infinity() : room_margins::Tightest(margins_after);
+		// Kept if it loses at most allowed_reach_loss of the reached viewpoints and reaches more or frees the misses.
+		const bool loss_allowed = static_cast<double>(num_lost) <= this->cost_weights.allowed_reach_loss * static_cast<double>(current_solution.viewpoint_ik.num_reached);
+		const bool move_accepted = loss_allowed && (candidate_solution.viewpoint_ik.num_reached > current_solution.viewpoint_ik.num_reached || tightest_after > tightest_before + 1e-3);
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu (lost %d)  misses %zu  tightest margin %.2f -> %.2f floors  reached kept clear: %s%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, this->viewpoints.size(), num_lost, missed_viewpoints.size(), tightest_before, tightest_after, keeps_reached_clear ? "yes" : "no", move_accepted ? "  <-- kept" : "");
+		if (!move_accepted)
+			continue;
+		current_solution = candidate_solution;
+		this->object_trail.push_back(current_solution.viewpoint_ik.position);
+		this->publishProgressMarkers(current_solution.viewpoint_ik, current_solution.order, move_direction);
+		return true;
+	}
+	return false;
 }
 
 // Room-then-reach for reconfigurations, once every viewpoint is reached: frees what stops the straight camera paths where
