@@ -176,13 +176,13 @@ private:
 	void improveOrderAndPosturesWithObjectFixed(TourSolutionAtObjectPosition& solution_to_complete);
 	bool improveArmPosesWithObjectFixed(TourSolutionAtObjectPosition& current_solution, int iteration);
 	bool moveObjectToReachMore(TourSolutionAtObjectPosition& current_solution, double& reach_step, double& reconfiguration_step, int iteration);
-	bool moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& current_solution, double& object_step, int iteration);
+	bool moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& current_solution, int iteration);
 	bool moveObjectToLowerCost(TourSolutionAtObjectPosition& current_solution, double& object_step, int iteration);
 	bool moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_solution, double object_step, int iteration);
 	bool moveObjectToUnblockReconfigurations(TourSolutionAtObjectPosition& current_solution, double& object_step, int iteration);
 
 	// Step directions
-	Eigen::Vector3d getDirectionTowardMissedViewpoints(const ViewpointIkAtPosition& viewpoint_ik);
+	Eigen::Vector3d getMoveTowardMissedViewpoints(const ViewpointIkAtPosition& viewpoint_ik);
 	Eigen::Vector3d getDirectionToLowerTourCost(const TourSolutionAtObjectPosition& solution);
 	std::vector<Eigen::VectorXd> getSelfMotionSlidesToLowerTourCost(const TourSolutionAtObjectPosition& solution);
 	Eigen::MatrixXd getSelfMotionProjector(const Eigen::MatrixXd& jacobian) const;
