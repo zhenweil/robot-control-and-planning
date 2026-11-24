@@ -200,7 +200,9 @@ private:
 	std::vector<room_margins::Margin> getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, double blocking_distance_multiple);
 	// The same viewpoints' margins after the object moves by object_move, each pose carried along so the camera follows its viewpoint (no new IK).
 	std::vector<room_margins::Margin> getBlockingMarginsOfCarriedPoses(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, const Eigen::Vector3d& object_move, double blocking_distance_multiple);
-	std::vector<room_margins::Margin> getBlockingMarginsOfReconfigurations(const TourSolutionAtObjectPosition& solution, double blocking_distance_multiple);
+	std::vector<room_margins::Margin> getBlockingMarginsOfReconfigurations(const TourSolutionAtObjectPosition& solution, double blocking_distance_multiple, const Eigen::Vector3d& object_move = Eigen::Vector3d::Zero());
+	// Joint values after the object moves by object_move with the camera following its target, to first order (q + J+ d).
+	Joints carryPoseWithObject(const Joints& joint_values, const Eigen::Vector3d& object_move);
 
 	// IK
 	uint32_t getRandomIkSeed(const Eigen::Vector3d& position, size_t viewpoint_index) const;
