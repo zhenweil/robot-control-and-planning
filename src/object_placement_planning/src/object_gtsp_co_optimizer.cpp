@@ -19,6 +19,22 @@
 namespace object_gtsp_co_optimize
 {
 
+namespace
+{
+// Timing debug: per-thread time in solveClosestIkFromStarts' parts, read by bringMissesCloserFromNeighbors' log.
+struct ClosestIkPartTimes
+{
+	double closest_seconds = 0.0;
+	double push_seconds = 0.0;
+	double exact_finish_seconds = 0.0;
+	int closest_count = 0;
+	int push_count = 0;
+	int exact_finish_count = 0;
+};
+thread_local ClosestIkPartTimes closest_ik_part_times;
+double GetSecondsSince(std::chrono::steady_clock::time_point since) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - since).count(); }
+}  // namespace
+
 Optimizer::Optimizer(
 	rclcpp::Node::SharedPtr node, moveit::core::RobotModelConstPtr model, planning_scene_monitor::PlanningSceneMonitorPtr scene,
 	const std::string& group_name, std::vector<Eigen::Isometry3d> viewpoints, const Eigen::Matrix3d& object_rotation, Joints home_pose,
@@ -833,20 +849,36 @@ ViewpointIkAtPosition Optimizer::solveViewpointIkAtPosition(const Eigen::Vector3
 	return viewpoint_ik;
 }
 
-std::vector<closest_ik::Result> Optimizer::solveClosestIkFromStarts(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts)
+std::vector<closest_ik::Result> Optimizer::solveClosestIkFromStarts(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts, bool push_for_clearance)
 {
 	std::vector<closest_ik::Result> results;
 	for (const Joints& start : starts)
 	{
+		auto part_start = std::chrono::steady_clock::now();
 		closest_ik::Result result = closest_ik::Solve(this->scene, state, this->group, this->tool, target, start, this->ik_settings.closest_options);
+		closest_ik_part_times.closest_seconds += GetSecondsSince(part_start);
+		closest_ik_part_times.closest_count += 1;
 		if (!result.found)
 			continue;
-		if (this->getClearanceShortfall(state, result.q) > 0.0)
+		const bool short_of_clearance = this->getClearanceShortfall(state, result.q) > 0.0;
+		if (short_of_clearance && !push_for_clearance)
+		{
+			// No push (misses from neighbours): the clearance shortfall stays in the pose's gap.
+		}
+		else if (short_of_clearance)
+		{
+			part_start = std::chrono::steady_clock::now();
 			result = this->pushArmToExactClearance(state, target, result);
+			closest_ik_part_times.push_seconds += GetSecondsSince(part_start);
+			closest_ik_part_times.push_count += 1;
+		}
 		else if (!result.exact && result.gap < this->ik_settings.exact_finish_gap)
 		{
 			// Close to the target: exact IK started from the closest pose (every exact check applies).
+			part_start = std::chrono::steady_clock::now();
 			const closest_ik::Result exact = closest_ik::Solve(this->scene, state, this->group, this->tool, target, result.q, this->ik_settings.exact_options);
+			closest_ik_part_times.exact_finish_seconds += GetSecondsSince(part_start);
+			closest_ik_part_times.exact_finish_count += 1;
 			if (exact.exact)
 				result = exact;
 		}
@@ -903,7 +935,8 @@ closest_ik::Result Optimizer::solveSmallestGapIk(moveit::core::RobotState& state
 {
 	closest_ik::Result best_result;
 	double best_gap = std::numeric_limits<double>::max();
-	for (const closest_ik::Result& result : this->solveClosestIkFromStarts(state, target, starts))
+	// Used by misses from neighbours only: no clearance push, it costs ~0.2 s a pose (timing log).
+	for (const closest_ik::Result& result : this->solveClosestIkFromStarts(state, target, starts, false))
 	{
 		if (result.exact)
 			return result;
@@ -1284,70 +1317,127 @@ void Optimizer::bringMissesCloserFromNeighbors(ViewpointIkAtPosition& viewpoint_
 		this->neighbor_ik_cache.clear();
 		this->neighbor_ik_cache_position = viewpoint_ik.position;
 	}
-	std::vector<ClosestIkCandidate> closer_poses(miss_positions.size());
-	std::vector<char> found(miss_positions.size(), 0);  // one byte per miss: written from parallel threads
-	const unsigned int num_workers = std::min(this->num_threads, static_cast<unsigned int>(miss_positions.size()));
+	// One solve per (miss, neighbour pose) pair, all pairs in parallel.
+	std::vector<size_t> pair_miss_index;
+	std::vector<Joints> pair_start_pose;
+	for (size_t miss_index = 0; miss_index < miss_positions.size(); ++miss_index)
+	{
+		const size_t tour_position = miss_positions[miss_index];
+		pair_miss_index.push_back(miss_index);
+		pair_start_pose.push_back(tour_position == 0 ? this->home_pose : viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position - 1])].q);
+		if (tour_position + 1 < order.size())
+		{
+			pair_miss_index.push_back(miss_index);
+			pair_start_pose.push_back(viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position + 1])].q);
+		}
+	}
+	std::vector<NeighborIkResult> pair_results(pair_miss_index.size());
+	const unsigned int num_workers = std::min(this->num_threads, static_cast<unsigned int>(pair_miss_index.size()));
+	// Timing debug, per thread: exact IK and closest IK (smallest gap) time and count, cache hits, closest IK parts.
+	std::vector<double> exact_seconds(num_workers, 0.0), smallest_gap_seconds(num_workers, 0.0), thread_seconds(num_workers, 0.0);
+	std::vector<int> exact_count(num_workers, 0), smallest_gap_count(num_workers, 0), cache_hits(num_workers, 0);
+	std::vector<ClosestIkPartTimes> part_times(num_workers);
+	const auto threads_start = std::chrono::steady_clock::now();
 	std::vector<std::thread> threads;
 	for (unsigned int thread_index = 0; thread_index < num_workers; ++thread_index)
 		threads.emplace_back([&, thread_index]()
 		{
+			const auto thread_start = std::chrono::steady_clock::now();
+			closest_ik_part_times = ClosestIkPartTimes();
 			moveit::core::RobotState thread_state(*this->state);
-			for (size_t miss_index = thread_index; miss_index < miss_positions.size(); miss_index += num_workers)
+			for (size_t pair_index = thread_index; pair_index < pair_miss_index.size(); pair_index += num_workers)
 			{
-				const size_t tour_position = miss_positions[miss_index];
-				const size_t viewpoint_index = static_cast<size_t>(order[tour_position]);
+				const size_t viewpoint_index = static_cast<size_t>(order[miss_positions[pair_miss_index[pair_index]]]);
 				const Eigen::Isometry3d target = scene_geometry::Translation(viewpoint_ik.position) * this->viewpoints[viewpoint_index];
-				std::vector<Joints> neighbor_poses = {tour_position == 0 ? this->home_pose : viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position - 1])].q};
-				if (tour_position + 1 < order.size())
-					neighbor_poses.push_back(viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[tour_position + 1])].q);
-				double best_gap = viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].gap;
-				for (const Joints& neighbor_pose : neighbor_poses)
+				const Joints& neighbor_pose = pair_start_pose[pair_index];
+				// The solve depends only on (viewpoint, start pose) at this object position, so a repeat is looked up.
+				const std::pair<size_t, Joints> cache_key(viewpoint_index, neighbor_pose);
+				NeighborIkResult neighbor_result;
+				bool cached = false;
 				{
-					// The solve depends only on (viewpoint, start pose) at this object position, so a repeat is looked up.
-					const std::pair<size_t, Joints> cache_key(viewpoint_index, neighbor_pose);
-					NeighborIkResult neighbor_result;
-					bool cached = false;
+					std::lock_guard<std::mutex> lock(this->neighbor_ik_cache_mutex);
+					const auto entry = this->neighbor_ik_cache.find(cache_key);
+					if (entry != this->neighbor_ik_cache.end())
 					{
-						std::lock_guard<std::mutex> lock(this->neighbor_ik_cache_mutex);
-						const auto entry = this->neighbor_ik_cache.find(cache_key);
-						if (entry != this->neighbor_ik_cache.end())
-						{
-							neighbor_result = entry->second;
-							cached = true;
-						}
+						neighbor_result = entry->second;
+						cached = true;
 					}
-					if (!cached)
-					{
-						closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, neighbor_pose, this->ik_settings.exact_options);
-						if (!result.exact)
-							result = this->solveSmallestGapIk(thread_state, target, {neighbor_pose});
-						neighbor_result.found = result.found;
-						neighbor_result.exact = result.exact;
-						neighbor_result.candidate.q = result.q;
-						if (result.found && !result.exact)
-						{
-							neighbor_result.candidate.clearance_shortfall = this->getClearanceShortfall(thread_state, result.q);
-							neighbor_result.candidate.gap = scene_geometry::PoseGap(result.pose_error, this->ik_settings.closest_options.rot_scale) + neighbor_result.candidate.clearance_shortfall;
-							neighbor_result.candidate.position_error = result.pose_error.head<3>();
-							neighbor_result.candidate.angle_error = result.pose_error.tail<3>().norm();
-						}
-						std::lock_guard<std::mutex> lock(this->neighbor_ik_cache_mutex);
-						this->neighbor_ik_cache[cache_key] = neighbor_result;
-					}
-					if (!neighbor_result.found)
-						continue;
-					if (neighbor_result.candidate.gap >= best_gap)
-						continue;
-					best_gap = neighbor_result.candidate.gap;
-					closer_poses[miss_index] = neighbor_result.candidate;
-					found[miss_index] = 1;
-					if (neighbor_result.exact)
-						break;
 				}
+				if (cached)
+					cache_hits[thread_index] += 1;
+				if (!cached)
+				{
+					auto solve_start = std::chrono::steady_clock::now();
+					closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, neighbor_pose, this->ik_settings.exact_options);
+					exact_seconds[thread_index] += GetSecondsSince(solve_start);
+					exact_count[thread_index] += 1;
+					if (!result.exact)
+					{
+						solve_start = std::chrono::steady_clock::now();
+						result = this->solveSmallestGapIk(thread_state, target, {neighbor_pose});
+						smallest_gap_seconds[thread_index] += GetSecondsSince(solve_start);
+						smallest_gap_count[thread_index] += 1;
+					}
+					neighbor_result.found = result.found;
+					neighbor_result.exact = result.exact;
+					neighbor_result.candidate.q = result.q;
+					if (result.found && !result.exact)
+					{
+						neighbor_result.candidate.clearance_shortfall = this->getClearanceShortfall(thread_state, result.q);
+						neighbor_result.candidate.gap = scene_geometry::PoseGap(result.pose_error, this->ik_settings.closest_options.rot_scale) + neighbor_result.candidate.clearance_shortfall;
+						neighbor_result.candidate.position_error = result.pose_error.head<3>();
+						neighbor_result.candidate.angle_error = result.pose_error.tail<3>().norm();
+					}
+					std::lock_guard<std::mutex> lock(this->neighbor_ik_cache_mutex);
+					this->neighbor_ik_cache[cache_key] = neighbor_result;
+				}
+				pair_results[pair_index] = neighbor_result;
 			}
+			part_times[thread_index] = closest_ik_part_times;
+			thread_seconds[thread_index] = GetSecondsSince(thread_start);
 		});
 	for (std::thread& thread : threads)
 		thread.join();
+	{
+		const double threads_wall = GetSecondsSince(threads_start);
+		double exact_total = 0.0, smallest_gap_total = 0.0, closest_total = 0.0, push_total = 0.0, finish_total = 0.0, slowest_thread = 0.0;
+		int exact_total_count = 0, smallest_gap_total_count = 0, closest_total_count = 0, push_total_count = 0, finish_total_count = 0, cache_total = 0;
+		for (unsigned int thread_index = 0; thread_index < num_workers; ++thread_index)
+		{
+			exact_total += exact_seconds[thread_index];
+			exact_total_count += exact_count[thread_index];
+			smallest_gap_total += smallest_gap_seconds[thread_index];
+			smallest_gap_total_count += smallest_gap_count[thread_index];
+			closest_total += part_times[thread_index].closest_seconds;
+			closest_total_count += part_times[thread_index].closest_count;
+			push_total += part_times[thread_index].push_seconds;
+			push_total_count += part_times[thread_index].push_count;
+			finish_total += part_times[thread_index].exact_finish_seconds;
+			finish_total_count += part_times[thread_index].exact_finish_count;
+			cache_total += cache_hits[thread_index];
+			slowest_thread = std::max(slowest_thread, thread_seconds[thread_index]);
+		}
+		RCLCPP_INFO(this->node->get_logger(), "  neighbour timing: %zu misses, %zu pairs on %u threads, %.2f s before threads, %.2f s threads wall (slowest thread %.2f s); exact IK %d solves %.2f s; closest IK %d calls %.2f s = closest solve %d x %.2f s + clearance push %d x %.2f s + exact finish %d x %.2f s; cache hits %d (seconds summed over threads)", miss_positions.size(), pair_miss_index.size(), num_workers, std::chrono::duration<double>(threads_start - since).count(), threads_wall, slowest_thread, exact_total_count, exact_total, smallest_gap_total_count, smallest_gap_total, closest_total_count, closest_total, push_total_count, push_total, finish_total_count, finish_total, cache_total);
+	}
+	// Per miss, as one after the other: previous neighbour first, a smaller gap wins, an exact pose ends the search.
+	std::vector<ClosestIkCandidate> closer_poses(miss_positions.size());
+	std::vector<char> found(miss_positions.size(), 0);
+	std::vector<char> miss_done(miss_positions.size(), 0);
+	std::vector<double> best_gap(miss_positions.size());
+	for (size_t miss_index = 0; miss_index < miss_positions.size(); ++miss_index)
+		best_gap[miss_index] = viewpoint_ik.chosen_ik_per_viewpoint[static_cast<size_t>(order[miss_positions[miss_index]])].gap;
+	for (size_t pair_index = 0; pair_index < pair_miss_index.size(); ++pair_index)
+	{
+		const size_t miss_index = pair_miss_index[pair_index];
+		const NeighborIkResult& neighbor_result = pair_results[pair_index];
+		if (miss_done[miss_index] || !neighbor_result.found || neighbor_result.candidate.gap >= best_gap[miss_index])
+			continue;
+		best_gap[miss_index] = neighbor_result.candidate.gap;
+		closer_poses[miss_index] = neighbor_result.candidate;
+		found[miss_index] = 1;
+		if (neighbor_result.exact)
+			miss_done[miss_index] = 1;
+	}
 	for (size_t miss_index = 0; miss_index < miss_positions.size(); ++miss_index)
 	{
 		if (!found[miss_index])
