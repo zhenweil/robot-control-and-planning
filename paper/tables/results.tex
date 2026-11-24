@@ -1,0 +1,27 @@
+% Seed 44, 32 starts per robot and object. Path length and reconfigurations: mean +- std over the starts where all three methods succeed (n).
+% Success = all viewpoints reached and no failed edge.
+% Ours: commit e5ae479, 500 s budget (sweepNb). TODO: baselines ran at 300 s; replace after the baseline reruns.
+\begin{table}[t]
+\centering
+\caption{Results over 32 start positions. Path length (rad) and reconfigurations: mean $\pm$ std over the $n$ starts where all methods succeed.}
+\label{tab:results}
+\setlength{\tabcolsep}{4pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{llcccc}
+\toprule
+Object & Method & \multicolumn{2}{c}{xArm7} & \multicolumn{2}{c}{UR5e} \\
+\midrule
+ & & Success & Tour / Reconf. & Success & Tour / Reconf. \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{Bunny\\($n$=31, 26)}}
+ & SGD    & 32/32 & 42.2$\pm$7.7 / 6.4$\pm$2.0 & 29/32 & 53.8$\pm$12.1 / 8.2$\pm$3.0 \\
+ & CMA-ES & 31/32 & 42.4$\pm$8.0 / 7.2$\pm$2.5 & 29/32 & 55.1$\pm$11.7 / 7.8$\pm$2.6 \\
+ & Ours   & 32/32 & \textbf{35.9$\pm$5.1} / \textbf{3.9$\pm$1.5} & \textbf{32/32} & \textbf{39.4$\pm$7.5} / \textbf{4.3$\pm$1.1} \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{Armadillo\\($n$=32, 32)}}
+ & SGD    & 32/32 & 27.7$\pm$5.4 / 4.1$\pm$1.6 & 32/32 & 35.7$\pm$6.0 / 5.5$\pm$1.5 \\
+ & CMA-ES & 32/32 & 24.0$\pm$4.7 / 4.0$\pm$1.7 & 32/32 & 35.0$\pm$6.1 / 5.3$\pm$1.5 \\
+ & Ours   & 32/32 & \textbf{21.6$\pm$3.8} / \textbf{2.3$\pm$1.1} & 32/32 & \textbf{24.5$\pm$3.8} / \textbf{2.6$\pm$1.0} \\
+\bottomrule
+\end{tabular}}
+\end{table}

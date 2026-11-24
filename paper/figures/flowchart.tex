@@ -1,0 +1,39 @@
+% Pipeline flowchart (fig:overview). Matches Algorithm 1 and object_gtsp_co_optimizer.cpp: one iteration =
+% reach move or KME on missed viewpoints, or, once all are reached, KME on reconfigurations; then CPD
+% (self-motion slides, path move). Every object move re-solves the closest IK and the GTSP (green blocks).
+\begin{tikzpicture}[
+  font=\footnotesize,
+  box/.style={draw, rounded corners=2pt, align=center, minimum height=6mm, inner sep=2pt, text width=#1},
+  box/.default=30mm,
+  gtsp/.style={box=#1, fill=green!12},
+  gtsp/.default=46mm,
+  arr/.style={-{Stealth[length=1.6mm]}, semithick},
+  lab/.style={font=\scriptsize, inner sep=1pt},
+  dec/.style={draw, diamond, aspect=2.6, align=center, inner sep=0.3pt, fill=gray!8}
+]
+  \node[box=50mm] (init) at (0,0) {Initial object position $p_0$:\\closest IK and GTSP};
+  \node[dec] (all) at (0,-1.25) {All viewpoints\\reached?};
+  \node[box] (reach) at (-1.75,-2.6) {Move object toward the closest-IK end-effector positions};
+  \node[box, fill=orange!15] (kmem) at (-1.75,-3.8) {KME on\\missed viewpoints};
+  \node[box, fill=orange!15] (kmer) at (1.75,-2.6) {KME on\\reconfigurations};
+  \node[gtsp] (g1) at (0,-4.95) {IK and GTSP update};
+  \node[box=64mm, fill=blue!10] (rpd) at (0,-5.95) {CPD: fine-tune GTSP,\\then move object to shorten the path};
+  \node[gtsp] (g2) at (0,-6.95) {IK and GTSP update};
+  \node[dec] (any) at (0,-8.05) {Solution\\improved?};
+  \node[box=20mm] (done) at (-2.45,-9.25) {Final check\\with OMPL};
+
+  \coordinate (loopin) at (0,-0.6);
+  \def\xr{3.55}
+  \draw[arr] (init) -- (all);
+  \draw[arr] (all.west) -| node[lab, above, pos=0.3] {no} (reach.north);
+  \draw[arr] (all.east) -| node[lab, above, pos=0.3] {yes} (kmer.north);
+  \draw[arr] (reach) -- (kmem);
+  \draw[arr] (kmem.south) -- (kmem.south |- g1.north);
+  \draw[arr] (kmer.south) -- (kmer.south |- g1.north);
+  \draw[arr] (g1) -- (rpd);
+  \draw[arr] (rpd) -- (g2);
+  \draw[arr] (g2) -- (any);
+  \draw[arr] (any.west) -| node[lab, above, pos=0.3] {no, all reached} (done.north);
+  \draw[semithick] (any.east) -- node[lab, above] {otherwise} (\xr,-8.05);
+  \draw[arr] (\xr,-8.05) -- (\xr,-0.6) -- (loopin);
+\end{tikzpicture}

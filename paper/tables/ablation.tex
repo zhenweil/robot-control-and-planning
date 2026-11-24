@@ -1,0 +1,32 @@
+% Seed 44, 32 starts per robot and object; budget as the main runs (bunny 600 s, Armadillo 300 s, bunny with eggs 600 s). All variants rerun on the current code (full bunny: 28/32 on the UR5e vs 29/32 in tab:results, older code).
+% w/o KME: co_room off; w/o CPD: co_tour_object_move off. Path and reconfigurations: mean +- std over the n starts where all three variants succeed.
+% Runs: session f686a87f scratchpad/ablation (Armadillo full: session 417803c8 scratchpad/sweep/armadillo_seed44).
+\begin{table}[t]
+\centering
+\caption{Ablation over 32 start positions. Path length (rad) and reconfigurations: mean $\pm$ std over the $n$ starts where all variants succeed.}
+\label{tab:ablation}
+\setlength{\tabcolsep}{4pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{llcccc}
+\toprule
+Object & Variant & \multicolumn{2}{c}{xArm7} & \multicolumn{2}{c}{UR5e} \\
+\midrule
+ & & Success & Path / Reconf. & Success & Path / Reconf. \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{Bunny\\($n$=29, 10)}}
+ & Full    & 32/32 & \textbf{36.1$\pm$4.7} / \textbf{4.2$\pm$1.7} & 28/32 & \textbf{39.3$\pm$5.9} / \textbf{4.7$\pm$1.3} \\
+ & w/o KME & 29/32 & 38.6$\pm$6.7 / 5.7$\pm$1.6 & 22/32 & 46.2$\pm$9.5 / 7.7$\pm$2.5 \\
+ & w/o CPD & 32/32 & 37.2$\pm$5.6 / 5.0$\pm$1.8 & 15/32 & 50.1$\pm$6.5 / 5.8$\pm$1.1 \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{Armadillo\\($n$=32, 25)}}
+ & Full    & 32/32 & 22.1$\pm$3.3 / \textbf{2.3$\pm$1.2} & 31/32 & \textbf{24.9$\pm$3.9} / \textbf{2.8$\pm$1.2} \\
+ & w/o KME & 32/32 & \textbf{21.9$\pm$3.6} / 2.9$\pm$1.4 & 26/32 & 25.0$\pm$3.8 / 3.6$\pm$1.2 \\
+ & w/o CPD & 32/32 & 22.8$\pm$3.6 / 2.4$\pm$1.1 & 31/32 & 26.6$\pm$4.9 / 3.1$\pm$1.4 \\
+\midrule
+\multirow{3}{*}{\shortstack[l]{Bunny w/ eggs\\($n$=27, 30)}}
+ & Full    & 32/32 & \textbf{46.6$\pm$6.9} / \textbf{5.3$\pm$2.3} & 32/32 & \textbf{45.6$\pm$7.1} / \textbf{3.6$\pm$1.3} \\
+ & w/o KME & 27/32 & 49.1$\pm$8.5 / 6.7$\pm$2.9 & 30/32 & 46.1$\pm$7.3 / 5.1$\pm$1.9 \\
+ & w/o CPD & 31/32 & 53.3$\pm$6.8 / 6.1$\pm$2.4 & 32/32 & 53.4$\pm$9.2 / 5.7$\pm$3.1 \\
+\bottomrule
+\end{tabular}}
+\end{table}
