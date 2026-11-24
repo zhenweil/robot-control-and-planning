@@ -206,18 +206,16 @@ void Optimizer::refinePosesAndComputeCost(TourSolutionAtObjectPosition& solution
 	std::vector<Joints> poses_from_home = this->getPosesInTourOrder(solution.viewpoint_ik, solution.order);
 	poses_from_home.insert(poses_from_home.begin(), this->home_pose);
 	solution.joint_travel_cost = joint_travel::TravelCost(poses_from_home, this->tour_settings.edge_weights, this->counted_joints) + detour_charge;
-	solution.room_shortfall = 0.0;
 	std::vector<Joints> reached_poses;
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
 	{
 		// Collect joint limit info from reached viewpoints.
 		if (!solution.viewpoint_ik.reached[viewpoint_index])
 			continue;
-		solution.room_shortfall += this->getJointRoomShortfall(solution.viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q, nullptr);
 		reached_poses.push_back(solution.viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q);
 	}
 	solution.smallest_margin = this->getSmallestJointMargin(reached_poses);
-	solution.weighted_total_cost = solution.joint_travel_cost + this->cost_weights.gap_penalty * solution.viewpoint_ik.gap_sum + this->cost_weights.reconfiguration_cost * solution.num_reconfigurations + this->cost_weights.joint_room_weight * solution.room_shortfall;
+	solution.weighted_total_cost = solution.joint_travel_cost + this->cost_weights.gap_penalty * solution.viewpoint_ik.gap_sum + this->cost_weights.reconfiguration_cost * solution.num_reconfigurations;
 }
 
 // The room-then-reach step. Misses first: a move toward them, then room-then-reach every time. Once all are reached, the
@@ -491,24 +489,17 @@ Eigen::Vector3d Optimizer::getDirectionToLowerTourCost(const TourSolutionAtObjec
 	Eigen::MatrixXd object_twist = Eigen::MatrixXd::Zero(6, 3);
 	object_twist.topRows<3>() = Eigen::Matrix3d::Identity();
 	Eigen::Vector3d object_move_to_shorten_tour = Eigen::Vector3d::Zero();
-	Eigen::Vector3d object_move_to_gain_joint_room = Eigen::Vector3d::Zero();
 	// Each pose follows the object by IK (J+): its joint gradients become object gradients, summed over the viewpoints.
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
 	{
 		const Eigen::MatrixXd jacobian = this->getToolJacobian(*this->state, viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q);
 		const Eigen::MatrixXd d_joints_d_object_position = scene_geometry::DampedPinv(jacobian, this->ik_settings.jacobian_damping) * object_twist;
-		Eigen::VectorXd d_room_shortfall_d_joints = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q.size()));
-		if (viewpoint_ik.reached[viewpoint_index])
-			this->getJointRoomShortfall(viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q, &d_room_shortfall_d_joints);
 		object_move_to_shorten_tour -= d_joints_d_object_position.transpose() * d_tour_length_d_joints[viewpoint_index];
-		object_move_to_gain_joint_room -= this->cost_weights.joint_room_weight * d_joints_d_object_position.transpose() * d_room_shortfall_d_joints;
 	}
-	const Eigen::Vector3d object_move = this->combineMovesWithoutConflict({object_move_to_shorten_tour, object_move_to_gain_joint_room});
-	return object_move.norm() > 1e-12 ? Eigen::Vector3d(object_move.normalized()) : Eigen::Vector3d::Zero();
+	return object_move_to_shorten_tour.norm() > 1e-12 ? Eigen::Vector3d(object_move_to_shorten_tour.normalized()) : Eigen::Vector3d::Zero();
 }
 
-// Per reached viewpoint: the self-motion slide (camera stays on target) that lowers the tour cost (tour length + joint
-// room), scaled so the largest over all poses has norm 1. Empty vector = no slide (missed, no self-motion, or slides off).
+// Per reached viewpoint: the self-motion slide (camera stays on target) that lowers the tour length, scaled so the largest over all poses has norm 1. Empty vector = no slide (missed, no self-motion, or slides off).
 std::vector<Eigen::VectorXd> Optimizer::getSelfMotionSlidesToLowerTourCost(const TourSolutionAtObjectPosition& solution)
 {
 	const ViewpointIkAtPosition& viewpoint_ik = solution.viewpoint_ik;
@@ -522,9 +513,7 @@ std::vector<Eigen::VectorXd> Optimizer::getSelfMotionSlidesToLowerTourCost(const
 		if (!viewpoint_ik.reached[viewpoint_index])
 			continue;
 		const Eigen::MatrixXd jacobian = this->getToolJacobian(*this->state, viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q);
-		Eigen::VectorXd d_room_shortfall_d_joints = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q.size()));
-		this->getJointRoomShortfall(viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q, &d_room_shortfall_d_joints);
-		joint_slides[viewpoint_index] = -this->getSelfMotionProjector(jacobian) * (d_tour_length_d_joints[viewpoint_index] + this->cost_weights.joint_room_weight * d_room_shortfall_d_joints);
+		joint_slides[viewpoint_index] = -this->getSelfMotionProjector(jacobian) * d_tour_length_d_joints[viewpoint_index];
 		largest_slide = std::max(largest_slide, joint_slides[viewpoint_index].norm());
 	}
 	for (Eigen::VectorXd& slide : joint_slides)
@@ -552,26 +541,6 @@ Eigen::Vector3d Optimizer::dropPartsTighteningMargins(const Eigen::Vector3d& mov
 			break;
 	}
 	return direction;
-}
-
-Eigen::Vector3d Optimizer::combineMovesWithoutConflict(const std::vector<Eigen::Vector3d>& moves) const
-{
-	Eigen::Vector3d combined_move = Eigen::Vector3d::Zero();
-	for (size_t move_index = 0; move_index < moves.size(); ++move_index)
-	{
-		Eigen::Vector3d move = moves[move_index];
-		for (size_t other_index = 0; other_index < moves.size(); ++other_index)
-		{
-			const double other_size = moves[other_index].squaredNorm();
-			if (other_index == move_index || other_size < 1e-24)
-				continue;
-			const double against = move.dot(moves[other_index]);
-			if (against < 0.0)
-				move -= against / other_size * moves[other_index];
-		}
-		combined_move += move;
-	}
-	return combined_move;
 }
 
 // Per viewpoint: the gradient of the tour length (edge costs from home through the order) with respect to that viewpoint's joints.
@@ -730,36 +699,6 @@ std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfPose(size_t vie
 double Optimizer::getSmallestJacobianSingularValue(const Joints& joint_values)
 {
 	return Eigen::JacobiSVD<Eigen::MatrixXd>(manipulability::ToolJacobian(*this->state, this->group, this->tool, joint_values)).singularValues().minCoeff();
-}
-
-double Optimizer::getJointRoomShortfall(const Joints& joint_values, Eigen::VectorXd* slope) const
-{
-	const std::vector<const moveit::core::JointModel*>& joints = this->group->getActiveJointModels();
-	if (slope != nullptr)
-		*slope = Eigen::VectorXd::Zero(static_cast<Eigen::Index>(joint_values.size()));
-	double shortfall = 0.0;
-	for (int joint_index : this->counted_joints)
-	{
-		const moveit::core::VariableBounds& bounds = joints[static_cast<size_t>(joint_index)]->getVariableBounds()[0];
-		if (!bounds.position_bounded_)
-			continue;
-		const double value = joint_values[static_cast<size_t>(joint_index)];
-		const double room_to_lower_limit = value - bounds.min_position_;
-		const double room_to_upper_limit = bounds.max_position_ - value;
-		if (room_to_lower_limit < this->cost_weights.joint_room_band)
-		{
-			shortfall += (this->cost_weights.joint_room_band - room_to_lower_limit) * (this->cost_weights.joint_room_band - room_to_lower_limit);
-			if (slope != nullptr)
-				(*slope)[joint_index] -= 2.0 * (this->cost_weights.joint_room_band - room_to_lower_limit);
-		}
-		if (room_to_upper_limit < this->cost_weights.joint_room_band)
-		{
-			shortfall += (this->cost_weights.joint_room_band - room_to_upper_limit) * (this->cost_weights.joint_room_band - room_to_upper_limit);
-			if (slope != nullptr)
-				(*slope)[joint_index] += 2.0 * (this->cost_weights.joint_room_band - room_to_upper_limit);
-		}
-	}
-	return shortfall;
 }
 
 // Given start IK solutions, find exact IK for each viewpoint. If no exact IK, find closest IK.

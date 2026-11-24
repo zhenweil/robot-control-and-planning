@@ -77,8 +77,7 @@
     co_reconfiguration_cost: 2.0          # cost per reconfiguration
 
     # Joints kept off their limits
-    co_joint_room_band: 0.05              # rad beyond the hard limit each joint should keep
-    co_joint_room_weight: 400.0           # cost per rad^2 of shortfall on reached poses (a joint right at the hard limit costs 1 rad)
+    co_joint_room_band: 0.05              # rad: closest-IK candidates this far from every (hard) limit count as roomy (unweighted closest IK only)
 
     # Pose slides (tour length + joint room)
     co_slide: true                        # each step also slides poses along their self-motion

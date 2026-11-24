@@ -69,10 +69,9 @@ struct TourSolutionAtObjectPosition
 
 	int num_blocked_edges = 0;  // tour edges whose straight move collides
 	int num_reconfigurations = 0;  // tour edges the arm can't follow along the straight camera path
-	double room_shortfall = 0.0;  // rad^2: summed squared shortfall of joint room below room_band, over all poses
 	double smallest_margin = 0.0;  // rad beyond the hard limit, over the reached poses
 	double joint_travel_cost = 0.0;	 // GTSP edge cost summed from home (tour length in rad with joint_distance_weight 1)
-	double weighted_total_cost = 0.0; // Joint_travel_cost+gap_cost+reconfiguration_cost+joint_room
+	double weighted_total_cost = 0.0; // Joint_travel_cost+gap_cost+reconfiguration_cost
 };
 
 // Where the object may go and how long the descent may run.
@@ -99,8 +98,7 @@ struct CostWeights
 	double gap_penalty = 100.0;  // cost per m of missed gap
 	double allowed_reach_loss = 0.15;  // share of the reached viewpoints a room-then-reach move may lose
 	double reconfiguration_cost = 2.0;  // cost per reconfiguration
-	double joint_room_band = 0.2;  // rad beyond the hard limit a joint should keep
-	double joint_room_weight = 50.0;  // cost per rad^2 of room shortfall
+	double joint_room_band = 0.2;  // rad: closest-IK candidates this far from every limit count as roomy (unweighted closest IK only)
 	double blocked_edge_charge = 4.0;  // x edge length extra for a blocked edge with no free detour through home; 0 = off
 };
 
@@ -186,7 +184,6 @@ private:
 	std::vector<Eigen::VectorXd> getSelfMotionSlidesToLowerTourCost(const TourSolutionAtObjectPosition& solution);
 	Eigen::MatrixXd getSelfMotionProjector(const Eigen::MatrixXd& jacobian) const;
 	Eigen::MatrixXd getToolJacobian(moveit::core::RobotState& state, const Joints& joint_values) const;
-	Eigen::Vector3d combineMovesWithoutConflict(const std::vector<Eigen::Vector3d>& moves) const;
 	std::vector<Eigen::VectorXd> getDTourLengthDJointsPerViewpoint(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order) const;
 	std::vector<Joints> getPosesAfterJointSlides(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<Eigen::VectorXd>& joint_slides, double slide_step) const;
 	Eigen::Vector3d dropPartsTighteningMargins(const Eigen::Vector3d& move, const std::vector<room_margins::Margin>& margins) const;
@@ -194,7 +191,6 @@ private:
 
 	// Joint room and blocking margins
 	double getSmallestJacobianSingularValue(const Joints& joint_values);
-	double getJointRoomShortfall(const Joints& joint_values, Eigen::VectorXd* slope) const;
 	std::vector<room_margins::Margin> getBlockingMarginsOfPose(size_t viewpoint_index, const Joints& joint_values, double blocking_distance_multiple = 2.0);
 	std::vector<room_margins::Margin> getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, double blocking_distance_multiple);
 	// The same viewpoints' margins after the object moves by object_move, each pose carried along so the camera follows its viewpoint (no new IK).

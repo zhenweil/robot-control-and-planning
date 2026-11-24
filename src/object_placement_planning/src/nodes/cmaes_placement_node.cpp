@@ -210,7 +210,6 @@ private:
 		cost_weights.reconfiguration_cost = this->getParameter<double>("co_reconfiguration_cost", 2.0);
 		cost_weights.blocked_edge_charge = this->getParameter<double>("co_blocked_edge_charge", 4.0);
 		cost_weights.joint_room_band = this->getParameter<double>("co_joint_room_band", 0.2);
-		cost_weights.joint_room_weight = this->getParameter<double>("co_joint_room_weight", 50.0);
 		return cost_weights;
 	}
 
