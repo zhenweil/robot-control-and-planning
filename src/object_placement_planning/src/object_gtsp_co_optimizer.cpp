@@ -217,8 +217,7 @@ void Optimizer::refinePosesAndComputeCost(TourSolutionAtObjectPosition& solution
 		reached_poses.push_back(solution.viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q);
 	}
 	solution.smallest_margin = this->getSmallestJointMargin(reached_poses);
-	const int num_missed = static_cast<int>(this->viewpoints.size()) - solution.viewpoint_ik.num_reached;
-	solution.weighted_total_cost = solution.joint_travel_cost + this->cost_weights.miss_cost * num_missed + this->cost_weights.gap_penalty * solution.viewpoint_ik.gap_sum + this->cost_weights.reconfiguration_cost * solution.num_reconfigurations + this->cost_weights.joint_room_weight * solution.room_shortfall;
+	solution.weighted_total_cost = solution.joint_travel_cost + this->cost_weights.gap_penalty * solution.viewpoint_ik.gap_sum + this->cost_weights.reconfiguration_cost * solution.num_reconfigurations + this->cost_weights.joint_room_weight * solution.room_shortfall;
 }
 
 // The room-then-reach step. Misses first: a move toward them, then room-then-reach every time. Once all are reached, the

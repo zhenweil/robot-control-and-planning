@@ -69,7 +69,6 @@
     # Reach step: kept if it reaches more viewpoints, or as many with smaller gaps; else room-then-reach frees what blocks the misses.
     # Tour steps: kept if the total cost drops (rad of tour length); they may lose viewpoints if the gain beats their gaps.
     # Reach
-    co_miss_cost: 0.0                     # cost per missed viewpoint at equal reach (0: only the smooth gap charge below)
     co_gap_penalty: 100.0                 # cost per m of missed gap
     co_room: true                         # room-then-reach: moves that free what blocks the misses (then, once all are reached, the reconfiguration edges as misses), steered off what blocks the reached ones
     co_allowed_reach_loss: 0.10           # share of the reached viewpoints a room-then-reach move may lose

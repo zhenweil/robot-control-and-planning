@@ -72,7 +72,7 @@ struct TourSolutionAtObjectPosition
 	double room_shortfall = 0.0;  // rad^2: summed squared shortfall of joint room below room_band, over all poses
 	double smallest_margin = 0.0;  // rad beyond the hard limit, over the reached poses
 	double joint_travel_cost = 0.0;	 // GTSP edge cost summed from home (tour length in rad with joint_distance_weight 1)
-	double weighted_total_cost = 0.0; // Joint_travel_cost+miss_cost+gap_cost+reconfiguration_cost+joint_room
+	double weighted_total_cost = 0.0; // Joint_travel_cost+gap_cost+reconfiguration_cost+joint_room
 };
 
 // Where the object may go and how long the descent may run.
@@ -96,7 +96,6 @@ struct MethodSwitches
 // The weighted total cost's weights.
 struct CostWeights
 {
-	double miss_cost = 10.0;  // cost per missed viewpoint
 	double gap_penalty = 100.0;  // cost per m of missed gap
 	double allowed_reach_loss = 0.15;  // share of the reached viewpoints a room-then-reach move may lose
 	double reconfiguration_cost = 2.0;  // cost per reconfiguration

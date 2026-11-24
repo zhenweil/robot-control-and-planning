@@ -207,7 +207,6 @@ private:
 		object_gtsp_co_optimize::CostWeights cost_weights;
 		cost_weights.gap_penalty = this->getParameter<double>("co_gap_penalty", 100.0);
 		cost_weights.allowed_reach_loss = this->getParameter<double>("co_allowed_reach_loss", 0.15);
-		cost_weights.miss_cost = this->getParameter<double>("co_miss_cost", 10.0);
 		cost_weights.reconfiguration_cost = this->getParameter<double>("co_reconfiguration_cost", 2.0);
 		cost_weights.blocked_edge_charge = this->getParameter<double>("co_blocked_edge_charge", 4.0);
 		cost_weights.joint_room_band = this->getParameter<double>("co_joint_room_band", 0.2);
