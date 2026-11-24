@@ -36,9 +36,20 @@ double Tightest(const std::vector<Margin>& margins)
 	return lo;
 }
 
+double SoftMin(const std::vector<Margin>& margins)
+{
+	const double lo = Tightest(margins);
+	if (margins.empty())
+		return lo;
+	double sum = 0.0;
+	for (const Margin& m : margins)
+		sum += std::exp(-(m.value / m.floor - lo) / soft_min_width);
+	return lo - soft_min_width * std::log(sum);
+}
+
 Eigen::Vector3d MostRoomDirection(const std::vector<Margin>& margins, double radius)
 {
-	const double tau = 1.0;  // floors
+	const double tau = soft_min_width;
 	auto softmin_slope = [&](const Eigen::Vector3d& d) {
 		std::vector<double> u(margins.size());
 		double lo = std::numeric_limits<double>::infinity();

@@ -174,9 +174,9 @@ private:
 	void improveOrderAndPosturesWithObjectFixed(TourSolutionAtObjectPosition& solution_to_complete);
 	bool improveArmPosesWithObjectFixed(TourSolutionAtObjectPosition& current_solution, int iteration);
 	bool moveObjectToReachMore(TourSolutionAtObjectPosition& current_solution, double& reach_step, double& reconfiguration_step, int iteration);
-	bool moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& current_solution, int iteration);
+	bool moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& current_solution, Eigen::Vector3d& kept_reach_direction, int iteration);
 	bool moveObjectToLowerCost(TourSolutionAtObjectPosition& current_solution, double& object_step, int iteration);
-	bool moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_solution, double object_step, int iteration);
+	bool moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_solution, double object_step, const Eigen::Vector3d& kept_reach_direction, int iteration);
 	bool moveObjectToUnblockReconfigurations(TourSolutionAtObjectPosition& current_solution, double& object_step, int iteration);
 
 	// Step directions
@@ -196,6 +196,8 @@ private:
 	double getJointRoomShortfall(const Joints& joint_values, Eigen::VectorXd* slope) const;
 	std::vector<room_margins::Margin> getBlockingMarginsOfPose(size_t viewpoint_index, const Joints& joint_values, double blocking_distance_multiple = 2.0);
 	std::vector<room_margins::Margin> getBlockingMarginsOfViewpoints(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, double blocking_distance_multiple);
+	// The same viewpoints' margins after the object moves by object_move, each pose carried along so the camera follows its viewpoint (no new IK).
+	std::vector<room_margins::Margin> getBlockingMarginsOfCarriedPoses(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, const Eigen::Vector3d& object_move, double blocking_distance_multiple);
 	std::vector<room_margins::Margin> getBlockingMarginsOfReconfigurations(const TourSolutionAtObjectPosition& solution, double blocking_distance_multiple);
 
 	// IK

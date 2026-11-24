@@ -205,18 +205,19 @@ void Optimizer::refinePosesAndComputeCost(TourSolutionAtObjectPosition& solution
 bool Optimizer::moveObjectToReachMore(TourSolutionAtObjectPosition& current_solution, double& reach_step, double& reconfiguration_step, int iteration)
 {
 	bool move_accepted = false;
+	Eigen::Vector3d kept_reach_direction = Eigen::Vector3d::Zero();  // unit direction of this iteration's kept reach move, zero if none
 	if (current_solution.viewpoint_ik.num_reached < static_cast<int>(this->viewpoints.size()))
-		move_accepted = this->moveObjectTowardMissedViewpoints(current_solution, iteration);
+		move_accepted = this->moveObjectTowardMissedViewpoints(current_solution, kept_reach_direction, iteration);
 	// Room-then-reach on its own, not only after a rejected reach move: a kept reach move need not free a blocked miss.
 	if (this->method_switches.use_room && current_solution.viewpoint_ik.num_reached < static_cast<int>(this->viewpoints.size()))
-		move_accepted = this->moveObjectToUnblockMisses(current_solution, reach_step, iteration) || move_accepted;
+		move_accepted = this->moveObjectToUnblockMisses(current_solution, reach_step, kept_reach_direction, iteration) || move_accepted;
 	const bool all_reached = current_solution.viewpoint_ik.num_reached == static_cast<int>(this->viewpoints.size());
 	if (this->method_switches.use_room && !this->method_switches.freeze_object_when_reached && all_reached && current_solution.num_reconfigurations > 0)
 		move_accepted = this->moveObjectToUnblockReconfigurations(current_solution, reconfiguration_step, iteration) || move_accepted;
 	return move_accepted;
 }
 
-bool Optimizer::moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& current_solution, int iteration)
+bool Optimizer::moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& current_solution, Eigen::Vector3d& kept_reach_direction, int iteration)
 {
 	const Eigen::Vector3d reach_move = this->getMoveTowardMissedViewpoints(current_solution.viewpoint_ik);
 	if (reach_move.norm() < 1e-12)
@@ -253,6 +254,7 @@ bool Optimizer::moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& c
 			current_solution = candidate_solution;
 			this->object_trail.push_back(current_solution.viewpoint_ik.position);
 			this->publishProgressMarkers(current_solution.viewpoint_ik, current_solution.order, direction);
+			kept_reach_direction = direction;
 			return true;
 		}
 		reach_length *= 0.5;
@@ -316,7 +318,7 @@ bool Optimizer::moveObjectToLowerCost(TourSolutionAtObjectPosition& current_solu
 	return false;
 }
 
-bool Optimizer::moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_solution, double object_step, int iteration)
+bool Optimizer::moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_solution, double object_step, const Eigen::Vector3d& kept_reach_direction, int iteration)
 {
 	const double blocking_distance_multiple = 6.0;  // a limit is blocking if closer than this multiple of its safe distance (joint 0.05 rad, stretch 0.02, collision 1 cm)
 	// All misses: this runs after a reach step toward them failed; a miss with nothing limiting its pose adds no margin.
@@ -327,24 +329,35 @@ bool Optimizer::moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_
 	if (missed_viewpoints.empty())
 		return false;
 	const std::vector<room_margins::Margin> margins_before = this->getBlockingMarginsOfViewpoints(current_solution.viewpoint_ik, missed_viewpoints, blocking_distance_multiple);
-	const double tightest_before = room_margins::Tightest(margins_before);
+	const double soft_min_before = room_margins::SoftMin(margins_before);
 	const double smallest_step = 0.005;  // m: as the reach step, tries object_step, then halves down to this
 	for (int attempt = 0; attempt < this->step_sizes.max_line_search_tries && object_step >= smallest_step - 1e-9; ++attempt, object_step *= 0.5)
 	{
 		bool keeps_reached_clear = false;
-		const Eigen::Vector3d move_direction = this->getRoomMoveDirection(current_solution.viewpoint_ik, margins_before, object_step, keeps_reached_clear);
+		Eigen::Vector3d move_direction = this->getRoomMoveDirection(current_solution.viewpoint_ik, margins_before, object_step, keeps_reached_clear);
 		if (move_direction.isZero())
 			return false;
+		// Drop the part that undoes this iteration's kept reach move; skip KME if little is left.
+		const double against_reach = move_direction.dot(kept_reach_direction);
+		if (against_reach < 0.0)
+		{
+			const Eigen::Vector3d kept_part = move_direction - against_reach * kept_reach_direction;
+			RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: direction (%.2f, %.2f, %.2f) undoes the reach move by %.2f; %.2f left%s", iteration, move_direction.x(), move_direction.y(), move_direction.z(), -against_reach, kept_part.norm(), kept_part.norm() < 0.3 ? ", skipped" : "");
+			if (kept_part.norm() < 0.3)
+				return false;
+			move_direction = kept_part.normalized();
+		}
 		const TourSolutionAtObjectPosition candidate_solution = this->solveIkAndImproveTourAtPosition(current_solution.viewpoint_ik.position + object_step * move_direction, this->getChosenPoses(current_solution.viewpoint_ik), {}, current_solution.order);
 		int num_lost = 0;
 		for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
 			num_lost += current_solution.viewpoint_ik.reached[viewpoint_index] && !candidate_solution.viewpoint_ik.reached[viewpoint_index] ? 1 : 0;
-		const std::vector<room_margins::Margin> margins_after = this->getBlockingMarginsOfViewpoints(candidate_solution.viewpoint_ik, missed_viewpoints, blocking_distance_multiple);
-		const double tightest_after = margins_after.empty() ? std::numeric_limits<double>::infinity() : room_margins::Tightest(margins_after);
-		// Kept if it loses at most allowed_reach_loss of the reached viewpoints and reaches more or frees the misses.
+		// Misses' margin after the move on the same closest poses carried with the object, so before and after compare one pose.
+		const std::vector<room_margins::Margin> margins_after = this->getBlockingMarginsOfCarriedPoses(current_solution.viewpoint_ik, missed_viewpoints, object_step * move_direction, blocking_distance_multiple);
+		const double soft_min_after = room_margins::SoftMin(margins_after);
+		// Kept if it loses at most allowed_reach_loss of the reached viewpoints and reaches more or raises the misses' soft-min margin.
 		const bool loss_allowed = static_cast<double>(num_lost) <= this->cost_weights.allowed_reach_loss * static_cast<double>(current_solution.viewpoint_ik.num_reached);
-		const bool move_accepted = loss_allowed && (candidate_solution.viewpoint_ik.num_reached > current_solution.viewpoint_ik.num_reached || tightest_after > tightest_before + 1e-3);
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu (lost %d)  misses %zu  tightest margin %.2f -> %.2f floors  reached kept clear: %s%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, this->viewpoints.size(), num_lost, missed_viewpoints.size(), tightest_before, tightest_after, keeps_reached_clear ? "yes" : "no", move_accepted ? "  <-- kept" : "");
+		const bool move_accepted = loss_allowed && (candidate_solution.viewpoint_ik.num_reached > current_solution.viewpoint_ik.num_reached || soft_min_after > soft_min_before + 1e-3);
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu (lost %d)  misses %zu  soft-min margin %.2f -> %.2f floors  reached kept clear: %s%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, this->viewpoints.size(), num_lost, missed_viewpoints.size(), soft_min_before, soft_min_after, keeps_reached_clear ? "yes" : "no", move_accepted ? "  <-- kept" : "");
 		if (!move_accepted)
 			continue;
 		current_solution = candidate_solution;
@@ -609,6 +622,25 @@ std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfViewpoints(cons
 	for (size_t viewpoint_index : viewpoint_indices)
 	{
 		const std::vector<room_margins::Margin> viewpoint_margins = this->getBlockingMarginsOfPose(viewpoint_index, viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q, blocking_distance_multiple);
+		margins.insert(margins.end(), viewpoint_margins.begin(), viewpoint_margins.end());
+	}
+	return margins;
+}
+
+std::vector<room_margins::Margin> Optimizer::getBlockingMarginsOfCarriedPoses(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<size_t>& viewpoint_indices, const Eigen::Vector3d& object_move, double blocking_distance_multiple)
+{
+	scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(viewpoint_ik.position + object_move, this->object_rotation));
+	std::vector<room_margins::Margin> margins;
+	for (size_t viewpoint_index : viewpoint_indices)
+	{
+		const Joints& joint_values = viewpoint_ik.chosen_ik_per_viewpoint[viewpoint_index].q;
+		// First-order follow: the joint change that moves the camera by object_move, as the margins' slopes assume.
+		const Eigen::MatrixXd joint_rate_per_object_move = scene_geometry::DampedPinv(manipulability::ToolJacobian(*this->state, this->group, this->tool, joint_values), this->ik_settings.jacobian_damping).leftCols<3>();
+		const Eigen::VectorXd joint_change = joint_rate_per_object_move * object_move;
+		Joints carried_joint_values = joint_values;
+		for (size_t joint_index = 0; joint_index < carried_joint_values.size(); ++joint_index)
+			carried_joint_values[joint_index] += joint_change(static_cast<Eigen::Index>(joint_index));
+		const std::vector<room_margins::Margin> viewpoint_margins = this->getBlockingMarginsOfPose(viewpoint_index, carried_joint_values, blocking_distance_multiple);
 		margins.insert(margins.end(), viewpoint_margins.begin(), viewpoint_margins.end());
 	}
 	return margins;

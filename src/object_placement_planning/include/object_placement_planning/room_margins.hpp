@@ -46,6 +46,12 @@ double RoomAlong(const std::vector<Margin>& margins, const Eigen::Vector3d& dir)
 // Smallest margin, in floors.
 double Tightest(const std::vector<Margin>& margins);
 
+// Width of the soft-min, in floors: a margin this far above the smallest counts e^-1 as much.
+constexpr double soft_min_width = 1.0;
+
+// Soft-min of the margins in floors, -w log(sum exp(-u/w)): what MostRoomDirection raises. Infinite if empty.
+double SoftMin(const std::vector<Margin>& margins);
+
 // Unit direction that most raises these margins' soft-min (in floors), to first order: projected gradient ascent
 // within |d| <= radius. Zero if none raises them.
 Eigen::Vector3d MostRoomDirection(const std::vector<Margin>& margins, double radius);
