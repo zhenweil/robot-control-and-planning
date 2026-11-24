@@ -135,8 +135,13 @@ Eigen::Vector3d Optimizer::clampToSearchBox(const Eigen::Vector3d& position) con
 // The tour solution at one object position: IK for every viewpoint from start_poses, then the order and poses improved and scored.
 TourSolutionAtObjectPosition Optimizer::solveIkAndImproveTourAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses, const std::vector<int>& order)
 {
+	return this->improveTourForSolvedIk(this->solveViewpointIkAtPosition(this->clampToSearchBox(position), start_poses, fallback_start_poses), order);
+}
+
+TourSolutionAtObjectPosition Optimizer::improveTourForSolvedIk(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order)
+{
 	TourSolutionAtObjectPosition solution;
-	solution.viewpoint_ik = this->solveViewpointIkAtPosition(this->clampToSearchBox(position), start_poses, fallback_start_poses);
+	solution.viewpoint_ik = viewpoint_ik;
 	// No order yet (the descent start): a first one from GTSP, since an empty tour would score as almost free.
 	if (order.empty())
 		solution.order = this->reorderTourWithGtsp(solution.viewpoint_ik, {}); // Sample multiple IKs for each viewpoint once, then solve GTSP multiple times.
@@ -211,6 +216,12 @@ bool Optimizer::moveObjectToReachMore(TourSolutionAtObjectPosition& current_solu
 	// Room-then-reach on its own, not only after a rejected reach move: a kept reach move need not free a blocked miss.
 	if (this->method_switches.use_room && current_solution.viewpoint_ik.num_reached < static_cast<int>(this->viewpoints.size()))
 		move_accepted = this->moveObjectToUnblockMisses(current_solution, reach_step, kept_reach_direction, iteration) || move_accepted;
+	// Reach and KME keep IK only; the tour is scored once here, for the pose slides and CPD that follow.
+	if (move_accepted)
+	{
+		current_solution = this->improveTourForSolvedIk(current_solution.viewpoint_ik, current_solution.order);
+		this->logTourSolution("iteration " + std::to_string(iteration) + " reach/KME kept, tour scored", current_solution);
+	}
 	const bool all_reached = current_solution.viewpoint_ik.num_reached == static_cast<int>(this->viewpoints.size());
 	if (this->method_switches.use_room && !this->method_switches.freeze_object_when_reached && all_reached && current_solution.num_reconfigurations > 0)
 		move_accepted = this->moveObjectToUnblockReconfigurations(current_solution, reconfiguration_step, iteration) || move_accepted;
@@ -239,19 +250,19 @@ bool Optimizer::moveObjectTowardMissedViewpoints(TourSolutionAtObjectPosition& c
 	RCLCPP_INFO(this->node->get_logger(), "iteration %d reach debug: object at abs (%.4f, %.4f, %.4f), reach move (%.4f, %.4f, %.4f) m", iteration, current_solution.viewpoint_ik.position.x(), current_solution.viewpoint_ik.position.y(), current_solution.viewpoint_ik.position.z(), reach_move.x(), reach_move.y(), reach_move.z());
 	for (int attempt = 0; attempt < this->step_sizes.max_line_search_tries && reach_length >= smallest_reach_length - 1e-9; ++attempt)
 	{
-		// Simple pull using closest IK to close gap.
-		const TourSolutionAtObjectPosition candidate_solution = this->solveIkAndImproveTourAtPosition(current_solution.viewpoint_ik.position + reach_length * direction, this->getChosenPoses(current_solution.viewpoint_ik), {}, current_solution.order);
+		// IK only: the rule needs the reached count; the tour is scored only for the kept try.
+		const ViewpointIkAtPosition candidate_ik = this->solveViewpointIkAtPosition(this->clampToSearchBox(current_solution.viewpoint_ik.position + reach_length * direction), this->getChosenPoses(current_solution.viewpoint_ik), {});
 		std::vector<size_t> lost_viewpoints;
 		for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
-			if (current_solution.viewpoint_ik.reached[viewpoint_index] && !candidate_solution.viewpoint_ik.reached[viewpoint_index])
+			if (current_solution.viewpoint_ik.reached[viewpoint_index] && !candidate_ik.reached[viewpoint_index])
 				lost_viewpoints.push_back(viewpoint_index);
 		
 		// Accept move if it reaches at least as many viewpoints; the gap sum is not checked (test: lets the object climb).
-		const bool move_accepted = candidate_solution.viewpoint_ik.num_reached >= current_solution.viewpoint_ik.num_reached;
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu (lost %zu)  gap sum %.4f m vs %.4f%s", iteration, reach_length, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, this->viewpoints.size(), lost_viewpoints.size(), candidate_solution.viewpoint_ik.gap_sum, current_solution.viewpoint_ik.gap_sum, move_accepted ? "  <-- kept" : "");
+		const bool move_accepted = candidate_ik.num_reached >= current_solution.viewpoint_ik.num_reached;
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu (lost %zu)  gap sum %.4f m vs %.4f%s", iteration, reach_length, candidate_ik.position.x(), candidate_ik.position.y(), candidate_ik.position.z(), candidate_ik.num_reached, this->viewpoints.size(), lost_viewpoints.size(), candidate_ik.gap_sum, current_solution.viewpoint_ik.gap_sum, move_accepted ? "  <-- kept" : "");
 		if (move_accepted)
 		{
-			current_solution = candidate_solution;
+			current_solution.viewpoint_ik = candidate_ik;  // tour scored once after KME, in moveObjectToReachMore
 			this->object_trail.push_back(current_solution.viewpoint_ik.position);
 			this->publishProgressMarkers(current_solution.viewpoint_ik, current_solution.order, direction);
 			kept_reach_direction = direction;
@@ -347,20 +358,21 @@ bool Optimizer::moveObjectToUnblockMisses(TourSolutionAtObjectPosition& current_
 				return false;
 			move_direction = kept_part.normalized();
 		}
-		const TourSolutionAtObjectPosition candidate_solution = this->solveIkAndImproveTourAtPosition(current_solution.viewpoint_ik.position + object_step * move_direction, this->getChosenPoses(current_solution.viewpoint_ik), {}, current_solution.order);
+		// IK only: the rule needs the reached count; the tour is scored only for the kept try.
+		const ViewpointIkAtPosition candidate_ik = this->solveViewpointIkAtPosition(this->clampToSearchBox(current_solution.viewpoint_ik.position + object_step * move_direction), this->getChosenPoses(current_solution.viewpoint_ik), {});
 		int num_lost = 0;
 		for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
-			num_lost += current_solution.viewpoint_ik.reached[viewpoint_index] && !candidate_solution.viewpoint_ik.reached[viewpoint_index] ? 1 : 0;
+			num_lost += current_solution.viewpoint_ik.reached[viewpoint_index] && !candidate_ik.reached[viewpoint_index] ? 1 : 0;
 		// Misses' margin after the move on the same closest poses carried with the object, so before and after compare one pose.
 		const std::vector<room_margins::Margin> margins_after = this->getBlockingMarginsOfCarriedPoses(current_solution.viewpoint_ik, missed_viewpoints, object_step * move_direction, blocking_distance_multiple);
 		const double soft_min_after = room_margins::SoftMin(margins_after);
 		// Kept if it loses at most allowed_reach_loss of the reached viewpoints and reaches more or raises the misses' soft-min margin.
 		const bool loss_allowed = static_cast<double>(num_lost) <= this->cost_weights.allowed_reach_loss * static_cast<double>(current_solution.viewpoint_ik.num_reached);
-		const bool move_accepted = loss_allowed && (candidate_solution.viewpoint_ik.num_reached > current_solution.viewpoint_ik.num_reached || soft_min_after > soft_min_before + 1e-3);
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu (lost %d)  misses %zu  soft-min margin %.2f -> %.2f floors  reached kept clear: %s%s", iteration, object_step, candidate_solution.viewpoint_ik.position.x(), candidate_solution.viewpoint_ik.position.y(), candidate_solution.viewpoint_ik.position.z(), candidate_solution.viewpoint_ik.num_reached, this->viewpoints.size(), num_lost, missed_viewpoints.size(), soft_min_before, soft_min_after, keeps_reached_clear ? "yes" : "no", move_accepted ? "  <-- kept" : "");
+		const bool move_accepted = loss_allowed && (candidate_ik.num_reached > current_solution.viewpoint_ik.num_reached || soft_min_after > soft_min_before + 1e-3);
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d room-then-reach: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu (lost %d)  misses %zu  soft-min margin %.2f -> %.2f floors  reached kept clear: %s%s", iteration, object_step, candidate_ik.position.x(), candidate_ik.position.y(), candidate_ik.position.z(), candidate_ik.num_reached, this->viewpoints.size(), num_lost, missed_viewpoints.size(), soft_min_before, soft_min_after, keeps_reached_clear ? "yes" : "no", move_accepted ? "  <-- kept" : "");
 		if (!move_accepted)
 			continue;
-		current_solution = candidate_solution;
+		current_solution.viewpoint_ik = candidate_ik;  // tour scored once after KME, in moveObjectToReachMore
 		this->object_trail.push_back(current_solution.viewpoint_ik.position);
 		this->publishProgressMarkers(current_solution.viewpoint_ik, current_solution.order, move_direction);
 		return true;

@@ -166,6 +166,8 @@ public:
 	void publishProgressMarkers(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order, const Eigen::Vector3d& object_direction);
 	// IK for every viewpoint at the position, then the order and poses improved and scored (also used by the CMA-ES baseline).
 	TourSolutionAtObjectPosition solveIkAndImproveTourAtPosition(const Eigen::Vector3d& position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses, const std::vector<int>& order);
+	// The tour (order improved and scored) for IK already solved at one object position.
+	TourSolutionAtObjectPosition improveTourForSolvedIk(const ViewpointIkAtPosition& viewpoint_ik, const std::vector<int>& order);
 
 private:
 	// Descent loop and its steps
