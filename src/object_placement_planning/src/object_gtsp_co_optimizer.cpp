@@ -51,7 +51,6 @@ TourSolutionAtObjectPosition Optimizer::runDescent(const Eigen::Vector3d& reques
 {
 	this->start_time = std::chrono::steady_clock::now();
 	const Eigen::Vector3d start = this->clampToSearchBox(requested_start);
-	this->miss_gap_penalty = this->cost_weights.initial_penalty;
 
 	// Find initial IK for all viewpoints, order viewpoints, and improve IK
 	TourSolutionAtObjectPosition current_solution = this->solveIkAndImproveTourAtPosition(start, std::vector<Joints>(this->viewpoints.size(), this->home_pose), {}, {});
@@ -86,17 +85,8 @@ TourSolutionAtObjectPosition Optimizer::runDescent(const Eigen::Vector3d& reques
 		if (this->method_switches.tour_object_move && !object_frozen)
 			any_step_accepted = this->moveObjectToLowerCost(current_solution, tour_step, iteration) || any_step_accepted;
 
-		if (any_step_accepted)
-			continue;
-		if (current_solution.viewpoint_ik.num_reached == num_viewpoint || this->miss_gap_penalty >= this->cost_weights.max_penalty)
+		if (!any_step_accepted)
 			break;
-
-		this->miss_gap_penalty = std::min(this->cost_weights.max_penalty, this->miss_gap_penalty * this->cost_weights.penalty_growth);
-		this->refinePosesAndComputeCost(current_solution);
-		reach_step = this->step_sizes.initial_step;
-		tour_step = this->step_sizes.initial_step;
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d: nothing changed with %d missed; penalty -> %.0f per m", iteration, num_viewpoint - current_solution.viewpoint_ik.num_reached, this->miss_gap_penalty);
-		this->logMissedViewpoints(current_solution.viewpoint_ik);
 	}
 	this->logTourSolution("end", current_solution);
 	this->logMissedViewpoints(current_solution.viewpoint_ik);
@@ -207,7 +197,7 @@ void Optimizer::refinePosesAndComputeCost(TourSolutionAtObjectPosition& solution
 	}
 	solution.smallest_margin = this->getSmallestJointMargin(reached_poses);
 	const int num_missed = static_cast<int>(this->viewpoints.size()) - solution.viewpoint_ik.num_reached;
-	solution.weighted_total_cost = solution.joint_travel_cost + this->cost_weights.miss_cost * num_missed + this->miss_gap_penalty * solution.viewpoint_ik.gap_sum + this->cost_weights.reconfiguration_cost * solution.num_reconfigurations + this->cost_weights.joint_room_weight * solution.room_shortfall;
+	solution.weighted_total_cost = solution.joint_travel_cost + this->cost_weights.miss_cost * num_missed + this->cost_weights.gap_penalty * solution.viewpoint_ik.gap_sum + this->cost_weights.reconfiguration_cost * solution.num_reconfigurations + this->cost_weights.joint_room_weight * solution.room_shortfall;
 }
 
 // The room-then-reach step. Misses first: a move toward them, then room-then-reach every time. Once all are reached, the

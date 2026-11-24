@@ -59,7 +59,7 @@
     co_max_steps: 200                     # iterations of the one descent (each: reach step, IK in place, tour step)
     co_max_line_search_tries: 4           # tries per sub-step (step halves on a failed try)
     co_initial_step: 0.02                 # m: first object move
-    co_min_step: 0.001                    # m: below this the descent has settled at the current penalty
+    co_min_step: 0.001                    # m: below this the descent has settled
     co_max_step: 0.05                     # m: largest object move
     co_ik_attempts: 10                    # random IK starts for a missed viewpoint, after its own pose fails
     exact_ik_finish_gap: 0.05             # m: a closest pose this near its target gets exact IK started from it
@@ -70,9 +70,7 @@
     # Tour steps: kept if the total cost drops (rad of tour length); they may lose viewpoints if the gain beats their gaps.
     # Reach
     co_miss_cost: 0.0                     # cost per missed viewpoint at equal reach (0: only the smooth gap charge below)
-    co_initial_penalty: 100.0             # cost per m of missed gap
-    co_penalty_growth: 10.0               # when settled with misses, the penalty grows this much
-    co_max_penalty: 100000.0
+    co_gap_penalty: 100.0                 # cost per m of missed gap
     co_room: true                         # room-then-reach: moves that free what blocks the misses (then, once all are reached, the reconfiguration edges as misses), steered off what blocks the reached ones
     co_allowed_reach_loss: 0.10           # share of the reached viewpoints a room-then-reach move may lose
 

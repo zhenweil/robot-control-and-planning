@@ -97,9 +97,7 @@ struct MethodSwitches
 struct CostWeights
 {
 	double miss_cost = 10.0;  // cost per missed viewpoint
-	double initial_penalty = 100.0;  // cost per m of missed gap
-	double penalty_growth = 10.0;
-	double max_penalty = 1e5;
+	double gap_penalty = 100.0;  // cost per m of missed gap
 	double allowed_reach_loss = 0.15;  // share of the reached viewpoints a room-then-reach move may lose
 	double reconfiguration_cost = 2.0;  // cost per reconfiguration
 	double joint_room_band = 0.2;  // rad beyond the hard limit a joint should keep
@@ -254,7 +252,6 @@ private:
 	std::map<std::pair<Joints, Joints>, std::pair<bool, Joints>> straight_path_cache;
 	Eigen::Vector3d straight_path_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
 	std::mutex straight_path_cache_mutex;
-	double miss_gap_penalty = 0.0;  // cost per m of missed gap: initial_penalty at the descent start, grows by penalty_growth when a step changes nothing
 	// Missed viewpoints' IK from neighbour poses at one object position, keyed by (viewpoint, start pose); cleared when the object moves.
 	std::map<std::pair<size_t, Joints>, NeighborIkResult> neighbor_ik_cache;
 	Eigen::Vector3d neighbor_ik_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());

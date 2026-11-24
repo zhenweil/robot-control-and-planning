@@ -205,9 +205,7 @@ private:
 	object_gtsp_co_optimize::CostWeights readCostWeights()
 	{
 		object_gtsp_co_optimize::CostWeights cost_weights;
-		cost_weights.initial_penalty = this->getParameter<double>("co_initial_penalty", 100.0);
-		cost_weights.penalty_growth = this->getParameter<double>("co_penalty_growth", 10.0);
-		cost_weights.max_penalty = this->getParameter<double>("co_max_penalty", 1e5);
+		cost_weights.gap_penalty = this->getParameter<double>("co_gap_penalty", 100.0);
 		cost_weights.allowed_reach_loss = this->getParameter<double>("co_allowed_reach_loss", 0.15);
 		cost_weights.miss_cost = this->getParameter<double>("co_miss_cost", 10.0);
 		cost_weights.reconfiguration_cost = this->getParameter<double>("co_reconfiguration_cost", 2.0);
