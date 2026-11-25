@@ -7,78 +7,80 @@
 namespace room_margins
 {
 
-std::vector<Margin> MarginsOf(const ArmModel& model, int v)
+std::vector<Margin> MarginsOf(const ArmModel& model, int viewpoint_index)
 {
-	std::vector<Margin> out;
-	for (const Margin& m : model.margins)
-		if (m.viewpoint_index == v)
-			out.push_back(m);
-	return out;
+	std::vector<Margin> viewpoint_margins;
+	for (const Margin& margin : model.margins)
+		if (margin.viewpoint_index == viewpoint_index)
+			viewpoint_margins.push_back(margin);
+	return viewpoint_margins;
 }
 
-double RoomAlong(const std::vector<Margin>& margins, const Eigen::Vector3d& dir)
+double RoomAlong(const std::vector<Margin>& margins, const Eigen::Vector3d& direction)
 {
 	double room = std::numeric_limits<double>::infinity();
-	for (const Margin& m : margins)
+	for (const Margin& margin : margins)
 	{
-		const double rate = m.slope.dot(dir);
+		const double rate = margin.slope.dot(direction);
 		if (rate < -1e-9)
-			room = std::min(room, std::max(0.0, m.value - std::min(m.floor, 0.5 * m.value)) / -rate);
+			room = std::min(room, std::max(0.0, margin.value - std::min(margin.floor, 0.5 * margin.value)) / -rate);
 	}
 	return room;
 }
 
 double Tightest(const std::vector<Margin>& margins)
 {
-	double lo = std::numeric_limits<double>::infinity();
-	for (const Margin& m : margins)
-		lo = std::min(lo, m.value / m.floor);
-	return lo;
+	double tightest = std::numeric_limits<double>::infinity();
+	for (const Margin& margin : margins)
+		tightest = std::min(tightest, margin.value / margin.floor);
+	return tightest;
 }
 
 double SoftMin(const std::vector<Margin>& margins)
 {
-	const double lo = Tightest(margins);
+	const double tightest = Tightest(margins);
 	if (margins.empty())
-		return lo;
-	double sum = 0.0;
-	for (const Margin& m : margins)
-		sum += std::exp(-(m.value / m.floor - lo) / soft_min_width);
-	return lo - soft_min_width * std::log(sum);
+		return tightest;
+	double weight_sum = 0.0;
+	for (const Margin& margin : margins)
+		weight_sum += std::exp(-(margin.value / margin.floor - tightest) / soft_min_width);
+	return tightest - soft_min_width * std::log(weight_sum);
 }
 
 Eigen::Vector3d MostRoomDirection(const std::vector<Margin>& margins, double radius)
 {
-	const double tau = soft_min_width;
-	auto softmin_slope = [&](const Eigen::Vector3d& d) {
-		std::vector<double> u(margins.size());
-		double lo = std::numeric_limits<double>::infinity();
-		for (size_t k = 0; k < margins.size(); ++k)
-		{
-			u[k] = (margins[k].value + margins[k].slope.dot(d)) / margins[k].floor;
-			lo = std::min(lo, u[k]);
-		}
-		Eigen::Vector3d g = Eigen::Vector3d::Zero();
-		double sum = 0.0;
-		for (size_t k = 0; k < margins.size(); ++k)
-		{
-			const double w = std::exp(-(u[k] - lo) / tau);
-			g += w * margins[k].slope / margins[k].floor;
-			sum += w;
-		}
-		return sum > 0.0 ? Eigen::Vector3d(g / sum) : g;
-	};
-	Eigen::Vector3d d = Eigen::Vector3d::Zero();
-	for (int it = 0; it < 100; ++it)
+	// Soft-min gradient at object move `move`, margins in floors.
+	auto get_soft_min_gradient = [&](const Eigen::Vector3d& move)
 	{
-		const Eigen::Vector3d g = softmin_slope(d);
-		if (g.norm() < 1e-9)
+		std::vector<double> floors_left(margins.size());
+		double tightest = std::numeric_limits<double>::infinity();
+		for (size_t margin_index = 0; margin_index < margins.size(); ++margin_index)
+		{
+			floors_left[margin_index] = (margins[margin_index].value + margins[margin_index].slope.dot(move)) / margins[margin_index].floor;
+			tightest = std::min(tightest, floors_left[margin_index]);
+		}
+		Eigen::Vector3d gradient = Eigen::Vector3d::Zero();
+		double weight_sum = 0.0;
+		for (size_t margin_index = 0; margin_index < margins.size(); ++margin_index)
+		{
+			const double weight = std::exp(-(floors_left[margin_index] - tightest) / soft_min_width);
+			gradient += weight * margins[margin_index].slope / margins[margin_index].floor;
+			weight_sum += weight;
+		}
+		return weight_sum > 0.0 ? Eigen::Vector3d(gradient / weight_sum) : gradient;
+	};
+	// Projected gradient ascent inside the ball of the given radius.
+	Eigen::Vector3d move = Eigen::Vector3d::Zero();
+	for (int iteration = 0; iteration < 100; ++iteration)
+	{
+		const Eigen::Vector3d gradient = get_soft_min_gradient(move);
+		if (gradient.norm() < 1e-9)
 			break;
-		d += 0.5 * radius / (1.0 + 0.1 * it) * g.normalized();
-		if (d.norm() > radius)
-			d *= radius / d.norm();
+		move += 0.5 * radius / (1.0 + 0.1 * iteration) * gradient.normalized();
+		if (move.norm() > radius)
+			move *= radius / move.norm();
 	}
-	return d.norm() < 1e-3 * radius ? Eigen::Vector3d::Zero() : Eigen::Vector3d(d.normalized());
+	return move.norm() < 1e-3 * radius ? Eigen::Vector3d::Zero() : Eigen::Vector3d(move.normalized());
 }
 
 }  // namespace room_margins

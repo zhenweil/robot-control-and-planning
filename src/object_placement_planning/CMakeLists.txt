@@ -50,6 +50,7 @@ add_library(object_placement_core STATIC
 	src/mesh_utils.cpp
 	src/object_placement.cpp
 	src/object_gtsp_co_optimizer.cpp
+	src/object_gtsp_co_optimize_setup.cpp
 	src/object_placement_optimizer.cpp
 	src/potential_field_sampler.cpp
 	src/reachability_map.cpp

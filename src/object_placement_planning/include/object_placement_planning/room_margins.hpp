@@ -1,6 +1,5 @@
 #pragma once
-// Safety margins of reached viewpoints (joint-limit distance, stretch, collision distance) and the object moves
-// that keep or raise them. Used by room-then-reach.
+// Kinematic margins of arm poses and the object moves that raise them (KME).
 
 #include <string>
 #include <vector>
@@ -10,19 +9,18 @@
 namespace room_margins
 {
 
-// One margin of a reached viewpoint and its slope w.r.t. the object position (the arm following the viewpoint) and
-// w.r.t. the joints.
+// One margin of a pose, with slopes over object position and joints.
 struct Margin
 {
 	int viewpoint_index = -1;
 	std::string name;
 	double value = 0.0;
-	double floor = 0.0;
+	double floor = 0.0;  // the margin's unit (its safe distance)
 	Eigen::Vector3d slope = Eigen::Vector3d::Zero();
 	Eigen::VectorXd joint_slope;
 };
 
-// All reached viewpoints' margins at one spot, and per viewpoint (empty if missed) its joints and dq/d(position).
+// Reached viewpoints' margins at one spot, plus per viewpoint its joints and dq/d(position).
 struct ArmModel
 {
 	std::vector<Margin> margins;
@@ -30,30 +28,28 @@ struct ArmModel
 	std::vector<Eigen::MatrixXd> dq_dp;
 };
 
-// A lost viewpoint's margins that ran out on a move, and why.
+// Margins that ran out on a move, and why.
 struct Shortage
 {
 	std::vector<Margin> margins;
 	std::string why;
 };
 
-// Viewpoint v's margins in the model.
-std::vector<Margin> MarginsOf(const ArmModel& model, int v);
+std::vector<Margin> MarginsOf(const ArmModel& model, int viewpoint_index);
 
-// How far the object can move along unit `dir` before a margin, to first order, reaches min(floor, value / 2).
-double RoomAlong(const std::vector<Margin>& margins, const Eigen::Vector3d& dir);
+// How far the object can move along a direction before a margin runs low.
+double RoomAlong(const std::vector<Margin>& margins, const Eigen::Vector3d& direction);
 
 // Smallest margin, in floors.
 double Tightest(const std::vector<Margin>& margins);
 
-// Width of the soft-min, in floors: a margin this far above the smallest counts e^-1 as much.
+// Soft-min width in floors: a margin this far above the smallest weighs e^-1.
 constexpr double soft_min_width = 1.0;
 
-// Soft-min of the margins in floors, -w log(sum exp(-u/w)): what MostRoomDirection raises. Infinite if empty.
+// Soft-min of the margins in floors; infinite if empty.
 double SoftMin(const std::vector<Margin>& margins);
 
-// Unit direction that most raises these margins' soft-min (in floors), to first order: projected gradient ascent
-// within |d| <= radius. Zero if none raises them.
+// Unit direction that most raises the soft-min to first order; zero if none.
 Eigen::Vector3d MostRoomDirection(const std::vector<Margin>& margins, double radius);
 
 }  // namespace room_margins
