@@ -35,10 +35,10 @@ using Joints = std::vector<double>;
 // Better tour solution: more viewpoints reached, then a smaller missed gap, then a lower weighted total cost.
 bool IsBetterSolution(const object_gtsp_co_optimize::TourSolution& candidate, const object_gtsp_co_optimize::TourSolution& other)
 {
-	if (candidate.poses.num_reached != other.poses.num_reached)
-		return candidate.poses.num_reached > other.poses.num_reached;
-	if (candidate.poses.gap_sum != other.poses.gap_sum)
-		return candidate.poses.gap_sum < other.poses.gap_sum;
+	if (candidate.placement_ik.num_reached != other.placement_ik.num_reached)
+		return candidate.placement_ik.num_reached > other.placement_ik.num_reached;
+	if (candidate.placement_ik.gap_sum != other.placement_ik.gap_sum)
+		return candidate.placement_ik.gap_sum < other.placement_ik.gap_sum;
 	return candidate.total_cost < other.total_cost;
 }
 
@@ -92,7 +92,7 @@ public:
 		int num_evaluations = 1;
 		this->logSolution("start", best_solution, num_viewpoint);
 
-		cmaes::Cmaes search(best_solution.poses.object_position, initial_step_size, static_cast<unsigned int>(random_seed), population_size);
+		cmaes::Cmaes search(best_solution.placement_ik.object_position, initial_step_size, static_cast<unsigned int>(random_seed), population_size);
 		int num_generations = 0;
 		while (rclcpp::ok() && GetElapsedSeconds() < time_budget)
 		{
@@ -104,7 +104,7 @@ public:
 					break;
 				std::vector<Joints> start_poses(viewpoints.size());
 				for (size_t viewpoint_index = 0; viewpoint_index < viewpoints.size(); ++viewpoint_index)
-					start_poses[viewpoint_index] = best_solution.poses.chosen[viewpoint_index].joints;
+					start_poses[viewpoint_index] = best_solution.placement_ik.ik_solutions[viewpoint_index].joints;
 				generation.push_back(optimizer.solveTourAtPosition(Eigen::Vector3d(point), start_poses, {}, best_solution.order));
 				++num_evaluations;
 			}
@@ -114,29 +114,29 @@ public:
 			// Told the clamped positions the candidates were scored at.
 			std::vector<Eigen::VectorXd> ranked_points;
 			for (const object_gtsp_co_optimize::TourSolution& solution : generation)
-				ranked_points.push_back(solution.poses.object_position);
+				ranked_points.push_back(solution.placement_ik.object_position);
 			search.tellRankedGeneration(ranked_points);
 			++num_generations;
 			const bool improved = IsBetterSolution(generation.front(), best_solution);
 			if (improved)
 				best_solution = generation.front();
 			const Eigen::VectorXd& mean = search.getMean();
-			RCLCPP_INFO(this->get_logger(), "generation %d: best of generation reached %d/%d  gap sum %.4f m  reconfigurations %d  tour length %.2f  cost %.2f%s | mean abs (%.4f, %.4f, %.4f)  step %.4f m  %d evaluations  %.0f s", num_generations, generation.front().poses.num_reached, num_viewpoint, generation.front().poses.gap_sum, generation.front().num_reconfigurations, generation.front().tour_length, generation.front().total_cost, improved ? "  <-- new best" : "", mean(0), mean(1), mean(2), search.getStepSize(), num_evaluations, GetElapsedSeconds());
+			RCLCPP_INFO(this->get_logger(), "generation %d: best of generation reached %d/%d  gap sum %.4f m  reconfigurations %d  tour length %.2f  cost %.2f%s | mean abs (%.4f, %.4f, %.4f)  step %.4f m  %d evaluations  %.0f s", num_generations, generation.front().placement_ik.num_reached, num_viewpoint, generation.front().placement_ik.gap_sum, generation.front().num_reconfigurations, generation.front().tour_length, generation.front().total_cost, improved ? "  <-- new best" : "", mean(0), mean(1), mean(2), search.getStepSize(), num_evaluations, GetElapsedSeconds());
 		}
 		const double seconds = GetElapsedSeconds();
-		const bool all_reached = best_solution.poses.num_reached == num_viewpoint;
+		const bool all_reached = best_solution.placement_ik.num_reached == num_viewpoint;
 		this->logSolution("best", best_solution, num_viewpoint);
-		RCLCPP_INFO(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches %d/%d poses, %d generations, %d evaluations (%.1f s).", best_solution.poses.object_position.x(), best_solution.poses.object_position.y(), best_solution.poses.object_position.z(), best_solution.poses.num_reached, num_viewpoint, num_generations, num_evaluations, seconds);
+		RCLCPP_INFO(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches %d/%d poses, %d generations, %d evaluations (%.1f s).", best_solution.placement_ik.object_position.x(), best_solution.placement_ik.object_position.y(), best_solution.placement_ik.object_position.z(), best_solution.placement_ik.num_reached, num_viewpoint, num_generations, num_evaluations, seconds);
 
 		std::filesystem::create_directories(output_dir);
 		Json::Value out;
 		out["ok"] = all_reached;
-		out["num_reachable"] = best_solution.poses.num_reached;
+		out["num_reachable"] = best_solution.placement_ik.num_reached;
 		out["num_total"] = num_viewpoint;
-		out["x"] = best_solution.poses.object_position.x();
-		out["y"] = best_solution.poses.object_position.y();
-		out["z"] = best_solution.poses.object_position.z();
-		out["gap_sum"] = best_solution.poses.gap_sum;
+		out["x"] = best_solution.placement_ik.object_position.x();
+		out["y"] = best_solution.placement_ik.object_position.y();
+		out["z"] = best_solution.placement_ik.object_position.z();
+		out["gap_sum"] = best_solution.placement_ik.gap_sum;
 		out["straight_tour_cost"] = best_solution.tour_length;
 		out["reconfigurations"] = best_solution.num_reconfigurations;
 		out["weighted_total_cost"] = best_solution.total_cost;
@@ -155,7 +155,7 @@ private:
 
 	void logSolution(const std::string& label, const object_gtsp_co_optimize::TourSolution& solution, int num_viewpoint)
 	{
-		RCLCPP_INFO(this->get_logger(), "%s: abs (%.4f, %.4f, %.4f) m  reached %d/%d  gap sum %.4f m  reconfigurations %d  blocked edges %d  tour length %.2f  cost %.2f", label.c_str(), solution.poses.object_position.x(), solution.poses.object_position.y(), solution.poses.object_position.z(), solution.poses.num_reached, num_viewpoint, solution.poses.gap_sum, solution.num_reconfigurations, solution.num_blocked_edges, solution.tour_length, solution.total_cost);
+		RCLCPP_INFO(this->get_logger(), "%s: abs (%.4f, %.4f, %.4f) m  reached %d/%d  gap sum %.4f m  reconfigurations %d  blocked edges %d  tour length %.2f  cost %.2f", label.c_str(), solution.placement_ik.object_position.x(), solution.placement_ik.object_position.y(), solution.placement_ik.object_position.z(), solution.placement_ik.num_reached, num_viewpoint, solution.placement_ik.gap_sum, solution.num_reconfigurations, solution.num_blocked_edges, solution.tour_length, solution.total_cost);
 	}
 };
 

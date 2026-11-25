@@ -83,10 +83,10 @@ public:
 		object_gtsp_co_optimize::Optimizer optimizer(this->shared_from_this(), this->model, this->scene, this->group_name, viewpoints, this->object_rotation, this->home_pose, settings, progress_display);
 		const object_gtsp_co_optimize::TourSolution solution = optimizer.runDescent(this->start_position);
 		const double search_seconds = get_elapsed_seconds();
-		const bool all_reached = solution.poses.num_reached == num_viewpoints;
-		const Eigen::Vector3d& object_position = solution.poses.object_position;
+		const bool all_reached = solution.placement_ik.num_reached == num_viewpoints;
+		const Eigen::Vector3d& object_position = solution.placement_ik.object_position;
 
-		const std::vector<Joints> tour_poses = optimizer.getPosesInTourOrder(solution.poses, solution.order);
+		const std::vector<Joints> tour_poses = optimizer.getPosesInTourOrder(solution.placement_ik, solution.order);
 		scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(object_position, this->object_rotation));
 		const PlannedTour planned_tour = this->planTour(tour_poses, optimizer.getCountedJoints(), optimizer.getEdgeWeights());
 		const double smallest_margin = optimizer.getSmallestJointMargin(tour_poses);
@@ -94,11 +94,11 @@ public:
 		if (all_reached)
 			RCLCPP_INFO(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned length %.2f rad (%d failed edges), %d reconfigurations, smallest joint margin %.3f rad beyond the hard limit; planned time %.2f s for reference (%.1f s).", object_position.x(), object_position.y(), object_position.z(), num_viewpoints, planned_tour.length, planned_tour.num_failed_edges, solution.num_reconfigurations, smallest_margin, planned_tour.time, seconds);
 		else
-			RCLCPP_WARN(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses (%.1f s).", object_position.x(), object_position.y(), object_position.z(), std::max(0, solution.poses.num_reached), num_viewpoints, seconds);
+			RCLCPP_WARN(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses (%.1f s).", object_position.x(), object_position.y(), object_position.z(), std::max(0, solution.placement_ik.num_reached), num_viewpoints, seconds);
 
 		Json::Value result_json;
 		result_json["ok"] = all_reached;
-		result_json["num_reachable"] = std::max(0, solution.poses.num_reached);
+		result_json["num_reachable"] = std::max(0, solution.placement_ik.num_reached);
 		result_json["num_total"] = num_viewpoints;
 		result_json["x"] = object_position.x();
 		result_json["y"] = object_position.y();
@@ -124,18 +124,18 @@ public:
 		std::ofstream(this->output_dir + "/object_gtsp_co_optimize_result.json") << result_json;
 
 		// Final markers, drawn as object_placement draws them.
-		ObjectPlacementResult placement;
-		placement.ok = all_reached;
-		placement.x = object_position.x();
-		placement.y = object_position.y();
-		placement.z = object_position.z();
-		placement.tour_order = solution.order;
+		ObjectPlacementResult placement_result;
+		placement_result.ok = all_reached;
+		placement_result.x = object_position.x();
+		placement_result.y = object_position.y();
+		placement_result.z = object_position.z();
+		placement_result.tour_order = solution.order;
 		for (int viewpoint : solution.order)
-			placement.joint_solutions.push_back(solution.poses.is_reached[static_cast<size_t>(viewpoint)] ? solution.poses.chosen[static_cast<size_t>(viewpoint)].joints : Joints());
-		visualization_msgs::msg::MarkerArray final_markers = BuildObjectPlacementMarkerArray(this->now(), this->mesh_path, this->mesh_scale, this->nominal_position, this->object_rotation, viewpoints_at_nominal, placement, this->show_tool_path);
+			placement_result.joint_solutions.push_back(solution.placement_ik.is_reached[static_cast<size_t>(viewpoint)] ? solution.placement_ik.ik_solutions[static_cast<size_t>(viewpoint)].joints : Joints());
+		visualization_msgs::msg::MarkerArray final_markers = BuildObjectPlacementMarkerArray(this->now(), this->mesh_path, this->mesh_scale, this->nominal_position, this->object_rotation, viewpoints_at_nominal, placement_result, this->show_tool_path);
 		final_markers.markers.push_back(object_gtsp_co_optimize::GetMountingSurfaceMarker(this->model->getRootLinkName(), this->now()));
 		marker_publisher->publish(final_markers);
-		optimizer.publishProgressMarkers(solution.poses, solution.order, Eigen::Vector3d::Zero());
+		optimizer.publishProgressMarkers(solution.placement_ik, solution.order, Eigen::Vector3d::Zero());
 
 		if (this->execute_on_robot && !all_reached)
 			RCLCPP_WARN(this->get_logger(), "Not executing: the tour misses viewpoints.");
@@ -218,7 +218,7 @@ private:
 	// Drives the robot through the tour along the unwrapped poses.
 	void executeTour(const object_gtsp_co_optimize::TourSolution& solution, const std::vector<Eigen::Isometry3d>& viewpoints, const std::vector<Joints>& tour_poses, const MarkerArrayPublisher& marker_publisher)
 	{
-		const Eigen::Vector3d& object_position = solution.poses.object_position;
+		const Eigen::Vector3d& object_position = solution.placement_ik.object_position;
 		RCLCPP_WARN(this->get_logger(), "execute_on_robot: driving the robot against the object at abs (%.4f, %.4f, %.4f) m -- on a real robot only correct if the object is actually fixtured there.", object_position.x(), object_position.y(), object_position.z());
 		const moveit::planning_interface::MoveGroupInterfacePtr move_group = std::make_shared<moveit::planning_interface::MoveGroupInterface>(this->shared_from_this(), this->group_name);
 		move_group->startStateMonitor();

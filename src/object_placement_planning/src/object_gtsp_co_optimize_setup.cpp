@@ -36,7 +36,6 @@ MethodSwitches ReadMethodSwitches(rclcpp::Node& node)
 {
 	MethodSwitches switches;
 	switches.use_kme = GetParameter<bool>(node, "co_room", true);
-	switches.use_pose_slides = GetParameter<bool>(node, "co_slide", true);
 	switches.use_cpd = GetParameter<bool>(node, "co_tour_object_move", true);
 	switches.freeze_object_when_reached = GetParameter<bool>(node, "co_freeze_object_when_reached", false);
 	return switches;
@@ -49,7 +48,6 @@ CostWeights ReadCostWeights(rclcpp::Node& node)
 	weights.allowed_reach_loss = GetParameter<double>(node, "co_allowed_reach_loss", 0.15);
 	weights.reconfiguration_cost = GetParameter<double>(node, "co_reconfiguration_cost", 2.0);
 	weights.blocked_edge_charge = GetParameter<double>(node, "co_blocked_edge_charge", 4.0);
-	weights.joint_room_band = GetParameter<double>(node, "co_joint_room_band", 0.2);
 	return weights;
 }
 
@@ -60,7 +58,7 @@ StepSizes ReadStepSizes(rclcpp::Node& node)
 	steps.initial_step = GetParameter<double>(node, "co_initial_step", 0.02);
 	steps.min_step = GetParameter<double>(node, "co_min_step", 0.001);
 	steps.max_step = GetParameter<double>(node, "co_max_step", 0.05);
-	steps.initial_slide_step = GetParameter<double>(node, "co_initial_slide_step", 0.3);
+	steps.initial_slide_scale = GetParameter<double>(node, "co_initial_slide_scale", 0.3);
 	steps.slide_joint_margin = GetParameter<double>(node, "co_slide_joint_margin", 0.05);
 	steps.min_slide_gain = GetParameter<double>(node, "co_min_slide_gain", 0.05);
 	return steps;

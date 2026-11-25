@@ -4,9 +4,9 @@
 /**:
   ros__parameters:
     # Start position and search box
-    initial_x: 0.242                      # below the home tool0, halfway between the table and the tool
+    initial_x: 0.342                      # below the home tool0, halfway between the table and the tool
     initial_y: -0.05
-    initial_z: 0.307
+    initial_z: 0.207
     x_min: 0.2
     x_max: 0.6
     y_min: -0.6
@@ -64,7 +64,7 @@
     co_ik_attempts: 10                    # random IK starts for a missed viewpoint, after its own pose fails
     exact_ik_finish_gap: 0.05             # m: a closest pose this near its target gets exact IK started from it
     co_closest_ik_extra_starts: 3         # random starts also tried for a miss's closest pose
-    co_closest_gap_slack: 0.005           # m: closest poses this near the best gap (with room, if any) are GTSP choices
+    co_closest_gap_slack: 0.005           # m: closest poses this near the best gap are GTSP choices
 
     # Reach step: kept if it reaches more viewpoints, or as many with smaller gaps; else room-then-reach frees what blocks the misses.
     # Tour steps: kept if the total cost drops (rad of tour length); they may lose viewpoints if the gain beats their gaps.
@@ -76,12 +76,9 @@
     # Reconfigurations
     co_reconfiguration_cost: 2.0          # cost per reconfiguration
 
-    # Joints kept off their limits
-    co_joint_room_band: 0.05              # rad: closest-IK candidates this far from every (hard) limit count as roomy (unweighted closest IK only)
-
     # Pose slides (tour length + joint room)
     co_slide: true                        # each step also slides poses along their self-motion
-    co_initial_slide_step: 0.3            # rad: largest pose slide at co_initial_step
+    co_initial_slide_scale: 0.3           # rad: first-try scale on the normalized pose slides (largest slide moves this much)
     co_slide_joint_margin: 0.05           # rad a slide stays from each (hard) joint limit
     co_min_slide_gain: 0.05               # a pose slide is kept only if the cost drops by more than this
 
