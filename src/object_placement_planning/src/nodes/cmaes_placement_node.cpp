@@ -82,7 +82,7 @@ public:
 		object_gtsp_co_optimize::Settings settings = object_gtsp_co_optimize::ReadSettings(*this);
 		settings.method_switches.freeze_object_when_reached = false;
 		const object_gtsp_co_optimize::DescentLimits& descent_limits = settings.descent_limits;
-		object_gtsp_co_optimize::Optimizer optimizer(this->shared_from_this(), model, scene, group_name, viewpoints, object_rotation, home_pose, settings, object_gtsp_co_optimize::ProgressDisplay{nullptr, mesh_path, mesh_scale, false});
+		object_gtsp_co_optimize::Optimizer optimizer(this->shared_from_this(), model, scene, group_name, viewpoints, object_rotation, home_pose, settings, object_gtsp_co_optimize::ProgressDisplay{mesh_path, mesh_scale, false, nullptr});
 		RCLCPP_INFO(this->get_logger(), "Loaded %d tour poses; CMA-ES in box (%.2f..%.2f, %.2f..%.2f, %.2f..%.2f) m, budget %.0f s, initial step %.3f m", num_viewpoint, descent_limits.search_box_lower_bound.x(), descent_limits.search_box_upper_bound.x(), descent_limits.search_box_lower_bound.y(), descent_limits.search_box_upper_bound.y(), descent_limits.search_box_lower_bound.z(), descent_limits.search_box_upper_bound.z(), time_budget, initial_step_size);
 
 		const auto start_time = std::chrono::steady_clock::now();

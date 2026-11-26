@@ -135,21 +135,21 @@ struct TourSettings
 
 struct Settings
 {
-	DescentLimits descent_limits;
-	MethodSwitches method_switches;
-	CostWeights cost_weights;
 	StepSizes step_sizes;
 	IkSettings ik_settings;
+	CostWeights cost_weights;
 	TourSettings tour_settings;
+	DescentLimits descent_limits;
+	MethodSwitches method_switches;
 };
 
 // Live RViz markers of the descent; a null publisher draws nothing.
 struct ProgressDisplay
 {
-	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr publisher;
 	std::string mesh_path;
 	double mesh_scale = 0.01;
 	bool show_tool_path = false;
+	rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr publisher;
 };
 
 class Optimizer
@@ -160,13 +160,13 @@ public:
 
 	// The one descent from start (abs, clamped to the search box).
 	TourSolution runDescent(const Eigen::Vector3d& start);
+
+	const std::vector<int>& getCountedJoints() const;
+	const joint_travel::EdgeWeights& getEdgeWeights() const;
+	double getSmallestJointMargin(const std::vector<Joints>& joint_poses) const;
+	std::vector<Joints> getPosesInTourOrder(const PlacementIkSolutions& placement_ik, const std::vector<int>& order) const;
 	// IK for every viewpoint, then the order and poses improved and scored.
 	TourSolution solveTourAtPosition(const Eigen::Vector3d& object_position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses, const std::vector<int>& order);
-
-	std::vector<Joints> getPosesInTourOrder(const PlacementIkSolutions& placement_ik, const std::vector<int>& order) const;
-	double getSmallestJointMargin(const std::vector<Joints>& joint_poses) const;
-	const joint_travel::EdgeWeights& getEdgeWeights() const;
-	const std::vector<int>& getCountedJoints() const;
 	void publishProgressMarkers(const PlacementIkSolutions& placement_ik, const std::vector<int>& order, const Eigen::Vector3d& object_direction);
 
 private:

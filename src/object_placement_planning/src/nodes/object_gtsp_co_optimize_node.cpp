@@ -82,7 +82,7 @@ public:
 
 		const auto start_time = std::chrono::steady_clock::now();
 		auto get_elapsed_seconds = [&]() { return std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count(); };
-		const object_gtsp_co_optimize::ProgressDisplay progress_display{progress_publisher, this->mesh_path, this->mesh_scale, this->show_tool_path};
+		const object_gtsp_co_optimize::ProgressDisplay progress_display{this->mesh_path, this->mesh_scale, this->show_tool_path, progress_publisher};
 		object_gtsp_co_optimize::Optimizer optimizer(this->shared_from_this(), this->model, this->scene, this->group_name, viewpoints, this->object_rotation, this->home_pose, settings, progress_display);
 		const object_gtsp_co_optimize::TourSolution solution = optimizer.runDescent(this->start_position);
 		const double search_seconds = get_elapsed_seconds();
