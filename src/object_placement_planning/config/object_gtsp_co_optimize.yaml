@@ -15,7 +15,7 @@
     z_max: 0.7
 
     # Hard constraints
-    joint_margin: 0.1                     # rad: hard margin from every joint limit (read by the launch file)
+    joint_margin_deg: 5.72958             # deg: hard margin from every joint limit (read by the launch file)
     exact_ik_margin: 0.01                 # m: clearance an exact IK pose keeps, arm links only
 
     # IK
@@ -44,16 +44,16 @@
     co_gtsp_blocked_rounds: 2             # GTSP re-solves with the chosen blocked and reconfiguration edges charged
     gtsp_reference_postures: 4            # fixed random arm postures: each reached viewpoint's IK from them is also a GTSP candidate (0 = off)
     # Reconfiguration: an edge the arm can't follow with the camera on a straight line and an even turn (one Jacobian update per
-    # step, exact IK at the end; no joint jump, joint near its limit or collision on the way). Otherwise the next viewpoint takes the arrival pose.
-    path_check_position_step: 0.01        # m of camera travel per step
-    path_check_angle_step: 0.035          # rad of camera turn per step
-    path_check_max_joint_jump: 0.2        # rad: a larger change of any joint in one step is a flip
-    path_check_joint_margin: 0.05         # rad: a step this near a (hard) joint limit fails
+    # step, exact IK at the end; no joint jump, joint past its (shrunk) limit or collision on the way). Otherwise the next viewpoint takes the arrival pose.
+    reconfiguration_check_camera_move_per_step: 0.01   # m of camera travel per step
+    reconfiguration_check_camera_turn_per_step_deg: 2.00535  # deg of camera turn per step
+    path_check_max_joint_jump_deg: 11.45916  # deg: a larger change of any joint in one step is a flip
 
     # Final check of the result (measures only, changes nothing): planned length, and time for reference
     real_cost_planning_time: 0.5          # s per OMPL attempt on an edge
     real_cost_attempts: 3                 # OMPL attempts per edge; the shortest (fastest for time) is kept
-    unreachable_penalty: 50.0             # rad (s for time) added for an edge that fails to plan
+    unreachable_length_penalty_deg: 2864.789  # deg added to the planned length for an edge that fails to plan
+    unreachable_time_penalty_sec: 50.0    # s added to the planned time for an edge that fails to plan
 
     # Descent
     co_max_steps: 200                     # iterations of the one descent (each: reach step, IK in place, tour step)
@@ -61,13 +61,13 @@
     co_initial_step: 0.02                 # m: first object move
     co_min_step: 0.001                    # m: below this the descent has settled
     co_max_step: 0.05                     # m: largest object move
-    co_ik_attempts: 10                    # random IK starts for a missed viewpoint, after its own pose fails
-    exact_ik_finish_gap: 0.05             # m: a closest pose this near its target gets exact IK started from it
-    co_closest_ik_extra_starts: 3         # random starts also tried for a miss's closest pose
-    co_closest_gap_slack: 0.005           # m: closest poses this near the best gap are GTSP choices
+    co_exact_ik_random_attempts: 10       # exact IK from random starts for a viewpoint, after its current pose fails
+    co_max_closest_ik_gap_to_retry_exact_ik: 0.05  # m: a closest pose this near its target gets exact IK started from it
+    co_closest_ik_random_attempts: 3       # of the exact-IK random starts, how many closest IK also tries for a miss
+    co_max_gap_above_best_closest_ik_pose: 0.005  # m: closest poses this near the best gap are GTSP choices
 
     # Reach step: kept if it reaches more viewpoints, or as many with smaller gaps; else room-then-reach frees what blocks the misses.
-    # Tour steps: kept if the total cost drops (rad of tour length); they may lose viewpoints if the gain beats their gaps.
+    # Tour steps: kept if the total cost drops (tour length in rad internally); they may lose viewpoints if the gain beats their gaps.
     # Reach
     co_gap_penalty: 100.0                 # cost per m of missed gap
     co_room: true                         # room-then-reach: moves that free what blocks the misses (then, once all are reached, the reconfiguration edges as misses), steered off what blocks the reached ones
@@ -78,8 +78,8 @@
 
     # Pose slides (tour length + joint room)
     co_slide: true                        # each step also slides poses along their self-motion
-    co_initial_slide_scale: 0.3           # rad: first-try scale on the normalized pose slides (largest slide moves this much)
-    co_slide_joint_margin: 0.05           # rad a slide stays from each (hard) joint limit
+    co_initial_slide_scale_deg: 17.18873  # deg: first-try scale on the normalized pose slides (largest slide moves this much)
+    co_slide_joint_margin_deg: 2.86479    # deg a slide stays from each (hard) joint limit
     co_min_slide_gain: 0.05               # a pose slide is kept only if the cost drops by more than this
 
     # Ablation switches

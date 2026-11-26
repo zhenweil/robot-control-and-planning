@@ -58,8 +58,8 @@ StepSizes ReadStepSizes(rclcpp::Node& node)
 	steps.initial_step = GetParameter<double>(node, "co_initial_step", 0.02);
 	steps.min_step = GetParameter<double>(node, "co_min_step", 0.001);
 	steps.max_step = GetParameter<double>(node, "co_max_step", 0.05);
-	steps.initial_slide_scale = GetParameter<double>(node, "co_initial_slide_scale", 0.3);
-	steps.slide_joint_margin = GetParameter<double>(node, "co_slide_joint_margin", 0.05);
+	steps.initial_slide_scale_deg = GetParameter<double>(node, "co_initial_slide_scale_deg", 17.18873);
+	steps.slide_joint_margin_deg = GetParameter<double>(node, "co_slide_joint_margin_deg", 2.86479);
 	steps.min_slide_gain = GetParameter<double>(node, "co_min_slide_gain", 0.05);
 	return steps;
 }
@@ -67,7 +67,7 @@ StepSizes ReadStepSizes(rclcpp::Node& node)
 // Names shared with object_placement, so one params file serves all methods.
 IkSettings ReadIkSettings(rclcpp::Node& node)
 {
-	closest_ik::Options options;
+	closest_ik::SolveSettings options;
 	options.iters = GetIntParameter(node, "closest_ik_iters", 60);
 	options.margin = GetParameter<double>(node, "closest_ik_margin", 0.02);
 	options.use_weighted_cost = GetParameter<bool>(node, "closest_ik_weighted_cost", false);
@@ -84,16 +84,16 @@ IkSettings ReadIkSettings(rclcpp::Node& node)
 	options.ignore_roll = GetParameter<bool>(node, "ignore_camera_roll", false);
 	options.exact_margin = GetParameter<double>(node, "exact_ik_margin", 0.0);
 	IkSettings ik_settings;
-	ik_settings.exact_options = options;
-	ik_settings.exact_options.exact_only = true;
-	ik_settings.closest_options = options;
-	ik_settings.closest_options.try_exact_first = false;
+	ik_settings.exact_solve_settings = options;
+	ik_settings.exact_solve_settings.exact_only = true;
+	ik_settings.closest_solve_settings = options;
+	ik_settings.closest_solve_settings.try_exact_first = false;
 	ik_settings.jacobian_damping = GetParameter<double>(node, "jacobian_damping", 1e-3);
-	ik_settings.exact_finish_gap = GetParameter<double>(node, "exact_ik_finish_gap", 0.05);
+	ik_settings.max_closest_ik_gap_to_retry_exact_ik = GetParameter<double>(node, "co_max_closest_ik_gap_to_retry_exact_ik", 0.05);
 	ik_settings.random_ik_seed = GetIntParameter(node, "random_seed", 42);
-	ik_settings.random_ik_attempts = GetIntParameter(node, "co_ik_attempts", 10);
-	ik_settings.closest_gap_slack = GetParameter<double>(node, "co_closest_gap_slack", 0.005);
-	ik_settings.closest_ik_extra_starts = GetIntParameter(node, "co_closest_ik_extra_starts", 3);
+	ik_settings.exact_ik_random_attempts = GetIntParameter(node, "co_exact_ik_random_attempts", 10);
+	ik_settings.max_gap_above_best_closest_ik_pose = GetParameter<double>(node, "co_max_gap_above_best_closest_ik_pose", 0.005);
+	ik_settings.closest_ik_random_attempts = GetIntParameter(node, "co_closest_ik_random_attempts", 3);
 	return ik_settings;
 }
 
@@ -104,10 +104,9 @@ TourSettings ReadTourSettings(rclcpp::Node& node)
 	tour_settings.edge_weights.max_turn = GetParameter<double>(node, "max_joint_deviation_weight", 1.0);
 	tour_settings.edge_weights.time = GetParameter<double>(node, "travel_time_weight", 0.0);
 	tour_settings.two_opt_rounds = GetIntParameter(node, "gtsp_two_opt_rounds", 5);
-	tour_settings.path_check_position_step = GetParameter<double>(node, "path_check_position_step", 0.01);
-	tour_settings.path_check_angle_step = GetParameter<double>(node, "path_check_angle_step", 0.035);
-	tour_settings.path_check_max_joint_jump = GetParameter<double>(node, "path_check_max_joint_jump", 0.2);
-	tour_settings.path_check_joint_margin = GetParameter<double>(node, "path_check_joint_margin", 0.05);
+	tour_settings.reconfiguration_check_camera_move_per_step = GetParameter<double>(node, "reconfiguration_check_camera_move_per_step", 0.01);
+	tour_settings.reconfiguration_check_camera_turn_per_step_deg = GetParameter<double>(node, "reconfiguration_check_camera_turn_per_step_deg", 2.00535);
+	tour_settings.path_check_max_joint_jump_deg = GetParameter<double>(node, "path_check_max_joint_jump_deg", 11.45916);
 	tour_settings.gtsp_penalty_rounds = GetIntParameter(node, "co_gtsp_blocked_rounds", 2);
 	tour_settings.num_reference_postures = GetIntParameter(node, "gtsp_reference_postures", 4);
 	return tour_settings;

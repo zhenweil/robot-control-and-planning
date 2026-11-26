@@ -50,7 +50,7 @@ bool PairHasAnyLink(const std::string& pair_name, const std::set<std::string>& l
 // True if a thin rod from tool to target hits nothing.
 bool ClearPathToTarget(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::LinkModel* tool, const Eigen::Vector3d& target, const std::set<std::string>& tool_side);
 
-struct Options
+struct SolveSettings
 {
 	int iters = 60;  // closest stage steps
 	double margin = 0.02;  // m kept from collisions in the closest stage
@@ -92,6 +92,6 @@ scene_geometry::Vector6d GetPoseError(const Eigen::Isometry3d& target, const Eig
 Eigen::MatrixXd GetToolJacobian(moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const std::vector<double>& joints, bool ignore_roll);
 
 // Exact IK if reachable, else the closest collision-free pose (priority or weighted stage).
-Result Solve(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const Options& options);
+Result Solve(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const SolveSettings& options);
 
 }  // namespace closest_ik

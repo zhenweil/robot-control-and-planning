@@ -24,6 +24,8 @@ namespace
 constexpr double miss_blocking_multiple = 6.0;
 constexpr double reached_blocking_multiple = 2.0;
 constexpr double smallest_reach_step = 0.005;  // m
+constexpr double degrees_per_radian = 180.0 / M_PI;  // settings and logs use degrees
+constexpr double radians_per_degree = M_PI / 180.0;
 constexpr double smallest_kept_share = 0.3;  // a direction shorter than this after trimming is dropped
 
 // Safe distances that one KME margin unit stands for.
@@ -247,13 +249,13 @@ bool Optimizer::slideArmPoses(TourSolution& solution, int iteration)
 {
 	const std::vector<Eigen::VectorXd> slides = this->getPoseSlidesDownTourLength(solution);
 	const bool has_slide = std::any_of(slides.begin(), slides.end(), [](const Eigen::VectorXd& slide) { return slide.size() > 0; });
-	double slide_scale = this->settings.step_sizes.initial_slide_scale;
+	double slide_scale = this->settings.step_sizes.initial_slide_scale_deg * radians_per_degree;
 	for (int attempt = 0; attempt < this->settings.step_sizes.max_line_search_tries && has_slide; ++attempt, slide_scale *= 0.5)
 	{
 		// Misses did not slide and the object stayed: keep their IK.
 		const TourSolution candidate = this->improveTourForPlacement(this->solvePlacement(solution.placement_ik.object_position, this->getPosesAfterSlides(solution.placement_ik, slides, slide_scale), this->getChosenJoints(solution.placement_ik), &solution.placement_ik), solution.order);
 		const bool kept = candidate.total_cost < solution.total_cost - this->settings.step_sizes.min_slide_gain;
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d poses: slide scale %.3f rad  reached %d/%zu  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f vs %.2f%s", iteration, slide_scale, candidate.placement_ik.num_reached, this->viewpoints.size(), candidate.num_reconfigurations, candidate.num_blocked_edges, candidate.tour_length, candidate.smallest_joint_margin, candidate.total_cost, solution.total_cost, kept ? "  <-- kept" : "");
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d poses: slide scale %.2f deg  reached %d/%zu  reconfigurations %d  blocked edges %d  tour length %.1f deg  smallest margin %.2f deg  cost %.2f vs %.2f%s", iteration, slide_scale * degrees_per_radian, candidate.placement_ik.num_reached, this->viewpoints.size(), candidate.num_reconfigurations, candidate.num_blocked_edges, candidate.tour_length * degrees_per_radian, candidate.smallest_joint_margin * degrees_per_radian, candidate.total_cost, solution.total_cost, kept ? "  <-- kept" : "");
 		if (!kept)
 			continue;
 		solution = candidate;
@@ -273,7 +275,7 @@ bool Optimizer::moveObjectDownCost(TourSolution& solution, double& object_step, 
 		const TourSolution candidate = this->solveTourAtPosition(solution.placement_ik.object_position + object_step * direction, this->getChosenJoints(solution.placement_ik), {}, solution.order);
 		const bool adds_reconfiguration = this->settings.method_switches.use_kme && this->isAllReached(solution.placement_ik) && candidate.num_reconfigurations > solution.num_reconfigurations;
 		const bool kept = candidate.total_cost < solution.total_cost - 1e-9 && !adds_reconfiguration;
-		RCLCPP_INFO(this->node->get_logger(), "iteration %d tour: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu  gap sum %.4f m  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f vs %.2f%s", iteration, object_step, candidate.placement_ik.object_position.x(), candidate.placement_ik.object_position.y(), candidate.placement_ik.object_position.z(), candidate.placement_ik.num_reached, this->viewpoints.size(), candidate.placement_ik.gap_sum, candidate.num_reconfigurations, candidate.num_blocked_edges, candidate.tour_length, candidate.smallest_joint_margin, candidate.total_cost, solution.total_cost, kept ? "  <-- kept" : "");
+		RCLCPP_INFO(this->node->get_logger(), "iteration %d tour: step %.4f m -> abs (%.4f, %.4f, %.4f)  reached %d/%zu  gap sum %.4f m  reconfigurations %d  blocked edges %d  tour length %.1f deg  smallest margin %.2f deg  cost %.2f vs %.2f%s", iteration, object_step, candidate.placement_ik.object_position.x(), candidate.placement_ik.object_position.y(), candidate.placement_ik.object_position.z(), candidate.placement_ik.num_reached, this->viewpoints.size(), candidate.placement_ik.gap_sum, candidate.num_reconfigurations, candidate.num_blocked_edges, candidate.tour_length * degrees_per_radian, candidate.smallest_joint_margin * degrees_per_radian, candidate.total_cost, solution.total_cost, kept ? "  <-- kept" : "");
 		if (!kept)
 			continue;
 		solution = candidate;
@@ -365,7 +367,7 @@ Eigen::Vector3d Optimizer::getDirectionDownTourLength(const TourSolution& soluti
 	Eigen::Vector3d move = Eigen::Vector3d::Zero();
 	for (size_t viewpoint_index = 0; viewpoint_index < this->viewpoints.size(); ++viewpoint_index)
 	{
-		const Eigen::MatrixXd jacobian = closest_ik::GetToolJacobian(*this->state, this->group, this->tool, solution.placement_ik.ik_solutions[viewpoint_index].joints, this->settings.ik_settings.exact_options.ignore_roll);
+		const Eigen::MatrixXd jacobian = closest_ik::GetToolJacobian(*this->state, this->group, this->tool, solution.placement_ik.ik_solutions[viewpoint_index].joints, this->settings.ik_settings.exact_solve_settings.ignore_roll);
 		const Eigen::MatrixXd joint_rate_per_object_move = scene_geometry::DampedPinv(jacobian, this->settings.ik_settings.jacobian_damping).leftCols<3>();
 		move -= joint_rate_per_object_move.transpose() * length_gradients[viewpoint_index];
 	}
@@ -380,7 +382,7 @@ std::vector<Eigen::VectorXd> Optimizer::getPoseSlidesDownTourLength(const TourSo
 	double largest_slide = 0.0;
 	for (size_t viewpoint_index : this->getViewpointsWithReach(solution.placement_ik, true))
 	{
-		const Eigen::MatrixXd jacobian = closest_ik::GetToolJacobian(*this->state, this->group, this->tool, solution.placement_ik.ik_solutions[viewpoint_index].joints, this->settings.ik_settings.exact_options.ignore_roll);
+		const Eigen::MatrixXd jacobian = closest_ik::GetToolJacobian(*this->state, this->group, this->tool, solution.placement_ik.ik_solutions[viewpoint_index].joints, this->settings.ik_settings.exact_solve_settings.ignore_roll);
 		slides[viewpoint_index] = -GetSelfMotionProjector(jacobian) * length_gradients[viewpoint_index];
 		largest_slide = std::max(largest_slide, slides[viewpoint_index].norm());
 	}
@@ -423,7 +425,7 @@ std::vector<Eigen::VectorXd> Optimizer::getTourLengthGradientPerViewpoint(const 
 std::vector<Joints> Optimizer::getPosesAfterSlides(const PlacementIkSolutions& placement_ik, const std::vector<Eigen::VectorXd>& slides, double slide_scale) const
 {
 	std::vector<Joints> slid_poses = this->getChosenJoints(placement_ik);
-	const double margin = this->settings.step_sizes.slide_joint_margin;
+	const double margin = this->settings.step_sizes.slide_joint_margin_deg * radians_per_degree;
 	for (size_t viewpoint_index = 0; viewpoint_index < slid_poses.size(); ++viewpoint_index)
 	{
 		if (slides[viewpoint_index].size() == 0)
@@ -514,7 +516,7 @@ std::vector<room_margins::Margin> Optimizer::getMarginsOfPose(size_t viewpoint_i
 		}
 		margins.push_back({viewpoint, "stretch", stretch, stretch_safe_distance, joint_rate_per_object_move.transpose() * stretch_slope, stretch_slope});
 	}
-	const double window = this->settings.ik_settings.closest_options.margin + blocking_multiple * collision_safe_distance;  // m
+	const double window = this->settings.ik_settings.closest_solve_settings.margin + blocking_multiple * collision_safe_distance;  // m
 	this->state->setJointGroupPositions(this->group, joints);
 	this->state->update();
 	const closest_ik::ClosePairs close_pairs = closest_ik::FindClosePairs(this->scene, *this->state, this->group, closest_ik::CloseRequest(*this->state, this->group, window), window);
@@ -604,24 +606,24 @@ PlacementIkSolutions Optimizer::solvePlacement(const Eigen::Vector3d& object_pos
 			return;
 		}
 		const Eigen::Isometry3d target = this->getViewpointTarget(object_position, viewpoint_index);
-		closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, start_poses[viewpoint_index], ik_settings.exact_options);
+		closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, start_poses[viewpoint_index], ik_settings.exact_solve_settings);
 		if (!result.exact && viewpoint_index < fallback_start_poses.size())
-			result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, fallback_start_poses[viewpoint_index], ik_settings.exact_options);
+			result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, fallback_start_poses[viewpoint_index], ik_settings.exact_solve_settings);
 		// Seeded by viewpoint and object position, so a rerun gives the same starts.
 		random_numbers::RandomNumberGenerator viewpoint_rng(this->getRandomIkSeed(object_position, viewpoint_index));
 		std::vector<Joints> random_starts;
-		for (int attempt = 0; attempt < ik_settings.random_ik_attempts && !result.exact; ++attempt)
+		for (int attempt = 0; attempt < ik_settings.exact_ik_random_attempts && !result.exact; ++attempt)
 		{
 			Joints random_start;
 			thread_state.setToRandomPositions(this->group, viewpoint_rng);
 			thread_state.copyJointGroupPositions(this->group, random_start);
 			random_starts.push_back(random_start);
-			result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, random_start, ik_settings.exact_options);
+			result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, random_start, ik_settings.exact_solve_settings);
 		}
 		if (!result.exact)
 		{
 			std::vector<Joints> closest_starts = {start_poses[viewpoint_index]};
-			for (size_t random_index = 0; random_index < random_starts.size() && static_cast<int>(closest_starts.size()) <= ik_settings.closest_ik_extra_starts; ++random_index)
+			for (size_t random_index = 0; random_index < random_starts.size() && static_cast<int>(closest_starts.size()) <= ik_settings.closest_ik_random_attempts; ++random_index)
 				closest_starts.push_back(random_starts[random_index]);
 			const std::vector<closest_ik::Result> closest_results = this->solveClosestIkFromStarts(thread_state, target, closest_starts, true);
 			result = closest_ik::Result();
@@ -639,7 +641,7 @@ PlacementIkSolutions Optimizer::solvePlacement(const Eigen::Vector3d& object_pos
 		if (!result.found)
 		{
 			// Nothing collision-free near: keep the start pose with a large gap.
-			placement_ik.ik_solutions[viewpoint_index].gap = ik_settings.closest_options.margin + 1.0;
+			placement_ik.ik_solutions[viewpoint_index].gap = ik_settings.closest_solve_settings.margin + 1.0;
 			return;
 		}
 		placement_ik.is_reached[viewpoint_index] = result.exact;
@@ -662,15 +664,15 @@ std::vector<closest_ik::Result> Optimizer::solveClosestIkFromStarts(moveit::core
 	std::vector<closest_ik::Result> results;
 	for (const Joints& start : starts)
 	{
-		closest_ik::Result result = closest_ik::Solve(this->scene, state, this->group, this->tool, target, start, this->settings.ik_settings.closest_options);
+		closest_ik::Result result = closest_ik::Solve(this->scene, state, this->group, this->tool, target, start, this->settings.ik_settings.closest_solve_settings);
 		if (!result.found)
 			continue;
 		const bool short_of_clearance = this->getClearanceShortfall(state, result.q) > 0.0;
 		if (short_of_clearance && push_for_clearance)
 			result = this->pushArmToExactClearance(state, target, result);
-		else if (!short_of_clearance && !result.exact && result.gap < this->settings.ik_settings.exact_finish_gap)
+		else if (!short_of_clearance && !result.exact && result.gap < this->settings.ik_settings.max_closest_ik_gap_to_retry_exact_ik)
 		{
-			const closest_ik::Result exact = closest_ik::Solve(this->scene, state, this->group, this->tool, target, result.q, this->settings.ik_settings.exact_options);
+			const closest_ik::Result exact = closest_ik::Solve(this->scene, state, this->group, this->tool, target, result.q, this->settings.ik_settings.exact_solve_settings);
 			if (exact.exact)
 				result = exact;
 		}
@@ -690,7 +692,7 @@ closest_ik::Result Optimizer::solveSmallestGapIk(moveit::core::RobotState& state
 	{
 		if (result.exact)
 			return result;
-		const double gap = scene_geometry::PoseGap(result.pose_error, this->settings.ik_settings.closest_options.rot_scale) + this->getClearanceShortfall(state, result.q);
+		const double gap = scene_geometry::PoseGap(result.pose_error, this->settings.ik_settings.closest_solve_settings.rot_scale) + this->getClearanceShortfall(state, result.q);
 		if (gap < best_gap)
 		{
 			best_result = result;
@@ -704,7 +706,7 @@ closest_ik::Result Optimizer::solveSmallestGapIk(moveit::core::RobotState& state
 closest_ik::Result Optimizer::pushArmToExactClearance(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const closest_ik::Result& closest_result) const
 {
 	const IkSettings& ik_settings = this->settings.ik_settings;
-	const double margin = ik_settings.exact_options.exact_margin;
+	const double margin = ik_settings.exact_solve_settings.exact_margin;
 	if (margin <= 0.0)
 		return closest_result;
 	const double goal_clearance = margin + 0.002;  // m
@@ -726,8 +728,8 @@ closest_ik::Result Optimizer::pushArmToExactClearance(moveit::core::RobotState& 
 		}
 		if (clearance_push.norm() < 1e-9)
 			break;
-		const scene_geometry::Vector6d pose_error = closest_ik::GetPoseError(target, state.getGlobalLinkTransform(this->tool), ik_settings.exact_options.ignore_roll);
-		const Eigen::MatrixXd jacobian = closest_ik::GetToolJacobian(state, this->group, this->tool, joints, ik_settings.exact_options.ignore_roll);
+		const scene_geometry::Vector6d pose_error = closest_ik::GetPoseError(target, state.getGlobalLinkTransform(this->tool), ik_settings.exact_solve_settings.ignore_roll);
+		const Eigen::MatrixXd jacobian = closest_ik::GetToolJacobian(state, this->group, this->tool, joints, ik_settings.exact_solve_settings.ignore_roll);
 		const Eigen::MatrixXd pseudo_inverse = scene_geometry::DampedPinv(jacobian, ik_settings.jacobian_damping);
 		const Eigen::MatrixXd self_motion = Eigen::MatrixXd::Identity(jacobian.cols(), jacobian.cols()) - pseudo_inverse * jacobian;
 		Eigen::VectorXd joint_step = pseudo_inverse * pose_error + self_motion * clearance_push;
@@ -738,7 +740,7 @@ closest_ik::Result Optimizer::pushArmToExactClearance(moveit::core::RobotState& 
 		state.enforceBounds(this->group);
 		state.copyJointGroupPositions(this->group, joints);
 	}
-	const closest_ik::Result exact = closest_ik::Solve(this->scene, state, this->group, this->tool, target, joints, ik_settings.exact_options);
+	const closest_ik::Result exact = closest_ik::Solve(this->scene, state, this->group, this->tool, target, joints, ik_settings.exact_solve_settings);
 	if (exact.exact)
 		return exact;
 	if (!scene_geometry::IsStateValid(this->scene, &state, this->group, joints.data()))
@@ -748,16 +750,16 @@ closest_ik::Result Optimizer::pushArmToExactClearance(moveit::core::RobotState& 
 	closest_ik::Result pushed;
 	pushed.found = true;
 	pushed.exact = false;
-	pushed.pose_error = closest_ik::GetPoseError(target, state.getGlobalLinkTransform(this->tool), ik_settings.exact_options.ignore_roll);
-	pushed.gap = scene_geometry::PoseGap(pushed.pose_error, ik_settings.closest_options.rot_scale);
+	pushed.pose_error = closest_ik::GetPoseError(target, state.getGlobalLinkTransform(this->tool), ik_settings.exact_solve_settings.ignore_roll);
+	pushed.gap = scene_geometry::PoseGap(pushed.pose_error, ik_settings.closest_solve_settings.rot_scale);
 	pushed.q = joints;
 	pushed.weighted_cost = closest_result.weighted_cost;
 	const double pushed_gap = pushed.gap + this->getClearanceShortfall(state, joints);
-	const double closest_gap = scene_geometry::PoseGap(closest_result.pose_error, ik_settings.closest_options.rot_scale) + this->getClearanceShortfall(state, closest_result.q);
+	const double closest_gap = scene_geometry::PoseGap(closest_result.pose_error, ik_settings.closest_solve_settings.rot_scale) + this->getClearanceShortfall(state, closest_result.q);
 	return pushed_gap < closest_gap ? pushed : closest_result;
 }
 
-// Closest poses within the gap slack of the best.
+// Closest poses within max_gap_above_best_closest_ik_pose of the best.
 std::vector<IkSolution> Optimizer::keepSolutionsNearBestGap(moveit::core::RobotState& state, const std::vector<closest_ik::Result>& closest_results) const
 {
 	const IkSettings& ik_settings = this->settings.ik_settings;
@@ -769,7 +771,7 @@ std::vector<IkSolution> Optimizer::keepSolutionsNearBestGap(moveit::core::RobotS
 		best_gap = std::min(best_gap, pose.gap);
 		all_solutions.push_back(pose);
 	}
-	if (ik_settings.closest_options.use_weighted_cost)
+	if (ik_settings.closest_solve_settings.use_weighted_cost)
 	{
 		// The weighted cost already counts room and clearance: start from its cheapest.
 		size_t cheapest_index = 0;
@@ -778,13 +780,13 @@ std::vector<IkSolution> Optimizer::keepSolutionsNearBestGap(moveit::core::RobotS
 				cheapest_index = result_index;
 		std::vector<IkSolution> near_solutions = {all_solutions[cheapest_index]};
 		for (size_t pose_index = 0; pose_index < all_solutions.size(); ++pose_index)
-			if (pose_index != cheapest_index && all_solutions[pose_index].gap <= all_solutions[cheapest_index].gap + ik_settings.closest_gap_slack)
+			if (pose_index != cheapest_index && all_solutions[pose_index].gap <= all_solutions[cheapest_index].gap + ik_settings.max_gap_above_best_closest_ik_pose)
 				near_solutions.push_back(all_solutions[pose_index]);
 		return near_solutions;
 	}
 	std::vector<IkSolution> near_solutions;
 	for (const IkSolution& pose : all_solutions)
-		if (pose.gap <= best_gap + ik_settings.closest_gap_slack)
+		if (pose.gap <= best_gap + ik_settings.max_gap_above_best_closest_ik_pose)
 			near_solutions.push_back(pose);
 	return near_solutions;
 }
@@ -796,14 +798,14 @@ IkSolution Optimizer::makeIkSolution(moveit::core::RobotState& state, const clos
 	pose.position_error = result.pose_error.head<3>();
 	pose.angle_error = result.pose_error.tail<3>().norm();
 	pose.clearance_shortfall = this->getClearanceShortfall(state, result.q);
-	pose.gap = scene_geometry::PoseGap(result.pose_error, this->settings.ik_settings.closest_options.rot_scale) + pose.clearance_shortfall;
+	pose.gap = scene_geometry::PoseGap(result.pose_error, this->settings.ik_settings.closest_solve_settings.rot_scale) + pose.clearance_shortfall;
 	return pose;
 }
 
 // How far the arm (camera side aside) is inside the exact clearance.
 double Optimizer::getClearanceShortfall(moveit::core::RobotState& state, const Joints& joints) const
 {
-	const double exact_margin = this->settings.ik_settings.exact_options.exact_margin;
+	const double exact_margin = this->settings.ik_settings.exact_solve_settings.exact_margin;
 	if (exact_margin <= 0.0)
 		return 0.0;
 	state.setJointGroupPositions(this->group, joints);
@@ -882,7 +884,7 @@ std::vector<int> Optimizer::reorderTourWithGtsp(PlacementIkSolutions& placement_
 std::vector<std::vector<Joints>> Optimizer::collectGtspOptions(PlacementIkSolutions& placement_ik, const std::vector<int>& order)
 {
 	const size_t num_viewpoints = this->viewpoints.size();
-	const closest_ik::Options& exact_options = this->settings.ik_settings.exact_options;
+	const closest_ik::SolveSettings& exact_solve_settings = this->settings.ik_settings.exact_solve_settings;
 	std::vector<std::vector<Joints>> options(num_viewpoints);
 	for (size_t viewpoint_index = 0; viewpoint_index < num_viewpoints; ++viewpoint_index)
 	{
@@ -911,7 +913,7 @@ std::vector<std::vector<Joints>> Optimizer::collectGtspOptions(PlacementIkSoluti
 				neighbor_poses.push_back(&placement_ik.ik_solutions[static_cast<size_t>(order[tour_position + 1])].joints);
 			for (const Joints* neighbor_pose : neighbor_poses)
 			{
-				const closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, *neighbor_pose, exact_options);
+				const closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, *neighbor_pose, exact_solve_settings);
 				if (result.exact)
 					options[viewpoint_index].push_back(result.q);
 			}
@@ -928,7 +930,7 @@ std::vector<std::vector<Joints>> Optimizer::collectGtspOptions(PlacementIkSoluti
 			const Eigen::Isometry3d target = this->getViewpointTarget(placement_ik.object_position, viewpoint_index);
 			for (const Joints& reference_posture : this->reference_postures)
 			{
-				closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, reference_posture, exact_options);
+				closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, reference_posture, exact_solve_settings);
 				if (!result.exact)
 					continue;
 				this->unwrapFullTurnsToward(result.q, placement_ik.ik_solutions[viewpoint_index].joints);
@@ -989,7 +991,7 @@ void Optimizer::bringMissesCloserFromNeighbors(PlacementIkSolutions& placement_i
 			}
 		}
 		const Eigen::Isometry3d target = this->getViewpointTarget(placement_ik.object_position, viewpoint_index);
-		closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, start_pose, this->settings.ik_settings.exact_options);
+		closest_ik::Result result = closest_ik::Solve(this->scene, thread_state, this->group, this->tool, target, start_pose, this->settings.ik_settings.exact_solve_settings);
 		if (!result.exact)
 			result = this->solveSmallestGapIk(thread_state, target, start_pose);
 		NeighborIkResult neighbor_result;
@@ -1115,7 +1117,7 @@ bool Optimizer::followStraightCameraPath(moveit::core::RobotState& state, const 
 		return followed;
 	};
 	const TourSettings& tour_settings = this->settings.tour_settings;
-	const closest_ik::Options& exact_options = this->settings.ik_settings.exact_options;
+	const closest_ik::SolveSettings& exact_solve_settings = this->settings.ik_settings.exact_solve_settings;
 	state.setJointGroupPositions(this->group, from_pose);
 	state.update();
 	const Eigen::Isometry3d from_camera = state.getGlobalLinkTransform(this->tool);
@@ -1126,15 +1128,15 @@ bool Optimizer::followStraightCameraPath(moveit::core::RobotState& state, const 
 	const Eigen::Quaterniond to_rotation(to_camera.rotation());
 	const double camera_travel = (to_camera.translation() - from_camera.translation()).norm();
 	const double camera_turn = from_rotation.angularDistance(to_rotation);
-	const int num_steps = std::max(1, static_cast<int>(std::ceil(std::max(camera_travel / tour_settings.path_check_position_step, camera_turn / tour_settings.path_check_angle_step))));
+	const int num_steps = std::max(1, static_cast<int>(std::ceil(std::max(camera_travel / tour_settings.reconfiguration_check_camera_move_per_step, camera_turn / (tour_settings.reconfiguration_check_camera_turn_per_step_deg * radians_per_degree)))));
 	auto is_joint_step_ok = [&](const Joints& before, const Joints& after)
 	{
 		for (size_t joint_index = 0; joint_index < after.size(); ++joint_index)
 		{
-			if (std::abs(after[joint_index] - before[joint_index]) > tour_settings.path_check_max_joint_jump)
+			if (std::abs(after[joint_index] - before[joint_index]) > tour_settings.path_check_max_joint_jump_deg * radians_per_degree)
 				return false;
 			const moveit::core::VariableBounds& bounds = this->getJointBounds(joint_index);
-			if (bounds.position_bounded_ && (after[joint_index] < bounds.min_position_ + tour_settings.path_check_joint_margin || after[joint_index] > bounds.max_position_ - tour_settings.path_check_joint_margin))
+			if (bounds.position_bounded_ && (after[joint_index] < bounds.min_position_ || after[joint_index] > bounds.max_position_))
 				return false;
 		}
 		return true;
@@ -1148,14 +1150,14 @@ bool Optimizer::followStraightCameraPath(moveit::core::RobotState& state, const 
 		camera.linear() = from_rotation.slerp(share, to_rotation).toRotationMatrix();
 		state.setJointGroupPositions(this->group, pose);
 		state.update();
-		const scene_geometry::Vector6d pose_error = closest_ik::GetPoseError(camera, state.getGlobalLinkTransform(this->tool), exact_options.ignore_roll);
-		const Eigen::MatrixXd jacobian = closest_ik::GetToolJacobian(state, this->group, this->tool, pose, exact_options.ignore_roll);
+		const scene_geometry::Vector6d pose_error = closest_ik::GetPoseError(camera, state.getGlobalLinkTransform(this->tool), exact_solve_settings.ignore_roll);
+		const Eigen::MatrixXd jacobian = closest_ik::GetToolJacobian(state, this->group, this->tool, pose, exact_solve_settings.ignore_roll);
 		const Joints next_pose = AddToJoints(pose, scene_geometry::DampedPinv(jacobian, this->settings.ik_settings.jacobian_damping) * pose_error);
 		if (!is_joint_step_ok(pose, next_pose) || !scene_geometry::IsStateValid(this->scene, &state, this->group, next_pose.data()))
 			return remember(false, pose);
 		pose = next_pose;
 	}
-	const closest_ik::Result arrival = closest_ik::Solve(this->scene, state, this->group, this->tool, to_camera, pose, exact_options);
+	const closest_ik::Result arrival = closest_ik::Solve(this->scene, state, this->group, this->tool, to_camera, pose, exact_solve_settings);
 	if (!arrival.exact || !is_joint_step_ok(pose, arrival.q))
 		return remember(false, pose);
 	return remember(true, arrival.q);
@@ -1345,7 +1347,7 @@ void Optimizer::runInParallel(size_t num_items, const std::function<void(moveit:
 
 void Optimizer::logTourSolution(const std::string& label, const TourSolution& solution) const
 {
-	RCLCPP_INFO(this->node->get_logger(), "%s: abs (%.4f, %.4f, %.4f) m  reached %d/%zu  gap sum %.4f m  reconfigurations %d  blocked edges %d  tour length %.2f  smallest margin %.3f rad  cost %.2f", label.c_str(), solution.placement_ik.object_position.x(), solution.placement_ik.object_position.y(), solution.placement_ik.object_position.z(), solution.placement_ik.num_reached, this->viewpoints.size(), solution.placement_ik.gap_sum, solution.num_reconfigurations, solution.num_blocked_edges, solution.tour_length, solution.smallest_joint_margin, solution.total_cost);
+	RCLCPP_INFO(this->node->get_logger(), "%s: abs (%.4f, %.4f, %.4f) m  reached %d/%zu  gap sum %.4f m  reconfigurations %d  blocked edges %d  tour length %.1f deg  smallest margin %.2f deg  cost %.2f", label.c_str(), solution.placement_ik.object_position.x(), solution.placement_ik.object_position.y(), solution.placement_ik.object_position.z(), solution.placement_ik.num_reached, this->viewpoints.size(), solution.placement_ik.gap_sum, solution.num_reconfigurations, solution.num_blocked_edges, solution.tour_length * degrees_per_radian, solution.smallest_joint_margin * degrees_per_radian, solution.total_cost);
 }
 
 // Per missed viewpoint: its gap and what blocks it.
@@ -1353,7 +1355,7 @@ void Optimizer::logMissedViewpoints(const PlacementIkSolutions& placement_ik)
 {
 	this->placeObjectAt(placement_ik.object_position);
 	const double limit_band = 0.02;  // rad
-	const double contact_band = this->settings.ik_settings.closest_options.margin + 0.002;  // m
+	const double contact_band = this->settings.ik_settings.closest_solve_settings.margin + 0.002;  // m
 	const size_t num_joints = this->group->getActiveJointModels().size();
 	for (size_t viewpoint_index : this->getViewpointsWithReach(placement_ik, false))
 	{
@@ -1372,7 +1374,7 @@ void Optimizer::logMissedViewpoints(const PlacementIkSolutions& placement_ik)
 		for (size_t pair_index = 0; pair_index < close_pairs.names.size(); ++pair_index)
 			blockers += " " + close_pairs.names[pair_index] + " " + std::to_string(static_cast<int>(std::round(close_pairs.dists[pair_index] * 1000.0))) + " mm;";
 		const bool valid = scene_geometry::IsStateValid(this->scene, this->state.get(), this->group, pose.joints.data());
-		RCLCPP_INFO(this->node->get_logger(), "  missed viewpoint %zu: gap %.2f mm (position %.2f mm, angle %.3f deg, clearance short %.2f mm, closest pose %s), blocked by:%s", viewpoint_index, 1000.0 * pose.gap, 1000.0 * pose.position_error.norm(), pose.angle_error * 180.0 / M_PI, 1000.0 * pose.clearance_shortfall, valid ? "valid" : "INVALID", blockers.empty() ? " nothing (reach)" : blockers.c_str());
+		RCLCPP_INFO(this->node->get_logger(), "  missed viewpoint %zu: gap %.2f mm (position %.2f mm, angle %.3f deg, clearance short %.2f mm, closest pose %s), blocked by:%s", viewpoint_index, 1000.0 * pose.gap, 1000.0 * pose.position_error.norm(), pose.angle_error * degrees_per_radian, 1000.0 * pose.clearance_shortfall, valid ? "valid" : "INVALID", blockers.empty() ? " nothing (reach)" : blockers.c_str());
 	}
 }
 

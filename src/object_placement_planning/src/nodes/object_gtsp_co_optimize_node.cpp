@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -30,6 +31,8 @@
 
 namespace
 {
+
+constexpr double degrees_per_radian = 180.0 / M_PI;
 
 using Joints = std::vector<double>;
 using MarkerArrayPublisher = rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr;
@@ -92,7 +95,7 @@ public:
 		const double smallest_margin = optimizer.getSmallestJointMargin(tour_poses);
 		const double seconds = get_elapsed_seconds();
 		if (all_reached)
-			RCLCPP_INFO(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned length %.2f rad (%d failed edges), %d reconfigurations, smallest joint margin %.3f rad beyond the hard limit; planned time %.2f s for reference (%.1f s).", object_position.x(), object_position.y(), object_position.z(), num_viewpoints, planned_tour.length, planned_tour.num_failed_edges, solution.num_reconfigurations, smallest_margin, planned_tour.time, seconds);
+			RCLCPP_INFO(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned length %.1f deg (%d failed edges), %d reconfigurations, smallest joint margin %.2f deg beyond the hard limit; planned time %.2f s for reference (%.1f s).", object_position.x(), object_position.y(), object_position.z(), num_viewpoints, planned_tour.length * degrees_per_radian, planned_tour.num_failed_edges, solution.num_reconfigurations, smallest_margin * degrees_per_radian, planned_tour.time, seconds);
 		else
 			RCLCPP_WARN(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches only %d/%d poses (%.1f s).", object_position.x(), object_position.y(), object_position.z(), std::max(0, solution.placement_ik.num_reached), num_viewpoints, seconds);
 
@@ -103,12 +106,12 @@ public:
 		result_json["x"] = object_position.x();
 		result_json["y"] = object_position.y();
 		result_json["z"] = object_position.z();
-		result_json["planned_travel"] = all_reached ? planned_tour.length : -1.0;  // rad
+		result_json["planned_travel_deg"] = all_reached ? planned_tour.length * degrees_per_radian : -1.0;
 		result_json["planned_time"] = all_reached ? planned_tour.time : -1.0;  // s
-		result_json["straight_tour_cost"] = solution.tour_length;
+		result_json["straight_tour_cost_deg"] = solution.tour_length * degrees_per_radian;
 		result_json["failed_edges"] = planned_tour.num_failed_edges;
 		result_json["reconfigurations"] = solution.num_reconfigurations;
-		result_json["smallest_joint_margin"] = smallest_margin;
+		result_json["smallest_joint_margin_deg"] = smallest_margin * degrees_per_radian;
 		result_json["search_seconds"] = search_seconds;
 		result_json["seconds"] = seconds;
 		for (int viewpoint : solution.order)
@@ -171,7 +174,8 @@ private:
 		this->start_position = Eigen::Vector3d(this->getParameter<double>("initial_x", 0.5), this->getParameter<double>("initial_y", 0.0), this->getParameter<double>("initial_z", 0.15));
 		this->planning_time = this->getParameter<double>("real_cost_planning_time", 0.5);
 		this->planning_attempts = static_cast<int>(this->getParameter<int64_t>("real_cost_attempts", 3));
-		this->unreachable_penalty = this->getParameter<double>("unreachable_penalty", 50.0);
+		this->unreachable_length_penalty = this->getParameter<double>("unreachable_length_penalty_deg", 2864.789) * M_PI / 180.0;
+		this->unreachable_time_penalty = this->getParameter<double>("unreachable_time_penalty_sec", 50.0);
 		this->keep_alive = this->getParameter<bool>("keep_alive", false);  // keep republishing markers for RViz
 		this->execute_on_robot = this->getParameter<bool>("execute_on_robot", false);  // needs move_group running
 		this->execution_planning_time = this->getParameter<double>("execution_planning_time", 5.0);
@@ -208,9 +212,9 @@ private:
 			const Joints& start_pose = edge_index == 0 ? this->home_pose : tour_poses[edge_index - 1];
 			const bool length_planned = edge_index < edge_lengths.size() && edge_lengths[edge_index] >= 0.0;
 			planned_tour.num_failed_edges += length_planned ? 0 : 1;
-			planned_tour.length += length_planned ? edge_lengths[edge_index] : joint_travel::JointDistance(start_pose, tour_poses[edge_index], counted_joints) + this->unreachable_penalty;
+			planned_tour.length += length_planned ? edge_lengths[edge_index] : joint_travel::JointDistance(start_pose, tour_poses[edge_index], counted_joints) + this->unreachable_length_penalty;
 			const bool time_planned = edge_index < edge_times.size() && edge_times[edge_index] >= 0.0;
-			planned_tour.time += time_planned ? edge_times[edge_index] : joint_travel::StraightMoveTime(start_pose, tour_poses[edge_index], edge_weights.max_velocity, edge_weights.max_acceleration) + this->unreachable_penalty;
+			planned_tour.time += time_planned ? edge_times[edge_index] : joint_travel::StraightMoveTime(start_pose, tour_poses[edge_index], edge_weights.max_velocity, edge_weights.max_acceleration) + this->unreachable_time_penalty;
 		}
 		return planned_tour;
 	}
@@ -251,7 +255,8 @@ private:
 	Eigen::Vector3d start_position = Eigen::Vector3d::Zero();  // abs
 	double planning_time = 0.5;  // s per OMPL attempt
 	int planning_attempts = 3;
-	double unreachable_penalty = 50.0;  // rad (s for time) per failed edge
+	double unreachable_length_penalty = 50.0;  // rad per failed edge
+	double unreachable_time_penalty = 50.0;  // s per failed edge
 	bool keep_alive = false;
 	bool execute_on_robot = false;
 	double execution_planning_time = 5.0;

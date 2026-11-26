@@ -85,7 +85,7 @@ public:
 		const int num_exact_starts = static_cast<int>(this->GetParameter<int64_t>("check_exact_starts", 2000));
 		const int num_closest_starts = static_cast<int>(this->GetParameter<int64_t>("check_closest_starts", 200));
 		const double narrow_margin = this->GetParameter<double>("check_narrow_margin", 0.005);	// m
-		closest_ik::Options options;
+		closest_ik::SolveSettings options;
 		options.iters = static_cast<int>(this->GetParameter<int64_t>("closest_ik_iters", 60));
 		options.margin = this->GetParameter<double>("closest_ik_margin", 0.02);
 		options.rot_scale = this->GetParameter<double>("rot_metric_scale", 0.1);
@@ -106,11 +106,11 @@ public:
 		AddMountingSurface(scene);
 		RCLCPP_INFO(this->get_logger(), "%zu cases, %d exact-IK starts and %d closest-IK starts each; clearance %.3f / %.3f m; camera roll %s", cases.size() / 4, num_exact_starts, num_closest_starts, options.margin, narrow_margin, options.ignore_roll ? "free" : "fixed");
 
-		closest_ik::Options exact_options = options;
+		closest_ik::SolveSettings exact_options = options;
 		exact_options.exact_only = true;
-		closest_ik::Options wide_options = options;
+		closest_ik::SolveSettings wide_options = options;
 		wide_options.try_exact_first = false;
-		closest_ik::Options narrow_options = wide_options;
+		closest_ik::SolveSettings narrow_options = wide_options;
 		narrow_options.margin = narrow_margin;
 		const unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
 

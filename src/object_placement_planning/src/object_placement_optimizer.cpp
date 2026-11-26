@@ -992,10 +992,10 @@ void ObjectPlacementOptimizer::OptimizeTourAndPlacement()
 // ---------------------------------------------------------------------------------------------
 
 // closest_ik settings from the params; with the kdl solver the closest pass stays as before (no exact stage, roll fixed).
-closest_ik::Options ObjectPlacementOptimizer::GetClosestIkOptions(const ObjectPlacementParams& p, bool exact_only) const
+closest_ik::SolveSettings ObjectPlacementOptimizer::GetClosestIkOptions(const ObjectPlacementParams& p, bool exact_only) const
 {
 	const bool use_closest_solver = p.ik_solver == "closest";
-	closest_ik::Options options;
+	closest_ik::SolveSettings options;
 	options.iters = p.closest_ik_iters;
 	options.margin = p.closest_ik_margin;
 	options.rot_scale = p.rot_metric_scale;
@@ -1012,7 +1012,7 @@ bool ObjectPlacementOptimizer::SolveExactIk(moveit::core::RobotState& state, con
 {
 	if (p.ik_solver != "closest")
 		return ik_sampling::ExactIk(state, this->joint_group, scene_geometry::ToPoseMsg(target), attempts, p.ik_timeout, this->state_validity, rng);
-	const closest_ik::Options options = this->GetClosestIkOptions(p, true);
+	const closest_ik::SolveSettings options = this->GetClosestIkOptions(p, true);
 	for (int attempt = 0; attempt < std::max(1, attempts); ++attempt)
 	{
 		if (attempt > 0)
@@ -1121,7 +1121,7 @@ std::vector<MissedViewpoint> ObjectPlacementOptimizer::FindClosestPosesForMissed
 	}
 
 	const Eigen::Isometry3d xform = scene_geometry::Translation(at);
-	const closest_ik::Options closest_options = this->GetClosestIkOptions(p, false);
+	const closest_ik::SolveSettings closest_options = this->GetClosestIkOptions(p, false);
 	std::vector<closest_ik::Result> closest_poses(misses.size());
 	const auto closest_start = std::chrono::steady_clock::now();
 	const uint32_t base_seed = static_cast<uint32_t>(ik_sampling::SeededRng().uniformInteger(1, 1 << 30));
@@ -1684,7 +1684,7 @@ TourSolution ObjectPlacementOptimizer::EvaluateWithFixedOrder(const Position& at
 // jump postures), finished by exact IK when close.
 closest_ik::Result ObjectPlacementOptimizer::SolveFromNeighborPose(moveit::core::RobotState& state, random_numbers::RandomNumberGenerator& rng, const Eigen::Isometry3d& target, const Joints& start)
 {
-	closest_ik::Options options = this->GetClosestIkOptions(this->params, false);
+	closest_ik::SolveSettings options = this->GetClosestIkOptions(this->params, false);
 	options.try_exact_first = false;
 	closest_ik::Result result = closest_ik::Solve(this->scene, state, this->joint_group, this->tool_link, target, start, options);
 	if (!result.found || result.exact || result.gap >= this->params.exact_ik_finish_gap)

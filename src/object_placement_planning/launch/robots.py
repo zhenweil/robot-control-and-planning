@@ -1,4 +1,5 @@
 """Per-robot settings shared by the launch files: robot:=panda (default), kinova (Kinova Gen3 7-DOF), xarm7 (UFactory xArm7), ur5e or ur3e (Universal Robots, 6-DOF)."""
+import math
 import xml.etree.ElementTree as ElementTree
 
 import yaml
@@ -101,16 +102,18 @@ def ShrinkJointRanges(moveit_config, margin):
     return moveit_config
 
 
-# joint_margin (rad) from a params YAML's /** or node section; 0 if not given.
+# joint_margin_deg (deg) or joint_margin (rad) from a params YAML's /** or node section, in rad; 0 if not given.
 def GetJointMargin(params_file):
     if not params_file:
         return 0.0
     with open(params_file) as f:
         sections = yaml.safe_load(f) or {}
     for section in sections.values():
-        margin = ((section or {}).get("ros__parameters") or {}).get("joint_margin")
-        if margin is not None:
-            return float(margin)
+        parameters = (section or {}).get("ros__parameters") or {}
+        if parameters.get("joint_margin_deg") is not None:
+            return math.radians(float(parameters["joint_margin_deg"]))
+        if parameters.get("joint_margin") is not None:
+            return float(parameters["joint_margin"])
     return 0.0
 
 

@@ -48,7 +48,7 @@ struct PlacementIkSolutions
 	std::vector<char> is_reached;                                // per viewpoint; char, not bool, for thread safety
 	std::vector<IkSolution> ik_solutions;                        // per viewpoint, the solution in use
 	Eigen::Vector3d object_position = Eigen::Vector3d::Zero();   // abs, m
-	std::vector<std::vector<IkSolution>> closest_ik_candidates;  // per missed viewpoint, within the gap slack of the best
+	std::vector<std::vector<IkSolution>> closest_ik_candidates;  // per missed viewpoint, within max_gap_above_best_closest_ik_pose of the best
 };
 
 // A missed viewpoint's IK solved from one neighbour's pose.
@@ -100,38 +100,37 @@ struct CostWeights
 // Object step and pose slide sizes.
 struct StepSizes
 {
-	double initial_step = 0.02;  // m
-	double min_step = 0.001;  // m
 	double max_step = 0.05;  // m
-	int max_line_search_tries = 4;  // halvings per step
-	double initial_slide_scale = 0.3;  // rad; first-try scale on the normalized pose slides
-	double slide_joint_margin = 0.05;  // rad kept from each joint limit
+	double min_step = 0.001;  // m
+	double initial_step = 0.02;  // m
 	double min_slide_gain = 0.05;  // cost drop a slide must beat
+	int max_line_search_tries = 4;  // halvings per step
+	double initial_slide_scale_deg = 17.18873;  // first-try scale on the normalized pose slides
+	double slide_joint_margin_deg = 2.86479;  // kept from each joint limit
 };
 
 struct IkSettings
 {
-	closest_ik::Options exact_options;
-	closest_ik::Options closest_options;
-	double jacobian_damping = 1e-3;
 	int random_ik_seed = 42;
-	int random_ik_attempts = 10;  // random starts when the previous pose fails
-	int closest_ik_extra_starts = 3;  // random starts also tried for closest IK
-	double closest_gap_slack = 0.005;  // m; closest poses this near the best stay GTSP options
-	double exact_finish_gap = 0.05;  // m; closer closest poses get an exact IK try
+	double jacobian_damping = 1e-3;
+	int exact_ik_random_attempts = 10;  // exact IK from random starts when the current pose fails
+	int closest_ik_random_attempts = 3;  // exact-IK random starts reused by closest IK
+	double max_gap_above_best_closest_ik_pose = 0.005;  // TODO: check if this is needed
+	double max_closest_ik_gap_to_retry_exact_ik = 0.05;  // m; closer closest poses get an exact IK try
+	closest_ik::SolveSettings exact_solve_settings;
+	closest_ik::SolveSettings closest_solve_settings;
 };
 
 // Edge cost, GTSP and the straight camera path check.
 struct TourSettings
 {
-	joint_travel::EdgeWeights edge_weights;  // joint speed limits are filled in by the optimizer
 	int two_opt_rounds = 5;
-	double path_check_position_step = 0.01;  // m of camera travel per step
-	double path_check_angle_step = 0.035;  // rad of camera turn per step
-	double path_check_max_joint_jump = 0.2;  // rad; larger is a flip
-	double path_check_joint_margin = 0.05;  // rad; closer to a limit fails
 	int gtsp_penalty_rounds = 2;  // GTSP re-solves with blocked and reconfiguration edges charged
 	int num_reference_postures = 4;  // random postures whose IK adds GTSP options
+	double path_check_max_joint_jump_deg = 11.45916;  // larger is a flip
+	double reconfiguration_check_camera_move_per_step = 0.01;  // m of camera travel per step
+	double reconfiguration_check_camera_turn_per_step_deg = 2.00535;  // camera turn per step
+	joint_travel::EdgeWeights edge_weights;  // joint speed limits are filled in by the optimizer
 };
 
 struct Settings

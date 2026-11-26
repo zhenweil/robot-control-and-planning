@@ -95,7 +95,7 @@ public:
 		const Eigen::Vector3d hi(this->GetParameter<double>("x_max", 0.6), this->GetParameter<double>("y_max", 0.6), this->GetParameter<double>("z_max", 0.2));
 		const Eigen::Vector3d start(this->GetParameter<double>("initial_x", 0.5), this->GetParameter<double>("initial_y", 0.0), this->GetParameter<double>("initial_z", 0.15));
 		const int seed = static_cast<int>(this->GetParameter<int64_t>("random_seed", 42));
-		closest_ik::Options ik_options;
+		closest_ik::SolveSettings ik_options;
 		ik_options.iters = static_cast<int>(this->GetParameter<int64_t>("closest_ik_iters", 60));
 		ik_options.margin = this->GetParameter<double>("closest_ik_margin", 0.02);
 		ik_options.rot_scale = this->GetParameter<double>("rot_metric_scale", 0.1);
@@ -166,9 +166,9 @@ public:
 
 		// Closest IK of every viewpoint at `position`, in parallel, each started from seeds[v].
 		const unsigned int num_threads = std::max(1u, std::min(std::thread::hardware_concurrency(), static_cast<unsigned int>(num_viewpoint)));
-		closest_ik::Options exact_options = ik_options;
+		closest_ik::SolveSettings exact_options = ik_options;
 		exact_options.exact_only = true;
-		closest_ik::Options closest_options = ik_options;
+		closest_ik::SolveSettings closest_options = ik_options;
 		closest_options.try_exact_first = false;
 		int num_ik_calls = 0;  // seeds the random start poses, so runs repeat
 		// Exact IK from the seed, then from up to ik_attempts random poses; if none is exact, the closest pose from the seed.

@@ -187,7 +187,7 @@ void ClampIntoBounds(moveit::core::RobotState& state, const moveit::core::JointM
 	state.copyJointGroupPositions(group, joints);
 }
 
-bool IsWithinExactTolerance(const scene_geometry::Vector6d& pose_error, const Options& options)
+bool IsWithinExactTolerance(const scene_geometry::Vector6d& pose_error, const SolveSettings& options)
 {
 	return pose_error.head<3>().norm() < options.exact_position_tolerance && pose_error.tail<3>().norm() < options.exact_rotation_tolerance;
 }
@@ -221,7 +221,7 @@ bool HasArmClearance(const planning_scene_monitor::PlanningSceneMonitorPtr& scen
 	return std::all_of(pairs.names.begin(), pairs.names.end(), [&](const std::string& pair_name) { return PairHasAnyLink(pair_name, camera_links); });
 }
 
-bool IsExact(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, const moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const scene_geometry::Vector6d& pose_error, const Options& options)
+bool IsExact(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, const moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const scene_geometry::Vector6d& pose_error, const SolveSettings& options)
 {
 	return IsWithinExactTolerance(pose_error, options) && (options.exact_margin <= 0.0 || HasArmClearance(scene, state, group, tool, options.exact_margin));
 }
@@ -236,7 +236,7 @@ bool HasStalled(std::vector<double>& best_gap_history, double gap)
 }
 
 // Damped Newton steps on the pose error only; validity checked once within tolerance.
-Result SolveExact(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const Options& options)
+Result SolveExact(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const SolveSettings& options)
 {
 	const double damping = 1e-3;
 	const double max_joint_step = 0.5;  // rad
@@ -278,7 +278,7 @@ struct WeightedSolveContext
 	const moveit::core::JointModelGroup* group;
 	const moveit::core::LinkModel* tool;
 	const Eigen::Isometry3d& target;
-	const Options& options;
+	const SolveSettings& options;
 	std::set<std::string> camera_links;
 	std::vector<double> lower_bounds;
 	std::vector<double> upper_bounds;
@@ -286,7 +286,7 @@ struct WeightedSolveContext
 
 WeightedCost GetWeightedCost(const WeightedSolveContext& context, moveit::core::RobotState& state, const std::vector<double>& joints)
 {
-	const Options& options = context.options;
+	const SolveSettings& options = context.options;
 	const Eigen::Index num_joints = static_cast<Eigen::Index>(joints.size());
 	const Eigen::MatrixXd jacobian = GetToolJacobian(state, context.group, context.tool, joints, options.ignore_roll);
 	WeightedCost cost;
@@ -354,7 +354,7 @@ WeightedCost GetWeightedCost(const WeightedSolveContext& context, moveit::core::
 }
 
 // Levenberg-Marquardt on the weighted cost; checks run at the end, cheapest pose first.
-Result SolveWeighted(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const Options& options)
+Result SolveWeighted(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const SolveSettings& options)
 {
 	const double max_joint_step = 0.1;  // rad
 	const int max_damping_tries = 3;
@@ -419,7 +419,7 @@ Result SolveWeighted(const planning_scene_monitor::PlanningSceneMonitorPtr& scen
 
 // Priority steps: close pairs, then pose error, then manipulability.
 // Joints pushed past a limit are frozen and the step re-solved.
-Result SolvePriority(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const Options& options)
+Result SolvePriority(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const SolveSettings& options)
 {
 	const double damping = 0.01;
 	const double max_joint_step = 0.1;  // rad
@@ -504,7 +504,7 @@ Result SolvePriority(const planning_scene_monitor::PlanningSceneMonitorPtr& scen
 
 }  // namespace
 
-Result Solve(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const Options& options)
+Result Solve(const planning_scene_monitor::PlanningSceneMonitorPtr& scene, moveit::core::RobotState& state, const moveit::core::JointModelGroup* group, const moveit::core::LinkModel* tool, const Eigen::Isometry3d& target, const std::vector<double>& start, const SolveSettings& options)
 {
 	if (options.try_exact_first || options.exact_only)
 	{
