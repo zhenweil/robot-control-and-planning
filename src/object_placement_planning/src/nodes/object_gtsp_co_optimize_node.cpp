@@ -92,7 +92,7 @@ public:
 		const std::vector<Joints> tour_poses = optimizer.getPosesInTourOrder(solution.placement_ik, solution.order);
 		scene_geometry::MoveObject(this->scene, scene_geometry::MakeIsometry(object_position, this->object_rotation));
 		const PlannedTour planned_tour = this->planTour(tour_poses, optimizer.getCountedJoints(), optimizer.getEdgeWeights());
-		const double smallest_margin = optimizer.getSmallestJointMargin(tour_poses);
+		const double smallest_margin = optimizer.computeSmallestJointMargin(tour_poses);
 		const double seconds = get_elapsed_seconds();
 		if (all_reached)
 			RCLCPP_INFO(this->get_logger(), "Done. Object abs (%.4f, %.4f, %.4f) m -- reaches all %d poses, planned length %.1f deg (%d failed edges), %d reconfigurations, smallest joint margin %.2f deg beyond the hard limit; planned time %.2f s for reference (%.1f s).", object_position.x(), object_position.y(), object_position.z(), num_viewpoints, planned_tour.length * degrees_per_radian, planned_tour.num_failed_edges, solution.num_reconfigurations, smallest_margin * degrees_per_radian, planned_tour.time, seconds);

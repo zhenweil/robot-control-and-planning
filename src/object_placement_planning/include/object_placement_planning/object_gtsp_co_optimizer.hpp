@@ -163,7 +163,7 @@ public:
 
 	const std::vector<int>& getCountedJoints() const;
 	const joint_travel::EdgeWeights& getEdgeWeights() const;
-	double getSmallestJointMargin(const std::vector<Joints>& joint_poses) const;
+	double computeSmallestJointMargin(const std::vector<Joints>& joint_poses) const;
 	std::vector<Joints> getPosesInTourOrder(const PlacementIkSolutions& placement_ik, const std::vector<int>& order) const;
 	// IK for every viewpoint, then the order and poses improved and scored.
 	TourSolution solveTourAtPosition(const Eigen::Vector3d& object_position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses, const std::vector<int>& order);
@@ -171,26 +171,26 @@ public:
 
 private:
 	// Descent steps
-	bool takeReachStep(TourSolution& solution, double& reconfiguration_step, int iteration);
+	bool runKmeReachStep(TourSolution& solution, double& reconfiguration_step, int iteration);
+	bool runCpdStep(TourSolution& solution, double& object_step, int iteration);
+
 	bool moveTowardMisses(TourSolution& solution, Eigen::Vector3d& kept_direction, int iteration);
 	bool expandMarginsOfMisses(TourSolution& solution, double object_step, const Eigen::Vector3d& kept_reach_direction, int iteration);
 	bool expandMarginsOfReconfigurations(TourSolution& solution, double& object_step, int iteration);
-	bool slideArmPoses(TourSolution& solution, int iteration);
-	bool moveObjectDownCost(TourSolution& solution, double& object_step, int iteration);
-	void recordObjectMove(const TourSolution& solution, const Eigen::Vector3d& direction);
-
+	bool runPoseSlideStep(TourSolution& solution, int iteration);
+	
 	// Tour scoring at a fixed object position
 	TourSolution improveTourForPlacement(const PlacementIkSolutions& placement_ik, const std::vector<int>& order);
-	void improveOrderAndPoses(TourSolution& solution);
+	void runGtspAndScore(TourSolution& solution);
 	void refinePosesAndScore(TourSolution& solution);
 
 	// Step directions
-	Eigen::Vector3d getMoveTowardMisses(const PlacementIkSolutions& placement_ik) const;
-	Eigen::Vector3d getDirectionDownTourLength(const TourSolution& solution);
-	std::vector<Eigen::VectorXd> getPoseSlidesDownTourLength(const TourSolution& solution);
-	std::vector<Eigen::VectorXd> getTourLengthGradientPerViewpoint(const PlacementIkSolutions& placement_ik, const std::vector<int>& order) const;
-	std::vector<Joints> getPosesAfterSlides(const PlacementIkSolutions& placement_ik, const std::vector<Eigen::VectorXd>& slides, double slide_scale) const;
-	Eigen::Vector3d getKmeDirection(const PlacementIkSolutions& placement_ik, const std::vector<room_margins::Margin>& margins, double object_step, bool& keeps_reached_clear);
+	Eigen::Vector3d computeMoveTowardMisses(const PlacementIkSolutions& placement_ik) const;
+	Eigen::Vector3d computeKmeDirection(const PlacementIkSolutions& placement_ik, const std::vector<room_margins::Margin>& margins, double object_step, bool& keeps_reached_clear);
+	Eigen::Vector3d computeCpdDirection(const TourSolution& solution);
+	std::vector<Eigen::VectorXd> computePoseSlidesDownTourLength(const TourSolution& solution);
+	std::vector<Eigen::VectorXd> computeTourLengthGradientPerViewpoint(const PlacementIkSolutions& placement_ik, const std::vector<int>& order) const;
+	std::vector<Joints> slideArmPoses(const PlacementIkSolutions& placement_ik, const std::vector<Eigen::VectorXd>& slides, double slide_scale) const;
 	Eigen::Vector3d removePartsTighteningMargins(const Eigen::Vector3d& move, const std::vector<room_margins::Margin>& margins) const;
 
 	// KME margins
@@ -198,7 +198,7 @@ private:
 	std::vector<room_margins::Margin> getMarginsOfViewpoints(const PlacementIkSolutions& placement_ik, const std::vector<size_t>& viewpoint_indices, double blocking_multiple);
 	std::vector<room_margins::Margin> getMarginsOfCarriedPoses(const PlacementIkSolutions& placement_ik, const std::vector<size_t>& viewpoint_indices, const Eigen::Vector3d& object_move, double blocking_multiple);
 	std::vector<room_margins::Margin> getMarginsOfReconfigurations(const TourSolution& solution, double blocking_multiple);
-	Eigen::MatrixXd getJointRatePerObjectMove(const Joints& joints) const;
+	Eigen::MatrixXd getJointGradientPerObjectMove(const Joints& joints) const;
 	double getSmallestSingularValue(const Joints& joints) const;
 
 	// IK
@@ -208,7 +208,7 @@ private:
 	closest_ik::Result pushArmToExactClearance(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const closest_ik::Result& closest_result) const;
 	std::vector<IkSolution> keepSolutionsNearBestGap(moveit::core::RobotState& state, const std::vector<closest_ik::Result>& closest_results) const;
 	IkSolution makeIkSolution(moveit::core::RobotState& state, const closest_ik::Result& result) const;
-	double getClearanceShortfall(moveit::core::RobotState& state, const Joints& joints) const;
+	double computeClearanceShortfall(moveit::core::RobotState& state, const Joints& joints) const;
 	bool isCameraSidePair(const std::string& pair_name) const;
 	uint32_t getRandomIkSeed(const Eigen::Vector3d& object_position, size_t viewpoint_index) const;
 
@@ -236,10 +236,6 @@ private:
 	double getElapsedSeconds() const;
 	void runInParallel(size_t num_items, const std::function<void(moveit::core::RobotState& thread_state, size_t item_index)>& work) const;
 
-	// Logging
-	void logTourSolution(const std::string& label, const TourSolution& solution) const;
-	void logMissedViewpoints(const PlacementIkSolutions& placement_ik);
-
 	rclcpp::Node::SharedPtr node;
 	moveit::core::RobotModelConstPtr model;
 	planning_scene_monitor::PlanningSceneMonitorPtr scene;
@@ -258,16 +254,21 @@ private:
 	std::chrono::steady_clock::time_point start_time;
 
 	// Caches valid at one object position; cleared when it moves.
-	std::map<std::pair<Joints, Joints>, std::pair<bool, Joints>> straight_path_cache;  // (from, to) -> (followed, end pose)
-	Eigen::Vector3d straight_path_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
+	std::mutex neighbor_ik_cache_mutex;
 	std::mutex straight_path_cache_mutex;
 	std::map<std::pair<size_t, Joints>, NeighborIkResult> neighbor_ik_cache;  // (viewpoint, start pose) -> result
+	std::map<std::pair<Joints, Joints>, std::pair<bool, Joints>> straight_path_cache;  // (from, to) -> (followed, end pose)
 	Eigen::Vector3d neighbor_ik_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
-	std::mutex neighbor_ik_cache_mutex;
+	Eigen::Vector3d straight_path_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
 
 	ProgressDisplay progress_display;
 	std::vector<Eigen::Vector3d> object_trail;  // object positions so far
 	std::set<std::pair<std::string, int>> published_marker_keys;
+
+	// Logging
+	void logMissedViewpoints(const PlacementIkSolutions& placement_ik);
+	void logTourSolution(const std::string& label, const TourSolution& solution) const;
+	void recordObjectMove(const TourSolution& solution, const Eigen::Vector3d& direction);
 };
 
 }  // namespace object_gtsp_co_optimize
