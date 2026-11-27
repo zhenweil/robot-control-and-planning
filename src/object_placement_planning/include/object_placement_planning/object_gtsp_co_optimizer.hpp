@@ -202,27 +202,26 @@ private:
 	double getSmallestSingularValue(const Joints& joints) const;
 
 	// IK
-	PlacementIkSolutions solvePlacement(const Eigen::Vector3d& object_position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses, const PlacementIkSolutions* kept_misses = nullptr);
+	PlacementIkSolutions solveIkForAllViewpoints(const Eigen::Vector3d& object_position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses, const PlacementIkSolutions* kept_misses = nullptr);
 	std::vector<closest_ik::Result> solveClosestIkFromStarts(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const std::vector<Joints>& starts, bool push_for_clearance);
-	closest_ik::Result solveSmallestGapIk(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const Joints& start);
 	closest_ik::Result pushArmToExactClearance(moveit::core::RobotState& state, const Eigen::Isometry3d& target, const closest_ik::Result& closest_result) const;
 	std::vector<IkSolution> keepSolutionsNearBestGap(moveit::core::RobotState& state, const std::vector<closest_ik::Result>& closest_results) const;
-	IkSolution makeIkSolution(moveit::core::RobotState& state, const closest_ik::Result& result) const;
+	IkSolution scoreIkResult(moveit::core::RobotState& state, const closest_ik::Result& result) const;
 	double computeClearanceShortfall(moveit::core::RobotState& state, const Joints& joints) const;
-	bool isCameraSidePair(const std::string& pair_name) const;
 	uint32_t getRandomIkSeed(const Eigen::Vector3d& object_position, size_t viewpoint_index) const;
+	bool isCollisionPairOnCamera(const std::string& pair_name) const;
 
 	// Viewpoint order and edges
-	std::vector<int> reorderTourWithGtsp(PlacementIkSolutions& placement_ik, const std::vector<int>& order);
-	std::vector<std::vector<Joints>> collectGtspOptions(PlacementIkSolutions& placement_ik, const std::vector<int>& order);
 	void bringMissesCloserFromNeighbors(PlacementIkSolutions& placement_ik, const std::vector<int>& order);
+	std::vector<int> reorderTourWithGtsp(PlacementIkSolutions& placement_ik, const std::vector<int>& order);
 	int followTourAlongStraightCameraPaths(PlacementIkSolutions& placement_ik, const std::vector<int>& order);
+	std::vector<std::vector<Joints>> collectIkPoseCandidatesPerViewpointForGtsp(PlacementIkSolutions& placement_ik, const std::vector<int>& order);
 	std::vector<size_t> getReconfigurationEdges(const PlacementIkSolutions& placement_ik, const std::vector<int>& order, std::vector<Joints>* arrival_poses = nullptr);
-	bool followStraightCameraPath(moveit::core::RobotState& state, const Joints& from_pose, const Joints& to_pose, Joints& end_pose);
 	std::vector<std::pair<size_t, double>> getBlockedEdgeCharges(const PlacementIkSolutions& placement_ik, const std::vector<int>& order);
+	bool followStraightCameraPath(moveit::core::RobotState& state, const Joints& from_pose, const Joints& to_pose, Joints& end_pose);
 	bool isStraightJointMoveCollisionFree(moveit::core::RobotState& state, const Joints& from_pose, const Joints& to_pose) const;
 	void unwrapFullTurnsAlongTour(PlacementIkSolutions& placement_ik, const std::vector<int>& order) const;
-	void unwrapFullTurnsToward(Joints& pose, const Joints& reference) const;
+	void unwrapFullTurns(Joints& pose, const Joints& reference) const;
 
 	// Small helpers
 	const Joints& getPoseBefore(const PlacementIkSolutions& placement_ik, const std::vector<int>& order, size_t tour_position) const;
