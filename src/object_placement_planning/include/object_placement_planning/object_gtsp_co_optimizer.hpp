@@ -2,23 +2,23 @@
 // Object placement and coverage tour, optimized together in one descent.
 // Each iteration: reach step and KME, pose slides, then CPD.
 
-#include <chrono>
-#include <cstdint>
-#include <functional>
-#include <limits>
-#include <map>
-#include <memory>
-#include <mutex>
 #include <set>
+#include <map>
+#include <mutex>
+#include <chrono>
+#include <limits>
+#include <memory>
 #include <string>
-#include <utility>
 #include <vector>
-
+#include <cstdint>
+#include <utility>
+#include <functional>
 #include <Eigen/Geometry>
-#include <moveit/planning_scene_monitor/planning_scene_monitor.h>
+
+#include <rclcpp/rclcpp.hpp>
 #include <moveit/robot_model/robot_model.h>
 #include <moveit/robot_state/robot_state.h>
-#include <rclcpp/rclcpp.hpp>
+#include <moveit/planning_scene_monitor/planning_scene_monitor.h>
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include "object_placement_planning/closest_ik.hpp"
@@ -181,8 +181,8 @@ private:
 	
 	// Tour scoring at a fixed object position
 	TourSolution improveTourForPlacement(const PlacementIkSolutions& placement_ik, const std::vector<int>& order);
-	void runGtspAndScore(TourSolution& solution);
 	void refinePosesAndScore(TourSolution& solution);
+	void runGtspAndScore(TourSolution& solution);
 
 	// Step directions
 	Eigen::Vector3d computeMoveTowardMisses(const PlacementIkSolutions& placement_ik) const;
@@ -198,8 +198,6 @@ private:
 	std::vector<room_margins::Margin> getMarginsOfViewpoints(const PlacementIkSolutions& placement_ik, const std::vector<size_t>& viewpoint_indices, double blocking_multiple);
 	std::vector<room_margins::Margin> getMarginsOfCarriedPoses(const PlacementIkSolutions& placement_ik, const std::vector<size_t>& viewpoint_indices, const Eigen::Vector3d& object_move, double blocking_multiple);
 	std::vector<room_margins::Margin> getMarginsOfReconfigurations(const TourSolution& solution, double blocking_multiple);
-	Eigen::MatrixXd getJointGradientPerObjectMove(const Joints& joints) const;
-	double getSmallestSingularValue(const Joints& joints) const;
 
 	// IK
 	PlacementIkSolutions solveIkForAllViewpoints(const Eigen::Vector3d& object_position, const std::vector<Joints>& start_poses, const std::vector<Joints>& fallback_start_poses, const PlacementIkSolutions* kept_misses = nullptr);
@@ -209,7 +207,6 @@ private:
 	IkSolution scoreIkResult(moveit::core::RobotState& state, const closest_ik::Result& result) const;
 	double computeClearanceShortfall(moveit::core::RobotState& state, const Joints& joints) const;
 	uint32_t getRandomIkSeed(const Eigen::Vector3d& object_position, size_t viewpoint_index) const;
-	bool isCollisionPairOnCamera(const std::string& pair_name) const;
 
 	// Viewpoint order and edges
 	void bringMissesCloserFromNeighbors(PlacementIkSolutions& placement_ik, const std::vector<int>& order);
@@ -224,37 +221,35 @@ private:
 	void unwrapFullTurns(Joints& pose, const Joints& reference) const;
 
 	// Small helpers
-	const Joints& getPoseBefore(const PlacementIkSolutions& placement_ik, const std::vector<int>& order, size_t tour_position) const;
-	std::vector<Joints> getChosenJoints(const PlacementIkSolutions& placement_ik) const;
+	void placeObjectAt(const Eigen::Vector3d& object_position);
+	bool isAllReached(const PlacementIkSolutions& placement_ik) const;
+	Eigen::Vector3d clampToSearchBox(const Eigen::Vector3d& position) const;
 	const moveit::core::VariableBounds& getJointBounds(size_t joint_index) const;
+	std::vector<Joints> convertIkSolutionsToVectorOfJoints(const PlacementIkSolutions& placement_ik) const;
 	std::vector<size_t> getViewpointsWithReach(const PlacementIkSolutions& placement_ik, bool reached) const;
 	Eigen::Isometry3d getViewpointTarget(const Eigen::Vector3d& object_position, size_t viewpoint_index) const;
-	void placeObjectAt(const Eigen::Vector3d& object_position);
-	Eigen::Vector3d clampToSearchBox(const Eigen::Vector3d& position) const;
-	bool isAllReached(const PlacementIkSolutions& placement_ik) const;
-	double getElapsedSeconds() const;
 	void runInParallel(size_t num_items, const std::function<void(moveit::core::RobotState& thread_state, size_t item_index)>& work) const;
 
 	rclcpp::Node::SharedPtr node;
 	moveit::core::RobotModelConstPtr model;
-	planning_scene_monitor::PlanningSceneMonitorPtr scene;
 	std::unique_ptr<moveit::core::RobotState> state;
+	planning_scene_monitor::PlanningSceneMonitorPtr scene;
 	const moveit::core::JointModelGroup* group = nullptr;
 	const moveit::core::LinkModel* tool = nullptr;
 	std::set<std::string> camera_side_links;  // excluded from the arm clearance
 
-	std::vector<Eigen::Isometry3d> viewpoints;  // relative to the object position
-	Eigen::Matrix3d object_rotation = Eigen::Matrix3d::Identity();
 	Joints home_pose;
 	Settings settings;
 	std::vector<int> counted_joints;  // joints in the tour length; the camera spin is left out
 	std::vector<Joints> reference_postures;
-	unsigned int num_threads = 1;
-	std::chrono::steady_clock::time_point start_time;
-
+	std::vector<Eigen::Isometry3d> viewpoints;  // relative to the object position
+	Eigen::Matrix3d object_rotation = Eigen::Matrix3d::Identity();
+	
 	// Caches valid at one object position; cleared when it moves.
+	unsigned int num_threads = 1;
 	std::mutex neighbor_ik_cache_mutex;
 	std::mutex straight_path_cache_mutex;
+	std::chrono::steady_clock::time_point start_time;
 	std::map<std::pair<size_t, Joints>, NeighborIkResult> neighbor_ik_cache;  // (viewpoint, start pose) -> result
 	std::map<std::pair<Joints, Joints>, std::pair<bool, Joints>> straight_path_cache;  // (from, to) -> (followed, end pose)
 	Eigen::Vector3d neighbor_ik_cache_position = Eigen::Vector3d::Constant(std::numeric_limits<double>::quiet_NaN());
